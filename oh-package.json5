@@ -14,9 +14,9 @@
     "ArkTS",
     "RDB"
   ],
-  "homepage": "https://github.com/offlinecat/ocorm",
+  "homepage": "https://github.com/offlinecat-dev/OCNetORM",
   "bugs": {
-    "url": "https://github.com/offlinecat/ocorm/issues"
+    "url": "https://github.com/offlinecat-dev/OCNetORM/issues"
   },
   "dependencies": {},
   "devDependencies": {},
