@@ -3,7 +3,7 @@
   "version": "2.4.12",
   "description": "A lightweight SQLite ORM framework designed for HarmonyOS (Next/OpenHarmony). Built on @ohos.data.relationalStore with Data Mapper and Repository patterns.",
   "main": "Index.ets",
-  "author": "krex",
+  "author": "offlinecat-dev",
   "license": "MIT",
   "keywords": [
     "HarmonyOS",
