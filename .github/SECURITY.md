@@ -26,7 +26,7 @@
    - 点击 "Report a vulnerability"
 
 2. **Email**
-   - 发送邮件至：offlinecat-dev@example.com
+   - 发送邮件至：offlinecat-dev@Outlook.com
    - 邮件主题请标注：`[SECURITY] 漏洞报告`
 
 ### 报告内容

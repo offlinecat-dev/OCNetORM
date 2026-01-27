@@ -37,7 +37,7 @@
 如发现辱骂、骚扰或其他不可接受的行为，请通过以下方式报告：
 
 - **GitHub Issues**: [Report](https://github.com/offlinecat-dev/OCNetORM/issues)
-- **Email**: offlinecat-dev@example.com
+- **Email**: offlinecat-dev@Outlook.com
 
 所有投诉都将被审查和调查，并将根据具体情况作出必要和适当的回应。项目团队有义务对事件报告者保密。
 
