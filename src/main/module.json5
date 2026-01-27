@@ -1,0 +1,12 @@
+{
+  "module": {
+    "name": "OCORM",
+    "type": "har",
+    "deviceTypes": [
+      "default",
+      "tablet",
+      "phone",
+      "2in1"
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "ocorm",
+  "version": "2.4.12",
+  "description": "A lightweight SQLite ORM framework designed for HarmonyOS (Next/OpenHarmony). Built on @ohos.data.relationalStore with Data Mapper and Repository patterns.",
+  "main": "Index.ets",
+  "author": "krex",
+  "license": "MIT",
+  "keywords": [
+    "HarmonyOS",
+    "OpenHarmony",
+    "ORM",
+    "SQLite",
+    "Database",
+    "ArkTS",
+    "RDB"
+  ],
+  "homepage": "https://github.com/offlinecat/ocorm",
+  "bugs": {
+    "url": "https://github.com/offlinecat/ocorm/issues"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://ohpm.openharmony.cn/#/"
+  }
+}

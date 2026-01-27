@@ -1,0 +1,296 @@
+import { describe, beforeAll, beforeEach, afterEach, afterAll, it, expect } from '@ohos/hypium';
+import { MetadataStorage } from '../../main/ets/core/MetadataStorage';
+import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
+import { RelationMetadata } from '../../main/ets/core/RelationMetadata';
+import { RelationType } from '../../main/ets/types/RelationType';
+import { QueryBuilder } from '../../main/ets/query/QueryBuilder';
+import { ConditionOperator } from '../../main/ets/types/ConditionOperator';
+import { LogicalOperator } from '../../main/ets/query/WhereCondition';
+import { EntityNotRegisteredError } from '../../main/ets/errors/MetadataError';
+import { InvalidConditionError, SubQueryError } from '../../main/ets/errors/QueryError';
+import { RelationNotFoundError } from '../../main/ets/errors/RelationError';
+
+const setupTestEntity = (): void => {
+  const storage = MetadataStorage.getInstance();
+  storage.registerEntity('User', 'users');
+  const idColumn = new ColumnMetadata('id', 'id');
+  idColumn.isPrimaryKey = true;
+  storage.registerColumn('User', idColumn);
+  storage.registerColumn('User', new ColumnMetadata('name', 'user_name'));
+  storage.registerColumn('User', new ColumnMetadata('email', 'user_email'));
+  storage.registerColumn('User', new ColumnMetadata('age', 'user_age'));
+};
+
+const setupSoftDeleteEntity = (): void => {
+  const storage = MetadataStorage.getInstance();
+  storage.registerEntity('Article', 'articles');
+  const idColumn = new ColumnMetadata('id', 'id');
+  idColumn.isPrimaryKey = true;
+  storage.registerColumn('Article', idColumn);
+  storage.registerColumn('Article', new ColumnMetadata('title', 'title'));
+  const metadata = storage.getEntityMetadata('Article');
+  if (metadata) {
+    metadata.setSoftDelete(true, 'deleted_at');
+    storage.registerColumn('Article', new ColumnMetadata('deletedAt', 'deleted_at'));
+  }
+};
+
+const setupRelations = (): void => {
+  const storage = MetadataStorage.getInstance();
+  storage.registerEntity('Post', 'posts');
+  const idColumn = new ColumnMetadata('id', 'id');
+  idColumn.isPrimaryKey = true;
+  storage.registerColumn('Post', idColumn);
+  storage.registerColumn('Post', new ColumnMetadata('userId', 'user_id'));
+  storage.registerColumn('Post', new ColumnMetadata('title', 'post_title'));
+  const relation = new RelationMetadata(RelationType.ONE_TO_MANY, 'User', 'Post', 'posts', 'user_id');
+  storage.registerRelation('User', relation);
+};
+
+export default function queryBuilderTest() {
+  describe('queryBuilderTest', () => {
+    beforeAll(() => {
+    });
+    beforeEach(() => {
+      MetadataStorage.resetInstance();
+    });
+    afterEach(() => {
+    });
+    afterAll(() => {
+    });
+
+    it('should throw EntityNotRegisteredError for unregistered entity', 0, () => {
+      let caught = false;
+      try {
+        new QueryBuilder('UnknownEntity');
+      } catch (error) {
+        caught = error instanceof EntityNotRegisteredError;
+      }
+      expect(caught).assertEqual(true);
+    });
+
+    it('should create builder for registered entity', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      expect(builder.getEntityName()).assertEqual('User');
+      expect(builder.getTableName()).assertEqual('users');
+      expect(builder.getEntityMetadata() !== null).assertEqual(true);
+    });
+
+    it('where should add condition with resolved column name', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.where('name', ConditionOperator.EQUAL, 'Alice');
+      const conditions = builder.getConditions();
+      expect(conditions.length).assertEqual(1);
+      expect(conditions[0].column).assertEqual('user_name');
+      expect(conditions[0].operator).assertEqual(ConditionOperator.EQUAL);
+      expect(conditions[0].value).assertEqual('Alice');
+      expect(conditions[0].logicalOperator).assertEqual(LogicalOperator.AND);
+    });
+
+    it('where should throw InvalidConditionError for invalid column', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      let caught = false;
+      try {
+        builder.where('invalidColumn', ConditionOperator.EQUAL, 'test');
+      } catch (error) {
+        caught = error instanceof InvalidConditionError;
+      }
+      expect(caught).assertEqual(true);
+    });
+
+    it('andWhere should add AND condition', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.where('name', ConditionOperator.EQUAL, 'Alice')
+        .andWhere('age', ConditionOperator.GREATER, 18);
+      const conditions = builder.getConditions();
+      expect(conditions.length).assertEqual(2);
+      expect(conditions[1].logicalOperator).assertEqual(LogicalOperator.AND);
+    });
+
+    it('orWhere should add OR condition', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.where('name', ConditionOperator.EQUAL, 'Alice')
+        .orWhere('name', ConditionOperator.EQUAL, 'Bob');
+      const conditions = builder.getConditions();
+      expect(conditions.length).assertEqual(2);
+      expect(conditions[1].logicalOperator).assertEqual(LogicalOperator.OR);
+    });
+
+    it('whereIn should add IN condition', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.whereIn('id', [1, 2, 3]);
+      const conditions = builder.getConditions();
+      expect(conditions[0].operator).assertEqual(ConditionOperator.IN);
+      expect(Array.isArray(conditions[0].value)).assertEqual(true);
+    });
+
+    it('whereNull should add IS_NULL condition', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.whereNull('email');
+      const conditions = builder.getConditions();
+      expect(conditions[0].operator).assertEqual(ConditionOperator.IS_NULL);
+    });
+
+    it('whereBetween should add BETWEEN condition', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.whereBetween('age', 18, 65);
+      const conditions = builder.getConditions();
+      expect(conditions[0].operator).assertEqual(ConditionOperator.BETWEEN);
+      expect(conditions[0].value).assertEqual(18);
+      expect(conditions[0].secondValue).assertEqual(65);
+    });
+
+    it('whereLike should add LIKE condition', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.whereLike('name', '%test%');
+      const conditions = builder.getConditions();
+      expect(conditions[0].operator).assertEqual(ConditionOperator.LIKE);
+    });
+
+    it('orderBy should add order clause', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.orderBy('name', 'ASC');
+      const orderBys = builder.getOrderByColumns();
+      expect(orderBys.length).assertEqual(1);
+      expect(orderBys[0].column).assertEqual('user_name');
+      expect(orderBys[0].direction).assertEqual('ASC');
+    });
+
+    it('limit should set limit value', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.limit(10);
+      expect(builder.getLimitValue()).assertEqual(10);
+    });
+
+    it('offset should set offset value', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.offset(20);
+      expect(builder.getOffsetValue()).assertEqual(20);
+    });
+
+    it('select should set selected columns', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.select(['name', 'email']);
+      const selected = builder.getSelectedColumns();
+      expect(selected.length).assertEqual(2);
+      expect(selected[0]).assertEqual('user_name');
+    });
+
+    it('with should add relation', 0, () => {
+      setupTestEntity();
+      setupRelations();
+      const builder = new QueryBuilder('User');
+      builder.with('posts');
+      expect(builder.hasRelations()).assertEqual(true);
+      expect(builder.getRelationNames()[0]).assertEqual('posts');
+    });
+
+    it('with should throw RelationNotFoundError for non-existent relation', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      let caught = false;
+      try {
+        builder.with('invalidRelation');
+      } catch (error) {
+        caught = error instanceof RelationNotFoundError;
+      }
+      expect(caught).assertEqual(true);
+    });
+
+    it('withLazy should add lazy relation', 0, () => {
+      setupTestEntity();
+      setupRelations();
+      const builder = new QueryBuilder('User');
+      builder.withLazy('posts');
+      expect(builder.hasLazyRelations()).assertEqual(true);
+    });
+
+    it('withDeleted should set includeDeleted flag', 0, () => {
+      setupSoftDeleteEntity();
+      const builder = new QueryBuilder('Article');
+      builder.withDeleted();
+      expect(builder.isIncludeDeleted()).assertEqual(true);
+    });
+
+    it('onlyDeleted should set onlyDeleted flag', 0, () => {
+      setupSoftDeleteEntity();
+      const builder = new QueryBuilder('Article');
+      builder.onlyDeleted();
+      expect(builder.isOnlyDeleted()).assertEqual(true);
+    });
+
+    it('getSoftDeleteCondition should return IS_NULL for default', 0, () => {
+      setupSoftDeleteEntity();
+      const builder = new QueryBuilder('Article');
+      const condition = builder.getSoftDeleteCondition();
+      expect(condition !== null).assertEqual(true);
+      if (condition) {
+        expect(condition.operator).assertEqual(ConditionOperator.IS_NULL);
+      }
+    });
+
+    it('paginate should set page and size', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.paginate(2, 10);
+      expect(builder.getPageNumber()).assertEqual(2);
+      expect(builder.getPageSizeValue()).assertEqual(10);
+      expect(builder.hasPagination()).assertEqual(true);
+    });
+
+    it('reset should clear all builder state', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.where('name', ConditionOperator.EQUAL, 'test').limit(10);
+      builder.reset();
+      expect(builder.getConditions().length).assertEqual(0);
+      expect(builder.getLimitValue()).assertEqual(0);
+    });
+
+    it('whereExists should add sub query', 0, () => {
+      setupTestEntity();
+      setupRelations();
+      const builder = new QueryBuilder('User');
+      builder.whereExists('posts', (subQuery) => {
+        subQuery.where('title', ConditionOperator.LIKE, '%test%');
+      });
+      expect(builder.hasSubQueries()).assertEqual(true);
+      expect(builder.getSubQueries().length).assertEqual(1);
+    });
+
+    it('whereExists should throw for non-existent relation', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      let caught = false;
+      try {
+        builder.whereExists('invalidRelation', () => {});
+      } catch (error) {
+        caught = error instanceof RelationNotFoundError;
+      }
+      expect(caught).assertEqual(true);
+    });
+
+    it('getQueryDescription should build description', 0, () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      builder.where('name', ConditionOperator.EQUAL, 'Alice').limit(10);
+      const desc = builder.getQueryDescription();
+      expect(desc.includes('FROM: users')).assertEqual(true);
+      expect(desc.includes('WHERE:')).assertEqual(true);
+      expect(desc.includes('LIMIT: 10')).assertEqual(true);
+    });
+  });
+}
