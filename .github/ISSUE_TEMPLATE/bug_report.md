@@ -43,7 +43,7 @@ const repo = new Repository('User')
 
 ## 环境信息
 
-- **OCORM 版本**: [如 2.4.12]
+- **OCORM 版本**: [如 2.4.14]
 - **HarmonyOS 版本**: [如 HarmonyOS NEXT]
 - **DevEco Studio 版本**: [如 5.0.0]
 - **设备**: [如 模拟器 / Mate 60]
