@@ -166,8 +166,8 @@
 
 | 方法 | 参数 | 返回值 | 说明 |
 |------|------|--------|------|
-| `setTransient(key, value)` | `key: string, value: Object \| null` | `void` | 设置临时数据 |
-| `getTransient(key)` | `key: string` | `Object \| null` | 获取临时数据 |
+| `setTransient(key, value)` | `key: string, value: ValueType` | `void` | 设置临时数据 |
+| `getTransient(key)` | `key: string` | `ValueType` | 获取临时数据 |
 | `getTransientKeys()` | 无 | `Array<string>` | 获取所有临时数据键 |
 
 ### 关联数据
@@ -176,7 +176,7 @@
 |------|------|--------|------|
 | `setRelatedSingle(name, entity)` | `name: string, entity: EntityData \| null` | `void` | 设置单个关联实体 |
 | `setRelatedArray(name, entities)` | `name: string, entities: Array<EntityData>` | `void` | 设置关联实体数组 |
-| `getRelatedValue(name)` | `name: string` | `RelatedValue \| null` | 获取关联值 |
+| `getRelatedValue(name)` | `name: string` | `RelatedDataValue \| null` | 获取关联值 |
 | `getRelatedPropertyNames()` | 无 | `Array<string>` | 获取所有关联属性名 |
 
 ---
@@ -246,7 +246,6 @@
 | `logInfo(infoMessage)` | `infoMessage: string` | `void` | 记录信息日志 |
 
 ---
-
 ## ViewModelMapper API
 
 ### 静态方法
@@ -256,30 +255,37 @@
 | `toViewModel<T>(entityData, factory, mapper)` | `entityData: EntityData, factory: ViewModelFactory<T>, mapper: PropertyMapper<T>` | `T` | EntityData → ViewModel |
 | `toViewModelWithConfig<T>(entityData, config)` | `entityData: EntityData, config: ViewModelMappingConfig<T>` | `T` | 使用配置转换 |
 | `toEntityData<T>(viewModel, entityName, propertyNames, valueGetter)` | `viewModel: T, entityName: string, propertyNames: Array<string>, valueGetter: ReversePropertyMapper<T>` | `EntityData` | ViewModel → EntityData |
+| `toEntityDataWithConfig<T>(viewModel, config)` | `viewModel: T, config: ViewModelMappingConfig<T>` | `EntityData` | 使用配置转换（ViewModel → EntityData） |
 | `toViewModelArray<T>(entityDataArray, factory, mapper)` | `entityDataArray: Array<EntityData>, factory: ViewModelFactory<T>, mapper: PropertyMapper<T>` | `Array<T>` | 批量转换 |
+| `toEntityDataArray<T>(viewModelArray, entityName, propertyNames, valueGetter)` | `viewModelArray: Array<T>, entityName: string, propertyNames: Array<string>, valueGetter: ReversePropertyMapper<T>` | `Array<EntityData>` | 批量转换（ViewModel → EntityData） |
 | `toPropertyMap(entityData)` | `entityData: EntityData` | `Map<string, ValueType>` | 转换为 Map |
 | `fromPropertyMap(entityName, propertyMap)` | `entityName: string, propertyMap: Map<string, ValueType>` | `EntityData` | 从 Map 创建 |
 
 ---
-
 ## 实体定义 API
 
 ### defineEntity
 
 ```typescript
-defineEntity(entityName: string, options: EntityOptions): void
+defineEntity(entityName: string, schema: EntitySchema): EntityMetadata
 ```
 
-### EntityOptions
+### EntitySchema
 
 | 属性 | 类型 | 说明 |
 |------|------|------|
-| `tableName` | `string` | 表名 |
-| `columns` | `Array<ColumnDef>` | 列定义数组 |
-| `softDelete?` | `boolean` | 是否启用软删除 |
-| `deletedAtColumn?` | `string` | 软删除列名 |
+| `tableName?` | `string` | 表名 |
+| `columns` | `Array<ColumnSchema>` | 列定义数组 |
+| `softDelete?` | `boolean \| SoftDeleteSchema` | 软删除配置 |
 
-### ColumnDef
+### SoftDeleteSchema
+
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `propertyName?` | `string` | 实体属性名（默认 `deletedAt`） |
+| `columnName?` | `string` | 数据库列名（默认 `deleted_at`） |
+
+### ColumnSchema
 
 | 属性 | 类型 | 说明 |
 |------|------|------|
@@ -294,14 +300,13 @@ defineEntity(entityName: string, options: EntityOptions): void
 | `length?` | `number` | 最大长度 |
 
 ---
-
 ## 装饰器 API
 
 ### 实体装饰器
 
 | 装饰器 | 参数 | 说明 |
 |--------|------|------|
-| `@Entity(options?)` | `options?: EntityOptions` | 标记类为实体 |
+| `@Table(tableName?)` | `tableName?: string` | 标记类为实体（映射到表） |
 
 ### 列装饰器
 
@@ -314,15 +319,14 @@ defineEntity(entityName: string, options: EntityOptions): void
 | `@SoftDelete(options?)` | `options?: DecoratorColumnOptions` | 软删除时间列 |
 
 ---
-
 ## 初始化 API
 
 ```typescript
 // 初始化 ORM
-await OCORMInit(context: Context, options: OCORMInitOptions): Promise<void>
+await OCORMInit(context: Context, options: OCORMInitOptions): Promise<CreateAllTablesResult | SchemaMigrationExecutionResult | null>
 
 // 关闭连接
-await OCORMClose(): Promise<void>
+await DatabaseManager.getInstance().close(): Promise<void>
 ```
 
 ### OCORMInitOptions
@@ -330,12 +334,25 @@ await OCORMClose(): Promise<void>
 | 属性 | 类型 | 说明 |
 |------|------|------|
 | `config` | `DatabaseConfig` | 数据库配置 |
-| `logging?` | `LoggingConfig` | 日志配置 |
-| `cache?` | `QueryCacheConfig` | 缓存配置 |
+| `databaseManager?` | `DatabaseManagerAdapter` | 自定义 DatabaseManager（用于测试） |
+| `autoCreateTables?` | `boolean` | 是否自动创建表（默认 true） |
+| `autoMigrate?` | `boolean` | 是否启用自动迁移（默认 false） |
+| `autoMigrationOptions?` | `AutoMigrationOptions` | 自动迁移选项 |
+| `migrationManager?` | `MigrationManager` | 自定义 MigrationManager |
+| `enableLogger?` | `boolean` | 是否启用日志（默认使用 `DatabaseConfig.enableLogger`） |
+| `logLevel?` | `LogLevel` | 日志级别（默认使用 `DatabaseConfig.loggerLevel`） |
+| `schemaBuilder?` | `SchemaBuilder` | 自定义 SchemaBuilder |
 
 ### DatabaseConfig
 
 | 属性 | 类型 | 说明 |
 |------|------|------|
 | `name` | `string` | 数据库文件名 |
-| `securityLevel?` | `SecurityLevel` | 安全级别 |
+| `securityLevel` | `relationalStore.SecurityLevel` | 安全级别（默认 S1） |
+| `encrypt` | `boolean` | 是否加密（默认 false） |
+| `enableLogger` | `boolean` | 是否启用日志（默认 false） |
+| `loggerLevel` | `LogLevel` | 日志级别（默认 INFO） |
+| `healthCheckIntervalMs` | `number` | 健康检查间隔（毫秒），0 表示禁用（默认 0） |
+| `enableQueryCache` | `boolean` | 是否启用查询缓存（默认 false） |
+| `queryCacheMaxSize` | `number` | 查询缓存最大条目数（默认 100） |
+| `queryCacheTtlMs` | `number` | 查询缓存 TTL（毫秒，默认 60000） |

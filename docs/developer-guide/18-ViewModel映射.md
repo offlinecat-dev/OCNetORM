@@ -26,6 +26,11 @@ type ReversePropertyMapper<T> = (viewModel: T, propertyName: string) => ValueTyp
 type ViewModelFactory<T> = () => T
 ```
 
+`ValueType` 在 OCORM 中定义为 `string | number | boolean | null`，因此反向映射（ViewModel → EntityData）需要返回基础类型：
+
+- Date 请使用时间戳 `number`
+- 复杂对象请使用 JSON 字符串 `string`
+
 ---
 
 ## 基础用法
@@ -148,6 +153,11 @@ const viewModel = ViewModelMapper.toViewModelWithConfig(entityData, userMappingC
 // ViewModel → EntityData（使用配置）
 const entityData = ViewModelMapper.toEntityDataWithConfig(viewModel, userMappingConfig)
 ```
+
+注意：
+
+- `toViewModelWithConfig` 在未配置 `factory` 时会抛出 `EntityMappingError`
+- `toEntityDataWithConfig` 在未配置 `reverseMapper` 时会抛出 `EntityMappingError`
 
 ### 链式配置
 

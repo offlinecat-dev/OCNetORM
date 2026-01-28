@@ -7,7 +7,7 @@
 ## 创建 QueryBuilder
 
 ```typescript
-import { QueryBuilder, Repository } from '@aspect/ocorm'
+import { QueryBuilder, Repository } from '@offlinecat/ocorm'
 
 // 方式1：直接创建
 const qb = new QueryBuilder('User')
@@ -24,7 +24,7 @@ const qb = userRepo.createQueryBuilder()
 QueryBuilder 构建查询后，需要通过 `QueryExecutor` 执行：
 
 ```typescript
-import { QueryBuilder, QueryExecutor, ConditionOperator } from '@aspect/ocorm'
+import { QueryBuilder, QueryExecutor, ConditionOperator } from '@offlinecat/ocorm'
 
 const qb = new QueryBuilder('User')
 qb.where('age', ConditionOperator.GREATER, 18)
@@ -37,7 +37,7 @@ const executor = new QueryExecutor(qb)
 const users = await executor.get()
 
 // 获取单条结果
-const user = await executor.first()
+const user = await executor.getOne()
 
 // 获取数量
 const count = await executor.count()
@@ -51,22 +51,21 @@ const paginated = await executor.getPaginated()
 ## ConditionOperator 操作符
 
 ```typescript
-import { ConditionOperator } from '@aspect/ocorm'
+import { ConditionOperator } from '@offlinecat/ocorm'
 
 enum ConditionOperator {
-  EQUAL = 'EQUAL',               // =
-  NOT_EQUAL = 'NOT_EQUAL',       // !=
-  GREATER = 'GREATER',           // >
-  GREATER_EQUAL = 'GREATER_EQUAL', // >=
-  LESS = 'LESS',                 // <
-  LESS_EQUAL = 'LESS_EQUAL',     // <=
+  EQUAL = '=',                   // =
+  NOT_EQUAL = '!=',              // !=
+  GREATER = '>',                 // >
+  GREATER_EQUAL = '>=',          // >=
+  LESS = '<',                    // <
+  LESS_EQUAL = '<=',             // <=
   LIKE = 'LIKE',                 // LIKE
-  NOT_LIKE = 'NOT_LIKE',         // NOT LIKE
   IN = 'IN',                     // IN
-  NOT_IN = 'NOT_IN',             // NOT IN
-  IS_NULL = 'IS_NULL',           // IS NULL
-  IS_NOT_NULL = 'IS_NOT_NULL',   // IS NOT NULL
-  BETWEEN = 'BETWEEN'            // BETWEEN
+  NOT_IN = 'NOT IN',             // NOT IN
+  BETWEEN = 'BETWEEN',           // BETWEEN
+  IS_NULL = 'IS NULL',           // IS NULL
+  IS_NOT_NULL = 'IS NOT NULL'    // IS NOT NULL
 }
 ```
 
@@ -75,7 +74,7 @@ enum ConditionOperator {
 ## where - 基础条件
 
 ```typescript
-import { QueryBuilder, ConditionOperator } from '@aspect/ocorm'
+import { QueryBuilder, ConditionOperator } from '@offlinecat/ocorm'
 
 const qb = new QueryBuilder('User')
 
@@ -411,7 +410,7 @@ console.log(qb.getQueryDescription())
 ### 基础查询
 
 ```typescript
-import { QueryBuilder, QueryExecutor, ConditionOperator } from '@aspect/ocorm'
+import { QueryBuilder, QueryExecutor, ConditionOperator } from '@offlinecat/ocorm'
 
 // 查询年龄大于18的活跃用户，按创建时间倒序，取前10条
 const qb = new QueryBuilder('User')

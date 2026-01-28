@@ -178,6 +178,18 @@ console.log(summary)
 //   v3: 创建文章表
 ```
 
+**版本表**：`MigrationManager` 使用内部版本表 `_orm_version` 记录当前 schema 版本。该表会在首次调用 `getCurrentVersionFromDb()` 或执行迁移时自动创建并初始化：
+
+```sql
+CREATE TABLE IF NOT EXISTS _orm_version (
+  id INTEGER PRIMARY KEY,
+  version INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+)
+```
+
+若表中无记录，会自动插入一条初始记录：`id=1, version=0`。
+
 ### MigrationExecutionResult 结果类
 
 ```typescript
@@ -231,6 +243,12 @@ await OCORMInit(this.context, {
   }
 })
 ```
+
+`autoMigrationOptions` 为可选项，未传时使用默认行为：
+
+- includeJoinTables 默认 true（除非显式传 false）
+- mode 默认使用 MigrationManager 的 autoMigrationMode（默认 SAFE）
+- logChanges 默认跟随 MigrationManager.enableLog（默认 true）
 
 ### AutoMigrationMode 迁移模式
 
@@ -326,7 +344,7 @@ interface SchemaChange {
 ```typescript
 const migrationManager = new MigrationManager({
   enableLog: true,                      // 是否记录迁移日志，默认 true
-  logTableName: '_custom_migration_log', // 自定义日志表名
+  logTableName: '_custom_migration_log', // 自定义日志表名（默认 _migrations）
   autoMigrationMode: AutoMigrationMode.SAFE  // 默认自动迁移模式
 })
 ```
@@ -335,22 +353,25 @@ const migrationManager = new MigrationManager({
 
 ## 迁移日志
 
-启用日志后，所有迁移操作会记录到 `_orm_migration_log` 表：
+启用日志后，所有迁移操作会记录到 `_migrations` 表（可通过 `MigrationManagerOptions.logTableName` 自定义）：
 
 ```typescript
 interface MigrationLogRecord {
-  version?: number           // 迁移版本号
-  name?: string              // 迁移名称
-  type: 'MIGRATION' | 'AUTO_SCHEMA'  // 类型
-  direction: 'UP' | 'DOWN'   // 方向
+  version?: number           // 迁移版本号（手动迁移时使用）
+  name?: string              // 迁移名称或描述
+  type: string               // 记录类型（例如：MIGRATION / AUTO_SCHEMA）
+  direction?: string         // 迁移方向（UP / DOWN）
   tableName?: string         // 表名（自动迁移）
   columnName?: string        // 列名（自动迁移）
   sql?: string               // 执行的 SQL
-  summary: string            // 摘要
-  success: boolean           // 是否成功
+  summary?: string           // 摘要
+  success?: boolean          // 是否成功
   errorMessage?: string      // 错误信息
+  createdAt?: number         // 创建时间戳（毫秒）；不传则自动使用 Date.now()
 }
 ```
+
+日志写入失败不会中断迁移主流程（内部会忽略日志写入错误）。
 
 ---
 

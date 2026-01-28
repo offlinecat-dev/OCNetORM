@@ -70,47 +70,36 @@
 ohpm install @offlinecat/ocorm
 ```
 
-## 快速使用
+## 快速开始
 
 ### 1. 定义实体
 
+推荐使用 `defineEntity` 简洁方式：
+
 ```typescript
-import {
-  MetadataStorage,
-  ColumnMetadata,
-  ColumnType,
-  registerEntity,
-  registerAutoIncrementPrimaryKey,
-  createEntityOptions
-} from '@offlinecat/ocorm'
+import { defineEntity, ColumnType } from '@offlinecat/ocorm'
 
-registerEntity('User', createEntityOptions('users'))
-registerAutoIncrementPrimaryKey('User', 'id', 'id')
-
-const storage = MetadataStorage.getInstance()
-
-const nameCol = new ColumnMetadata('name', 'name')
-nameCol.columnType = ColumnType.TEXT
-nameCol.isNullable = false
-storage.registerColumn('User', nameCol)
-
-const emailCol = new ColumnMetadata('email', 'email')
-emailCol.columnType = ColumnType.TEXT
-emailCol.isUnique = true
-storage.registerColumn('User', emailCol)
+defineEntity('User', {
+  tableName: 'users',
+  columns: [
+    { property: 'id', primaryKey: true },
+    { property: 'name', type: ColumnType.TEXT, nullable: false },
+    { property: 'email', type: ColumnType.TEXT, unique: true },
+    { property: 'age', type: ColumnType.INTEGER },
+    { property: 'createdAt', name: 'created_at', type: ColumnType.INTEGER },
+    { property: 'deletedAt', name: 'deleted_at', type: ColumnType.INTEGER }
+  ],
+  softDelete: true  // 启用软删除
+})
 ```
 
 ### 2. 初始化数据库
 
 ```typescript
-import { DatabaseManager, DatabaseConfig, SchemaBuilder } from '@offlinecat/ocorm'
-import { relationalStore } from '@kit.ArkData'
+import { OCORMInit, DatabaseConfig } from '@offlinecat/ocorm'
 
-const config = new DatabaseConfig('app.db', relationalStore.SecurityLevel.S1, false)
-await DatabaseManager.getInstance().initialize(context, config)
-
-const schemaBuilder = new SchemaBuilder()
-await schemaBuilder.createAllTablesWithManager()
+const config = new DatabaseConfig('app.db')
+await OCORMInit(context, { config })
 ```
 
 ### 3. CRUD 操作
@@ -120,58 +109,239 @@ import { Repository, EntityData } from '@offlinecat/ocorm'
 
 const repo = new Repository('User')
 
-// 创建并插入
-const user = EntityData.from('User', {
-  name: '张三',
-  email: 'zhangsan@example.com'
-})
+// 创建
+const user = new EntityData('User')
+user.addProperty('name', '张三', 'string')
+user.addProperty('email', 'zhangsan@example.com', 'string')
+user.addProperty('age', 25, 'number')
 await repo.save(user)
 
 // 查询
 const allUsers = await repo.findAll()
-const user = await repo.findById(1)
+const oneUser = await repo.findById(1)
 
 // 更新
-user.setPropertyValue('name', '李四')
-await repo.save(user)
+oneUser?.setPropertyValue('name', '李四')
+await repo.save(oneUser!)
 
-// 删除
+// 删除（软删除/物理删除自动判断）
 await repo.removeById(1)
+
+// 恢复软删除
+await repo.restore(1)
 ```
 
 ### 4. 链式查询
 
 ```typescript
-const users = await repo.createQueryBuilder()
+import { QueryExecutor, ConditionOperator } from '@offlinecat/ocorm'
+
+const qb = repo.createQueryBuilder()
   .where('age', ConditionOperator.GREATER, 18)
   .andWhere('isActive', ConditionOperator.EQUAL, 1)
   .orderBy('name', 'ASC')
   .limit(10)
-  .getMany()
+
+const executor = new QueryExecutor(qb)
+const users = await executor.get()
 ```
 
-### 5. 事务
+### 5. 分页查询
 
 ```typescript
+// 简单分页
+const result = await repo.findPaginated(1, 20)
+console.log(`第 ${result.page} 页，共 ${result.totalPages} 页，总计 ${result.total} 条`)
+
+// QueryBuilder 分页
+const qb = repo.createQueryBuilder()
+  .where('isActive', ConditionOperator.EQUAL, 1)
+  .paginate(1, 20)
+const paginatedResult = await new QueryExecutor(qb).getPaginated()
+```
+
+### 6. 事务处理
+
+```typescript
+import { TransactionOptions, IsolationLevel } from '@offlinecat/ocorm'
+
+// 基础事务
 await repo.transaction(async (txRepo) => {
   await txRepo.save(user1)
   await txRepo.save(user2)
+  // 抛出异常会自动回滚
 })
+
+// 高级事务（超时、重试、隔离级别）
+const options = TransactionOptions.fromConfig({
+  timeout: 10000,
+  retries: 3,
+  isolation: IsolationLevel.SERIALIZABLE
+})
+await repo.transactionWithOptions(async (txRepo) => {
+  // 关键业务操作
+}, options)
+```
+
+### 7. 批量插入
+
+```typescript
+import { BatchInsertOptions } from '@offlinecat/ocorm'
+
+const users: Array<EntityData> = []
+for (let i = 0; i < 1000; i++) {
+  const user = new EntityData('User')
+  user.addProperty('name', `用户${i}`, 'string')
+  users.push(user)
+}
+
+// 默认（使用事务，执行钩子和验证）
+await repo.batchInsert(users)
+
+// 快速模式（跳过钩子和验证，适合大量数据导入）
+await repo.batchInsert(users, BatchInsertOptions.createFast())
+```
+
+### 8. 关联查询
+
+```typescript
+import { MetadataStorage, RelationMetadata, RelationType } from '@offlinecat/ocorm'
+
+// 注册一对多关系
+const storage = MetadataStorage.getInstance()
+storage.registerRelation('User', new RelationMetadata(
+  RelationType.ONE_TO_MANY, 'User', 'Post', 'posts', 'user_id'
+))
+
+// 预加载关联
+const qb = repo.createQueryBuilder().with('posts')
+const usersWithPosts = await new QueryExecutor(qb).get()
+
+// 访问关联数据
+const posts = usersWithPosts[0]?.getRelatedArray('posts')
+```
+
+### 9. 数据验证
+
+```typescript
+import { ValidationMetadataStorage } from '@offlinecat/ocorm'
+
+const storage = ValidationMetadataStorage.getInstance()
+storage.registerRule('User', 'name', { type: 'required' })
+storage.registerRule('User', 'name', { type: 'length', min: 2, max: 50 })
+storage.registerRule('User', 'email', { type: 'email' })
+
+// save 时自动验证，失败抛出 ValidationError
+await repo.save(user)
+```
+
+### 10. ViewModel 映射
+
+```typescript
+import { ViewModelMapper } from '@offlinecat/ocorm'
+
+class UserViewModel {
+  id: number = 0
+  name: string = ''
+  displayName: string = ''
+}
+
+// EntityData → ViewModel
+const vm = ViewModelMapper.toViewModel(
+  entityData,
+  () => new UserViewModel(),
+  (data, vm) => {
+    vm.id = data.getPropertyValue('id') as number
+    vm.name = data.getPropertyValue('name') as string
+    vm.displayName = `${vm.name} (ID: ${vm.id})`
+  }
+)
+
+// 批量转换
+const viewModels = ViewModelMapper.toViewModelArray(entities, factory, mapper)
+```
+
+### 11. 日志与调试
+
+```typescript
+import { Logger, LogLevel } from '@offlinecat/ocorm'
+
+const logger = Logger.getInstance()
+logger.configure(true, LogLevel.DEBUG)  // 开发环境
+logger.configure(true, LogLevel.ERROR)  // 生产环境
+
+// 敏感数据自动脱敏
+// SQL: SELECT * FROM users WHERE name = '[***]'
+```
+
+### 12. 查询缓存
+
+```typescript
+import { QueryCache } from '@offlinecat/ocorm'
+
+const cache = QueryCache.getInstance()
+cache.configure({
+  maxSize: 200,
+  ttlMs: 60000,
+  enabled: true
+})
+
+// Repository.findById 自动使用缓存
+// 写操作自动使缓存失效
 ```
 
 ## 文档
 
-📚 **[完整开发文档](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/00-目录索引.md)**
+📚 **[完整开发文档](./docs/developer-guide/00-目录索引.md)**
 
-快速链接：
-- [初始化配置](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/01-初始化配置.md)
-- [实体定义](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/02-实体定义.md)
-- [Repository操作](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/04-Repository基础操作.md)
-- [QueryBuilder查询](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/05-QueryBuilder查询.md)
-- [事务处理](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/08-事务处理.md)
-- [关联关系](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/09-一对一关系.md)
-- [错误处理](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/20-错误处理.md)
-- [代码示例集](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/25-代码示例集.md)
+### 入门基础
+| 文档 | 说明 |
+|------|------|
+| [初始化配置](./docs/developer-guide/01-初始化配置.md) | DatabaseConfig、OCORMInit、自动建表 |
+| [实体定义](./docs/developer-guide/02-实体定义.md) | Schema 方式、装饰器方式、EntitySchema |
+| [列类型与选项](./docs/developer-guide/03-列类型与选项.md) | ColumnType、列选项、主键定义 |
+
+### 数据操作
+| 文档 | 说明 |
+|------|------|
+| [Repository操作](./docs/developer-guide/04-Repository基础操作.md) | CRUD、EntityData、SaveResult |
+| [QueryBuilder查询](./docs/developer-guide/05-QueryBuilder查询.md) | 链式 API、ConditionOperator |
+| [分页与排序](./docs/developer-guide/06-分页与排序.md) | PaginatedResult、orderBy |
+| [批量操作](./docs/developer-guide/07-批量操作.md) | batchInsert、BatchInsertOptions |
+| [事务处理](./docs/developer-guide/08-事务处理.md) | TransactionOptions、隔离级别 |
+
+### 关系映射
+| 文档 | 说明 |
+|------|------|
+| [一对一关系](./docs/developer-guide/09-一对一关系.md) | RelationMetadata、外键位置 |
+| [一对多关系](./docs/developer-guide/10-一对多关系.md) | ONE_TO_MANY、MANY_TO_ONE |
+| [多对多关系](./docs/developer-guide/11-多对多关系.md) | 中间表、attach/detach/sync |
+| [关联加载策略](./docs/developer-guide/12-关联加载策略.md) | with 预加载、withLazy 延迟加载 |
+
+### 高级功能
+| 文档 | 说明 |
+|------|------|
+| [软删除](./docs/developer-guide/13-软删除.md) | 软删除配置、restore、withDeleted |
+| [生命周期钩子](./docs/developer-guide/14-生命周期钩子.md) | beforeSave、afterLoad、beforeDelete |
+| [数据验证](./docs/developer-guide/15-数据验证.md) | required、length、email |
+| [Schema迁移](./docs/developer-guide/16-Schema迁移.md) | MigrationManager、自动迁移 |
+
+### 数据处理与运维
+| 文档 | 说明 |
+|------|------|
+| [数据映射](./docs/developer-guide/17-数据映射.md) | EntityData、DataMapper、TypeConverter |
+| [ViewModel映射](./docs/developer-guide/18-ViewModel映射.md) | ViewModelMapper、双向转换 |
+| [日志系统](./docs/developer-guide/19-日志系统.md) | Logger、LogLevel、敏感数据脱敏 |
+| [错误处理](./docs/developer-guide/20-错误处理.md) | OrmError、错误码、国际化 |
+| [查询缓存](./docs/developer-guide/21-查询缓存.md) | QueryCache、TTL、缓存失效 |
+
+### 参考资料
+| 文档 | 说明 |
+|------|------|
+| [API速查表](./docs/developer-guide/22-API速查表.md) | Repository、QueryBuilder、EntityData API |
+| [类型定义速查](./docs/developer-guide/23-类型定义速查.md) | 枚举、接口、结果类型 |
+| [最佳实践](./docs/developer-guide/24-最佳实践.md) | 项目结构、性能优化、常见问题 |
+| [代码示例集](./docs/developer-guide/25-代码示例集.md) | 完整场景代码示例 |
 
 ## 兼容性
 

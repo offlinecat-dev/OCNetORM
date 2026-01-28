@@ -7,7 +7,7 @@
 ## 创建 Repository
 
 ```typescript
-import { Repository } from '@aspect/ocorm'
+import { Repository } from '@offlinecat/ocorm'
 
 // 创建 User 实体的 Repository
 const userRepo = new Repository('User')
@@ -27,7 +27,7 @@ OCORM 使用 `EntityData` 对象在应用层和数据库层之间传递数据。
 ### 创建 EntityData
 
 ```typescript
-import { EntityData } from '@aspect/ocorm'
+import { EntityData } from '@offlinecat/ocorm'
 
 // 创建新实体数据（不含主键，用于插入）
 const newUser = new EntityData('User')
@@ -51,7 +51,7 @@ const data = new EntityData('User')
 data.addProperty('name', '张三', 'string')
 
 // 获取属性值
-const name = data.getProperty('name')  // '张三'
+const name = data.getPropertyValue('name')  // '张三'
 
 // 检查是否有属性
 data.hasProperty('name')  // true
@@ -60,7 +60,7 @@ data.hasProperty('name')  // true
 data.getPropertyNames()  // ['name']
 
 // 获取实体名
-data.getEntityName()  // 'User'
+data.entityName  // 'User'
 ```
 
 ---
@@ -70,6 +70,10 @@ data.getEntityName()  // 'User'
 `save` 方法根据主键自动判断是插入还是更新：
 - 主键为空或 0 → 执行 INSERT
 - 主键有值 → 执行 UPDATE
+
+> **注意**：当数据验证失败（`ValidationError`）或 `beforeSave` 钩子执行失败（`HookExecutionError`）时，`save` 会直接抛出异常。
+
+> **说明**：当前实现中，`update`/`remove` 等通过 `executeSync` 执行的操作返回的 `affectedRows` 为 `1` 表示执行成功，不一定反映数据库真实影响行数。
 
 ### 插入新记录
 
@@ -131,8 +135,8 @@ const userRepo = new Repository('User')
 const user = await userRepo.findById(1)
 
 if (user !== null) {
-  console.log(user.getProperty('name'))
-  console.log(user.getProperty('email'))
+  console.log(user.getPropertyValue('name'))
+  console.log(user.getPropertyValue('email'))
 } else {
   console.log('用户不存在')
 }
@@ -169,7 +173,7 @@ const userRepo = new Repository('User')
 const users = await userRepo.findAll()
 
 for (const user of users) {
-  console.log(user.getProperty('name'))
+  console.log(user.getPropertyValue('name'))
 }
 ```
 
@@ -330,7 +334,7 @@ for (const result of results) {
 使用 `RdbStore.batchInsert` API 实现高性能批量插入。
 
 ```typescript
-import { BatchInsertOptions } from '@aspect/ocorm'
+import { BatchInsertOptions } from '@offlinecat/ocorm'
 
 const userRepo = new Repository('User')
 
@@ -402,7 +406,7 @@ const dataMapper = userRepo.getDataMapper()
 ## 完整 CRUD 示例
 
 ```typescript
-import { Repository, EntityData, defineEntity, ColumnType, OCORMInit, DatabaseConfig } from '@aspect/ocorm'
+import { Repository, EntityData, defineEntity, ColumnType, OCORMInit, DatabaseConfig } from '@offlinecat/ocorm'
 
 // 1. 定义实体
 defineEntity('User', {
@@ -432,10 +436,10 @@ const userId = saveResult.insertId
 
 // 5. 查询用户
 const user = await userRepo.findById(userId)
-console.log(user?.getProperty('name'))
+console.log(user?.getPropertyValue('name'))
 
 // 6. 更新用户
-user?.addProperty('name', '张三（已更新）', 'string')
+user?.setPropertyValue('name', '张三（已更新）')
 if (user) {
   await userRepo.save(user)
 }
