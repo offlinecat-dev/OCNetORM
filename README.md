@@ -161,17 +161,17 @@ await repo.transaction(async (txRepo) => {
 
 ## 文档
 
-📚 **[完整开发文档](./docs/developer-guide/00-目录索引.md)**
+📚 **[完整开发文档](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/00-目录索引.md)**
 
 快速链接：
-- [初始化配置](./docs/developer-guide/01-初始化配置.md)
-- [实体定义](./docs/developer-guide/02-实体定义.md)
-- [Repository操作](./docs/developer-guide/04-Repository基础操作.md)
-- [QueryBuilder查询](./docs/developer-guide/05-QueryBuilder查询.md)
-- [事务处理](./docs/developer-guide/08-事务处理.md)
-- [关联关系](./docs/developer-guide/09-一对一关系.md)
-- [错误处理](./docs/developer-guide/20-错误处理.md)
-- [代码示例集](./docs/developer-guide/25-代码示例集.md)
+- [初始化配置](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/01-初始化配置.md)
+- [实体定义](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/02-实体定义.md)
+- [Repository操作](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/04-Repository基础操作.md)
+- [QueryBuilder查询](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/05-QueryBuilder查询.md)
+- [事务处理](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/08-事务处理.md)
+- [关联关系](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/09-一对一关系.md)
+- [错误处理](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/20-错误处理.md)
+- [代码示例集](https://github.com/offlinecat-dev/OCNetORM/blob/main/docs/developer-guide/25-代码示例集.md)
 
 ## 兼容性
 
@@ -183,12 +183,12 @@ await repo.transaction(async (txRepo) => {
 
 欢迎提交 Issue 和 Pull Request！
 
-- 📖 [贡献指南](./.github/CONTRIBUTING.md) - 如何参与贡献
-- 📜 [行为准则](./.github/CODE_OF_CONDUCT.md) - 社区行为规范
-- 🔒 [安全政策](./.github/SECURITY.md) - 漏洞报告流程
-- 🐛 [Bug 报告模板](./.github/ISSUE_TEMPLATE/bug_report.md) - 提交 Bug
-- ✨ [功能请求模板](./.github/ISSUE_TEMPLATE/feature_request.md) - 提交功能建议
-- 🔀 [PR 模板](./.github/PULL_REQUEST_TEMPLATE.md) - 提交代码
+- 📖 [贡献指南](https://github.com/offlinecat-dev/OCNetORM/blob/main/.github/CONTRIBUTING.md) - 如何参与贡献
+- 📜 [行为准则](https://github.com/offlinecat-dev/OCNetORM/blob/main/.github/CODE_OF_CONDUCT.md) - 社区行为规范
+- 🔒 [安全政策](https://github.com/offlinecat-dev/OCNetORM/blob/main/.github/SECURITY.md) - 漏洞报告流程
+- 🐛 [Bug 报告](https://github.com/offlinecat-dev/OCNetORM/issues/new?template=bug_report.md) - 提交 Bug
+- ✨ [功能请求](https://github.com/offlinecat-dev/OCNetORM/issues/new?template=feature_request.md) - 提交功能建议
+- 🔀 [Pull Request](https://github.com/offlinecat-dev/OCNetORM/pulls) - 提交代码
 
 ## License
 

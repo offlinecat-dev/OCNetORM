@@ -15,6 +15,10 @@
     "RDB"
   ],
   "homepage": "https://github.com/offlinecat-dev/OCNetORM",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/offlinecat-dev/OCNetORM.git"
+  },
   "bugs": {
     "url": "https://github.com/offlinecat-dev/OCNetORM/issues"
   },
