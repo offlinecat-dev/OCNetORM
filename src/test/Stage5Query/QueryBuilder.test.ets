@@ -242,6 +242,23 @@ export default function queryBuilderTest() {
       }
     });
 
+    it('getAllConditions should append soft delete for each OR segment', 0, () => {
+      setupSoftDeleteEntity();
+      const builder = new QueryBuilder('Article');
+      builder.where('title', ConditionOperator.EQUAL, 'A')
+        .orWhere('title', ConditionOperator.EQUAL, 'B');
+
+      const conditions = builder.getAllConditions();
+      expect(conditions.length).assertEqual(4);
+      expect(conditions[0].column).assertEqual('title');
+      expect(conditions[1].column).assertEqual('deleted_at');
+      expect(conditions[1].operator).assertEqual(ConditionOperator.IS_NULL);
+      expect(conditions[2].logicalOperator).assertEqual(LogicalOperator.OR);
+      expect(conditions[2].column).assertEqual('title');
+      expect(conditions[3].column).assertEqual('deleted_at');
+      expect(conditions[3].operator).assertEqual(ConditionOperator.IS_NULL);
+    });
+
     it('paginate should set page and size', 0, () => {
       setupTestEntity();
       const builder = new QueryBuilder('User');

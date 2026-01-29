@@ -84,18 +84,28 @@ export class TypeConverter {
     }
 
     // 根据属性类型进行转换
-    if (propertyType === 'Date' && typeof value === 'number') {
-      // Date 已经是时间戳形式
-      return value
+    if (propertyType === 'Date') {
+      if (value instanceof Date) {
+        return TypeConverter.dateToTimestamp(value)
+      }
+      if (typeof value === 'number') {
+        // Date 已经是时间戳形式
+        return value
+      }
     }
 
     if (propertyType === 'boolean' && typeof value === 'boolean') {
       return TypeConverter.booleanToInt(value)
     }
 
-    if (propertyType === 'object' && typeof value === 'string') {
-      // 对象已经序列化为 JSON 字符串
-      return value
+    if (propertyType === 'object') {
+      if (typeof value === 'string') {
+        // 对象已经序列化为 JSON 字符串
+        return value
+      }
+      if (value !== null && typeof value === 'object') {
+        return TypeConverter.objectToJson(value as object)
+      }
     }
 
     // 根据列类型进行基本转换

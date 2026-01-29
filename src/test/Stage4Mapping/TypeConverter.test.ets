@@ -2,7 +2,7 @@ import { describe, it, expect } from '@ohos/hypium';
 import { ColumnType } from '../../main/ets/types/ColumnType';
 import { TypeConverter } from '../../main/ets/mapping/TypeConverter';
 import { TypeConversionError } from '../../main/ets/errors/MappingError';
-import { DbValueType } from '../../main/ets/types/ValueTypes';
+import { DbValueType, ValueType } from '../../main/ets/types/ValueTypes';
 
 class JsonPayload {
   name: string;
@@ -52,6 +52,16 @@ export default function typeConverterTest() {
 
       const objectJson = TypeConverter.toDbValue('{"k":"v"}', ColumnType.TEXT, 'object');
       expect(objectJson).assertEqual('{"k":"v"}');
+    });
+
+    it('toDbValue should serialize Date and object values', 0, () => {
+      const date = new Date(2024, 0, 1, 0, 0, 0);
+      const dateValue = TypeConverter.toDbValue(date, ColumnType.INTEGER, 'Date');
+      expect(dateValue).assertEqual(date.getTime());
+
+      const payload = { a: 1, b: 'x' };
+      const objectValue = TypeConverter.toDbValue(payload as ValueType, ColumnType.TEXT, 'object');
+      expect(objectValue).assertEqual(JSON.stringify(payload));
     });
 
     it('fromDbValue should convert and throw on mismatch', 0, () => {

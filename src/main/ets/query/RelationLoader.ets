@@ -316,6 +316,7 @@ export class RelationLoader {
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex]
       const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
+      this.applySoftDeleteToPredicates(predicates, targetMetadata)
 
       // 构建 IN 条件
       const rdbValues: Array<relationalStore.ValueType> = []
@@ -482,6 +483,7 @@ export class RelationLoader {
     for (let batchIndex = 0; batchIndex < fkBatches.length; batchIndex++) {
       const batch = fkBatches[batchIndex]
       const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
+      this.applySoftDeleteToPredicates(predicates, targetMetadata)
 
       // 构建 IN 条件
       const rdbValues: Array<relationalStore.ValueType> = []
@@ -651,6 +653,7 @@ export class RelationLoader {
     }
 
     const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
+    this.applySoftDeleteToPredicates(predicates, targetMetadata)
 
     // 构建 IN 条件
     const rdbValues: Array<relationalStore.ValueType> = []
@@ -799,6 +802,7 @@ export class RelationLoader {
     }
 
     const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
+    this.applySoftDeleteToPredicates(predicates, targetMetadata)
 
     // 构建 IN 条件：目标表的外键列 IN 源实体的主键值
     const rdbValues: Array<relationalStore.ValueType> = []
@@ -1070,6 +1074,7 @@ export class RelationLoader {
     for (let batchIndex = 0; batchIndex < targetIdBatches.length; batchIndex++) {
       const batch = targetIdBatches[batchIndex]
       const targetPredicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
+      this.applySoftDeleteToPredicates(targetPredicates, targetMetadata)
 
       const rdbTargetIds: Array<relationalStore.ValueType> = []
       for (let i = 0; i < batch.length; i++) {
@@ -1144,6 +1149,14 @@ export class RelationLoader {
     return entities
   }
 
+  private applySoftDeleteToPredicates(predicates: relationalStore.RdbPredicates, metadata: EntityMetadata): void {
+    if (!metadata.isSoftDeleteEnabled()) {
+      return
+    }
+    const deletedAtColumn = metadata.getDeletedAtColumn()
+    predicates.isNull(deletedAtColumn)
+  }
+
   /**
    * 将 ValueType 转换为 RdbPredicates 支持的值类型
    */
@@ -1154,7 +1167,23 @@ export class RelationLoader {
     if (typeof value === 'boolean') {
       return value ? 1 : 0
     }
-    return value
+    if (value instanceof Date) {
+      return value.getTime()
+    }
+    if (value instanceof Uint8Array) {
+      return value
+    }
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value as object)
+      } catch (e) {
+        return null
+      }
+    }
+    if (typeof value === 'string' || typeof value === 'number') {
+      return value
+    }
+    return null
   }
 
   /**

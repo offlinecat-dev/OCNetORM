@@ -880,7 +880,7 @@ export default function compatibilityTest() {
         expect(value === null).assertEqual(true);
       });
 
-      it('QueryBuilder_whereIn_empty_array_allowed', 0, () => {
+      it('QueryBuilder_whereIn_empty_array_throws_error', 0, () => {
         setupTestEntity();
 
         const builder = new QueryBuilder('TestEntity');
@@ -892,7 +892,7 @@ export default function compatibilityTest() {
           threw = true;
         }
 
-        expect(threw).assertEqual(false);
+        expect(threw).assertEqual(true);
       });
 
       it('TypeConverter_handle_null_to_db', 0, () => {

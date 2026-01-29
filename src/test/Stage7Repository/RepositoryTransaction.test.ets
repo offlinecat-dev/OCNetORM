@@ -6,6 +6,8 @@ import { Repository, TransactionResult } from '../../main/ets/repository/Reposit
 import { TransactionOptions, IsolationLevel } from '../../main/ets/repository/TransactionOptions';
 import { TransactionRollbackError } from '../../main/ets/errors/TransactionError';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
+import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { relationalStore } from '@kit.ArkData';
 
 const setupUserEntity = (): void => {
   const storage = MetadataStorage.getInstance();
@@ -27,6 +29,7 @@ export default function repositoryTransactionTest() {
     beforeEach(() => {
       MetadataStorage.resetInstance();
       HooksProcessor.resetInstance();
+      DatabaseManager.resetInstance();
     });
 
     it('TransactionResult.createSuccess should create success result', 0, () => {
@@ -155,6 +158,53 @@ export default function repositoryTransactionTest() {
       }
 
       expect(threw).assertEqual(true);
+    });
+
+    it('transactionWithOptions timeout should rollback without commit', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+      const options = TransactionOptions.withTimeout(10);
+
+      let beginCount = 0;
+      let commitCount = 0;
+      let rollbackCount = 0;
+
+      const fakeStore = {
+        beginTransaction: () => {
+          beginCount++;
+        },
+        commit: () => {
+          commitCount++;
+        },
+        rollBack: () => {
+          rollbackCount++;
+        },
+        executeSql: async () => {
+        }
+      } as unknown as relationalStore.RdbStore;
+
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      let threw = false;
+      try {
+        await repo.transactionWithOptions(async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 30));
+        }, options);
+      } catch (error) {
+        threw = error instanceof TransactionRollbackError;
+      }
+
+      expect(threw).assertEqual(true);
+      expect(beginCount).assertEqual(1);
+      expect(commitCount).assertEqual(0);
+      expect(rollbackCount).assertEqual(1);
     });
 
     it('transactionWithOptions with retry should attempt multiple times', 0, async () => {

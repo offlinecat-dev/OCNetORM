@@ -8,6 +8,62 @@ import { ColumnType } from '../../main/ets/types/ColumnType';
 import { RelationLoader } from '../../main/ets/query/RelationLoader';
 import { EntityData } from '../../main/ets/mapping/DataMapper';
 import { RelationNotFoundError } from '../../main/ets/errors/RelationError';
+import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { relationalStore } from '@kit.ArkData';
+
+class FakeResultSet {
+  rowCount: number;
+  columnNames: Array<string>;
+  private rows: Array<Record<string, any>>;
+  private index: number = -1;
+
+  constructor(columns: Array<string>, rows: Array<Record<string, any>>) {
+    this.columnNames = columns;
+    this.rows = rows;
+    this.rowCount = rows.length;
+  }
+
+  goToNextRow(): boolean {
+    this.index++;
+    return this.index < this.rows.length;
+  }
+
+  getColumnIndex(columnName: string): number {
+    return this.columnNames.indexOf(columnName);
+  }
+
+  isColumnNull(columnIndex: number): boolean {
+    const row = this.rows[this.index];
+    if (!row) {
+      return true;
+    }
+    const columnName = this.columnNames[columnIndex];
+    return row[columnName] === null || row[columnName] === undefined;
+  }
+
+  getLong(columnIndex: number): number {
+    const columnName = this.columnNames[columnIndex];
+    return Number(this.rows[this.index][columnName]);
+  }
+
+  getDouble(columnIndex: number): number {
+    const columnName = this.columnNames[columnIndex];
+    return Number(this.rows[this.index][columnName]);
+  }
+
+  getString(columnIndex: number): string {
+    const columnName = this.columnNames[columnIndex];
+    return String(this.rows[this.index][columnName]);
+  }
+
+  getBlob(columnIndex: number): Uint8Array {
+    const columnName = this.columnNames[columnIndex];
+    return this.rows[this.index][columnName] as Uint8Array;
+  }
+
+  close(): void {
+  }
+}
 
 const setupUserEntity = (): void => {
   const storage = MetadataStorage.getInstance();
@@ -140,6 +196,7 @@ export default function relationLoaderTest() {
   describe('relationLoaderTest', () => {
     beforeEach(() => {
       MetadataStorage.resetInstance();
+      DatabaseManager.resetInstance();
     });
 
     it('should create RelationLoader with source entity name', 0, () => {
@@ -293,6 +350,50 @@ export default function relationLoaderTest() {
 
       const result = await loader.loadRelation([entity], 'posts');
       expect(result.length).assertEqual(1);
+    });
+
+    it('loadRelation should apply soft delete filter on target entity', 0, async () => {
+      setupUserEntity();
+      setupPostEntity();
+      setupOneToManyRelation();
+
+      const storage = MetadataStorage.getInstance();
+      const postMetadata = storage.getEntityMetadata('Post');
+      if (postMetadata) {
+        postMetadata.setSoftDelete(true, 'deleted_at');
+        storage.registerColumn('Post', new ColumnMetadata('deletedAt', 'deleted_at'));
+      }
+
+      const loader = new RelationLoader('User');
+      const original = (loader as unknown as {
+        applySoftDeleteToPredicates: (predicates: relationalStore.RdbPredicates, metadata: any) => void
+      }).applySoftDeleteToPredicates.bind(loader);
+      let called = false;
+      (loader as unknown as {
+        applySoftDeleteToPredicates: (predicates: relationalStore.RdbPredicates, metadata: any) => void
+      }).applySoftDeleteToPredicates = (predicates, metadata) => {
+        called = true;
+        original(predicates, metadata);
+      };
+
+      const fakeStore = {
+        query: async () => new FakeResultSet(['id', 'user_id', 'title'], [])
+      } as unknown as relationalStore.RdbStore;
+
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      const entity = new EntityData('User');
+      entity.addProperty('id', 1, 'number');
+
+      await loader.loadRelation([entity], 'posts');
+      expect(called).assertEqual(true);
     });
 
     it('loadRelation MANY_TO_ONE should handle entity without foreign key', 0, async () => {

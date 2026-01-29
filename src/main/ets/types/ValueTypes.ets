@@ -7,7 +7,7 @@
  * ArkTS 值类型
  * 表示可以存储在实体属性中的值类型
  */
-export type ValueType = string | number | boolean | null
+export type ValueType = string | number | boolean | null | Date | object
 
 /**
  * 数据库值类型

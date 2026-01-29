@@ -3,7 +3,7 @@
 **轻量级 HarmonyOS SQLite ORM 框架**
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.4.14-green.svg)](https://github.com/offlinecat-dev/OCNetORM/releases)
+[![Version](https://img.shields.io/badge/Version-2.4.20-green.svg)](https://github.com/offlinecat-dev/OCNetORM/releases)
 [![HarmonyOS](https://img.shields.io/badge/HarmonyOS-Next-orange.svg)](https://developer.harmonyos.com)
 [![OpenHarmony](https://img.shields.io/badge/OpenHarmony-5.0+-purple.svg)](https://www.openharmony.cn)
 
@@ -52,14 +52,14 @@
 
 ## 安装
 
-[![ohpm](https://img.shields.io/badge/ohpm-v2.4.14-blue?style=for-the-badge)](https://ohpm.openharmony.cn/)
+[![ohpm](https://img.shields.io/badge/ohpm-v2.4.20-blue?style=for-the-badge)](https://ohpm.openharmony.cn/)
 
 在 HarmonyOS 项目的 `oh-package.json5` 中添加依赖：
 
 ```json5
 {
   "dependencies": {
-    "@offlinecat/ocorm": "2.4.14"
+    "@offlinecat/ocorm": "2.4.20"
   }
 }
 ```

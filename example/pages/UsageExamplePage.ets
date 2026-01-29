@@ -14,7 +14,8 @@ import {
   ColumnType,
   Repository,
   EntityData,
-  QueryExecutor
+  QueryExecutor,
+  ConditionOperator
 } from 'ocorm'
 import { relationalStore } from '@kit.ArkData'
 
@@ -237,6 +238,60 @@ struct UsageExamplePage {
     }
   }
 
+  // 软删除 + OR 条件测试
+  async testSoftDeleteOrQuery(): Promise<void> {
+    this.isLoading = true
+    try {
+      const repository = new Repository('ArticleEntity')
+      const now = Date.now()
+      const titleA = `or-test-a-${now}`
+      const titleB = `or-test-b-${now}`
+
+      const articleA = new EntityData('ArticleEntity')
+      articleA.addProperty('title', titleA, 'string')
+      articleA.addProperty('content', 'soft delete or test A', 'string')
+      articleA.addProperty('viewCount', 0, 'number')
+      articleA.addProperty('createdAt', now, 'number')
+      articleA.addProperty('updatedAt', now, 'number')
+
+      const articleB = new EntityData('ArticleEntity')
+      articleB.addProperty('title', titleB, 'string')
+      articleB.addProperty('content', 'soft delete or test B', 'string')
+      articleB.addProperty('viewCount', 0, 'number')
+      articleB.addProperty('createdAt', now, 'number')
+      articleB.addProperty('updatedAt', now, 'number')
+
+      const resultA = await repository.save(articleA)
+      const resultB = await repository.save(articleB)
+
+      if (!resultA.success || !resultB.success) {
+        this.message = `测试准备失败: ${resultA.errorMessage || resultB.errorMessage}`
+        return
+      }
+
+      await repository.removeById(resultA.insertId)
+
+      const queryBuilder = repository.createQueryBuilder()
+        .where('title', ConditionOperator.EQUAL, titleA)
+        .orWhere('title', ConditionOperator.EQUAL, titleB)
+
+      const executor = new QueryExecutor(queryBuilder)
+      const results = await executor.get()
+
+      if (results.length === 1) {
+        this.message = '软删 OR 查询测试通过（已过滤被软删记录）'
+      } else {
+        this.message = `软删 OR 查询测试失败，返回 ${results.length} 条`
+      }
+
+      await this.refreshArticles()
+    } catch (error) {
+      this.message = `软删 OR 查询测试失败: ${error instanceof Error ? error.message : String(error)}`
+    } finally {
+      this.isLoading = false
+    }
+  }
+
   // 格式化时间
   formatTime(timestamp: number): string {
     const date = new Date(timestamp)
@@ -312,6 +367,14 @@ struct UsageExamplePage {
           }
           .width('100%')
           .justifyContent(FlexAlign.SpaceBetween)
+
+          Button('软删 OR 查询测试')
+            .width('100%')
+            .height(40)
+            .margin({ top: 8 })
+            .backgroundColor('#607D8B')
+            .enabled(!this.isLoading)
+            .onClick(() => this.testSoftDeleteOrQuery())
         }
         .width('90%')
         .padding(16)

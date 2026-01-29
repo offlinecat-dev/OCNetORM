@@ -6,6 +6,7 @@ import { QueryCache } from '../../main/ets/query/QueryCache';
 import { Logger } from '../../main/ets/logging/Logger';
 import { LogLevel } from '../../main/ets/logging/LogLevel';
 import { relationalStore } from '@kit.ArkData';
+import { Context } from '@kit.AbilityKit';
 
 export default function databaseTest() {
   describe('databaseTest', () => {
@@ -224,6 +225,59 @@ export default function databaseTest() {
       expect(config.enableQueryCache).assertEqual(true);
       expect(config.queryCacheMaxSize).assertEqual(250);
       expect(config.queryCacheTtlMs).assertEqual(45000);
+    });
+
+    it('DatabaseManager initialize should reapply runtime config when connection matches', 0, async () => {
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean,
+        config: DatabaseConfig | null
+      };
+
+      manager.store = {} as relationalStore.RdbStore;
+      manager.initialized = true;
+      manager.healthy = true;
+      manager.config = new DatabaseConfig('test.db');
+
+      QueryCache.getInstance().configure({ enabled: false });
+
+      const newConfig = new DatabaseConfig('test.db');
+      newConfig.setQueryCache(true, 321, 12345);
+
+      let threw = false;
+      try {
+        await DatabaseManager.getInstance().initialize({} as unknown as Context, newConfig);
+      } catch (e) {
+        threw = true;
+      }
+
+      expect(threw).assertEqual(false);
+      expect(QueryCache.getInstance().isEnabled()).assertEqual(true);
+    });
+
+    it('DatabaseManager ping should use querySql', 0, async () => {
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+
+      let queryCalled = false;
+      const fakeStore = {
+        querySql: async () => {
+          queryCalled = true;
+          return { close: () => {} };
+        }
+      } as unknown as relationalStore.RdbStore;
+
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      const result = await DatabaseManager.getInstance().ping();
+      expect(result).assertEqual(true);
+      expect(queryCalled).assertEqual(true);
     });
 
     it('DatabaseConfig with enableQueryCache false should configure cache disabled', 0, () => {

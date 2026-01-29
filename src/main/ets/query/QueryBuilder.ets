@@ -213,6 +213,9 @@ export class QueryBuilder {
     if (resolvedColumn === null) {
       throw new InvalidConditionError(column, `列 '${column}' 在实体 '${this.entityName}' 中不存在`)
     }
+    if (values.length === 0) {
+      throw new InvalidConditionError(column, 'IN 条件不能为空')
+    }
     const condition = WhereCondition.inValues(resolvedColumn, values)
     condition.logicalOperator = LogicalOperator.AND
     this.conditions.push(condition)
@@ -532,13 +535,46 @@ export class QueryBuilder {
 
     // 添加用户定义的条件
     for (let i = 0; i < this.conditions.length; i++) {
-      allConditions.push(this.conditions[i])
+      allConditions.push(this.cloneCondition(this.conditions[i]))
     }
 
-    // 添加软删除条件
+    // 添加软删除条件（需要按 OR 分段追加）
     const softDeleteCondition = this.getSoftDeleteCondition()
     if (softDeleteCondition !== null) {
-      allConditions.push(softDeleteCondition)
+      if (allConditions.length === 0) {
+        const softClone = this.cloneCondition(softDeleteCondition)
+        softClone.logicalOperator = LogicalOperator.AND
+        allConditions.push(softClone)
+      } else {
+        let hasOr = false
+        for (let i = 1; i < allConditions.length; i++) {
+          if (allConditions[i].logicalOperator === LogicalOperator.OR) {
+            hasOr = true
+            break
+          }
+        }
+
+        if (!hasOr) {
+          const softClone = this.cloneCondition(softDeleteCondition)
+          softClone.logicalOperator = LogicalOperator.AND
+          allConditions.push(softClone)
+        } else {
+          const expanded: Array<WhereCondition> = []
+          for (let i = 0; i < allConditions.length; i++) {
+            const condition = allConditions[i]
+            if (i > 0 && condition.logicalOperator === LogicalOperator.OR) {
+              const softClone = this.cloneCondition(softDeleteCondition)
+              softClone.logicalOperator = LogicalOperator.AND
+              expanded.push(softClone)
+            }
+            expanded.push(condition)
+          }
+          const tailSoftClone = this.cloneCondition(softDeleteCondition)
+          tailSoftClone.logicalOperator = LogicalOperator.AND
+          expanded.push(tailSoftClone)
+          return expanded
+        }
+      }
     }
 
     return allConditions
@@ -620,12 +656,23 @@ export class QueryBuilder {
     this.offsetValue = 0
     this.selectedColumns = []
     this.relationNames = []
+    this.lazyRelationNames = []
     this.includeDeleted = false
     this.onlyDeletedFlag = false
     this.pageNumber = 0
     this.pageSizeValue = 0
     this.subQueries = []
     return this
+  }
+
+  private cloneCondition(condition: WhereCondition): WhereCondition {
+    const cloned = new WhereCondition()
+    cloned.column = condition.column
+    cloned.operator = condition.operator
+    cloned.value = condition.value
+    cloned.secondValue = condition.secondValue
+    cloned.logicalOperator = condition.logicalOperator
+    return cloned
   }
 
   /**

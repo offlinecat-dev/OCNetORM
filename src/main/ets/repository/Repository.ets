@@ -34,6 +34,8 @@ import { ValidationError } from '../errors/ValidationError'
 
 class TimeoutState {
   timedOut: boolean = false
+  commitStarted: boolean = false
+  finished: boolean = false
 }
 
 /**
@@ -222,7 +224,7 @@ export class Repository {
       const keys = valuesBucket.keys()
       for (let i = 0; i < keys.length; i++) {
         const key = keys[i]
-        if (key === pkColumn.columnName) {
+        if (key === pkColumn.columnName && pkColumn.isAutoIncrement) {
           continue
         }
         const value = valuesBucket.get(key)
@@ -844,7 +846,23 @@ export class Repository {
     if (typeof value === 'boolean') {
       return value ? 1 : 0
     }
-    return value
+    if (value instanceof Date) {
+      return value.getTime()
+    }
+    if (value instanceof Uint8Array) {
+      return value
+    }
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value as object)
+      } catch (e) {
+        return null
+      }
+    }
+    if (typeof value === 'string' || typeof value === 'number') {
+      return value
+    }
+    return null
   }
 
   private getUpdatedAtColumnName(): string | null {
@@ -998,6 +1016,9 @@ export class Repository {
           (resolve: (value: TransactionResult) => void, reject: (reason: Error) => void) => {
             // 设置超时定时器
             timeoutId = setTimeout(() => {
+              if (timeoutState.finished || timeoutState.commitStarted) {
+                return
+              }
               isTimedOut = true
               timeoutState.timedOut = true
               reject(new Error(`事务超时 (${options.timeout}ms)`))
@@ -1094,7 +1115,14 @@ export class Repository {
         throw new Error(String(callbackError))
       }
 
+      if (timeoutState?.timedOut) {
+        throw new TransactionRollbackError(`事务超时 (${options.timeout}ms)`)
+      }
+
       // 提交事务
+      if (timeoutState) {
+        timeoutState.commitStarted = true
+      }
       store.commit()
       committed = true
       this.logger.logTransaction('COMMIT')
@@ -1118,6 +1146,9 @@ export class Repository {
       this.logger.logError(`事务执行失败: ${errorMessage}`)
       throw new TransactionRollbackError(errorMessage)
     } finally {
+      if (timeoutState) {
+        timeoutState.finished = true
+      }
       // 恢复事务选项
       await this.resetTransactionOptions(store, isolationApplied, readOnlyApplied)
     }

@@ -6,6 +6,7 @@
 import { ConditionOperator } from '../types/ConditionOperator'
 import { ValueType } from '../types/ValueTypes'
 import { WhereCondition, LogicalOperator } from './WhereCondition'
+import { SubQueryError } from '../errors/QueryError'
 
 /**
  * 子查询构建器类
@@ -84,6 +85,9 @@ export class SubQuery {
    * @returns 当前实例（支持链式调用）
    */
   whereIn(column: string, values: Array<ValueType>): SubQuery {
+    if (values.length === 0) {
+      throw new SubQueryError('IN 条件不能为空')
+    }
     const condition = WhereCondition.inValues(column, values)
     condition.logicalOperator = LogicalOperator.AND
     this.conditions.push(condition)

@@ -1,5 +1,38 @@
 # CHANGELOG
 
+## [2.4.20] - 2026-01-30
+
+### 严重 Bug 修复
+- **HIGH-01** 修复事务超时后仍可能提交的问题，增加超时状态检测和强制回滚机制
+- **HIGH-02** 修复非自增主键插入被无条件剔除的问题，现仅在 `isAutoIncrement` 为 true 时跳过主键列
+- **HIGH-03** 修复软删除过滤在 OR 条件下失效的问题，使用 beginWrap/endWrap 确保条件分组正确
+
+### 中等 Bug 修复
+- **MED-01** 修复 `getAsync()` 不支持 whereExists 子查询的问题，补齐子查询执行逻辑
+- **MED-02** 修复子查询过滤"污染"原 QueryBuilder 的问题，使用克隆副本避免条件累积
+- **MED-03** 修复关联加载未应用软删除过滤的问题，RelationLoader 现复用软删除过滤逻辑
+- **MED-04** 修复 COUNT 语句未转义表/列名的问题，统一使用转义处理
+- **MED-05** 修复同名数据库再次初始化不刷新配置的问题，支持配置变更检测
+- **MED-06** 修复健康检查依赖 `_orm_version` 表的问题，改用 sqlite_master 通用查询
+- **MED-07** 修复 TypeConverter 对 Date/Object 写入支持不完整的问题，增加 Date 转时间戳和 Object 序列化
+- **MED-08** 修复子查询 IN 列表缺少分批处理的问题，参照 RelationLoader 分批策略
+
+### 低级 Bug 修复
+- **LOW-01** 修复 `QueryBuilder.reset()` 未清理 `lazyRelationNames` 的问题
+- **LOW-02** 修复 `whereIn` 空数组未处理的问题，空数组时短路返回空结果
+
+### 文档
+- 完善 README.md，新增 12 个功能示例
+- 使用分类表格展示全部 25 篇开发者指南文档
+- 修正目录索引中批量操作和事务处理的说明
+
+### 测试
+- 新增事务超时/重试场景测试
+- 新增非自增主键插入测试
+- 新增软删除 OR 条件测试
+- 新增子查询相关测试
+- 新增 TypeConverter Date/Object 转换测试
+
 ## [2.4.14] - 2026-01-28
 
 ### 修复

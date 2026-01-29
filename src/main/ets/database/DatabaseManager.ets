@@ -69,9 +69,14 @@ export class DatabaseManager implements DatabaseManagerAdapter {
    * @returns Promise<void>
    */
   async initialize(context: Context, config: DatabaseConfig): Promise<void> {
-    // 如果已经初始化且配置相同，直接返回
-    if (this.initialized && this.config !== null && this.config.name === config.name) {
-      return
+    // 如果已经初始化且连接参数一致，重用连接并刷新运行时配置
+    if (this.initialized && this.store !== null && this.config !== null) {
+      const sameConnection = this.isSameConnectionConfig(this.config, config)
+      if (sameConnection) {
+        this.config = config
+        this.applyRuntimeConfig(config)
+        return
+      }
     }
 
     // 如果已有连接但配置不同，先关闭
@@ -94,23 +99,8 @@ export class DatabaseManager implements DatabaseManagerAdapter {
       this.initialized = true
       this.healthy = true
 
-      // 配置查询缓存
-      if (config.enableQueryCache) {
-        QueryCache.getInstance().configure({
-          enabled: true,
-          maxSize: config.queryCacheMaxSize,
-          ttlMs: config.queryCacheTtlMs
-        })
-      } else {
-        QueryCache.getInstance().configure({
-          enabled: false
-        })
-      }
-
-      // 启动健康检查
-      if (config.healthCheckIntervalMs > 0) {
-        this.startHealthCheck(config.healthCheckIntervalMs)
-      }
+      // 应用运行时配置（缓存/健康检查等）
+      this.applyRuntimeConfig(config)
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ConnectionError(config.name, errorMessage)
@@ -193,10 +183,8 @@ export class DatabaseManager implements DatabaseManagerAdapter {
     }
 
     try {
-      // 使用 ORM 版本表进行健康检查（该表在迁移管理器初始化时创建）
-      const predicates = new relationalStore.RdbPredicates('_orm_version')
-      predicates.limitAs(1)
-      const result = await this.store.query(predicates)
+      // 使用轻量查询进行健康检查，避免依赖特定表
+      const result = await this.store.querySql('SELECT 1')
       result.close()
       return true
     } catch (e) {
@@ -248,5 +236,31 @@ export class DatabaseManager implements DatabaseManagerAdapter {
    */
   getQueryCache(): QueryCache {
     return QueryCache.getInstance()
+  }
+
+  private isSameConnectionConfig(current: DatabaseConfig, next: DatabaseConfig): boolean {
+    return current.name === next.name &&
+      current.securityLevel === next.securityLevel &&
+      current.encrypt === next.encrypt
+  }
+
+  private applyRuntimeConfig(config: DatabaseConfig): void {
+    if (config.enableQueryCache) {
+      QueryCache.getInstance().configure({
+        enabled: true,
+        maxSize: config.queryCacheMaxSize,
+        ttlMs: config.queryCacheTtlMs
+      })
+    } else {
+      QueryCache.getInstance().configure({
+        enabled: false
+      })
+    }
+
+    if (config.healthCheckIntervalMs > 0) {
+      this.startHealthCheck(config.healthCheckIntervalMs)
+    } else {
+      this.stopHealthCheck()
+    }
   }
 }

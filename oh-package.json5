@@ -1,6 +1,6 @@
 {
-  "name": "@offlinecat/ocorm",
-  "version": "2.4.14",
+  "name": "ocorm",
+  "version": "2.4.20",
   "description": "A lightweight SQLite ORM framework designed for HarmonyOS (Next/OpenHarmony). Built on @ohos.data.relationalStore with Data Mapper and Repository patterns.",
   "main": "Index.ets",
   "author": "offlinecat-dev",

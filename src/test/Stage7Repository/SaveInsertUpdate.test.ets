@@ -8,6 +8,8 @@ import { EntityNotRegisteredError } from '../../main/ets/errors/MetadataError';
 import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
 import { ValidationMetadataStorage } from '../../main/ets/validation/ValidationMetadataStorage';
+import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { relationalStore } from '@kit.ArkData';
 
 const setupUserEntity = (): void => {
   const storage = MetadataStorage.getInstance();
@@ -42,6 +44,20 @@ const setupEntityWithNoPrimaryKey = (): void => {
   storage.registerColumn('NoPkEntity', nameColumn);
 };
 
+const setupManualPkEntity = (): void => {
+  const storage = MetadataStorage.getInstance();
+  storage.registerEntity('ManualPkEntity', 'manual_pk_table');
+
+  const idColumn = new ColumnMetadata('id', 'id')
+    .setType(ColumnType.INTEGER)
+    .setPrimaryKey(true);
+  storage.registerColumn('ManualPkEntity', idColumn);
+
+  const nameColumn = new ColumnMetadata('name', 'name')
+    .setType(ColumnType.TEXT);
+  storage.registerColumn('ManualPkEntity', nameColumn);
+};
+
 const createNewEntityData = (): EntityData => {
   const data = new EntityData('User');
   data.addProperty('name', 'Test User', 'string');
@@ -63,6 +79,7 @@ export default function saveInsertUpdateTest() {
       MetadataStorage.resetInstance();
       HooksProcessor.resetInstance();
       ValidationMetadataStorage.resetInstance();
+      DatabaseManager.resetInstance();
     });
 
     it('should create Repository with registered entity', 0, () => {
@@ -201,6 +218,39 @@ export default function saveInsertUpdateTest() {
       const updatedAtColumn = metadata.getColumnByProperty('updatedAt');
       expect(updatedAtColumn !== null).assertEqual(true);
       expect(updatedAtColumn?.columnName).assertEqual('updated_at');
+    });
+
+    it('insert should keep non-auto primary key value', 0, async () => {
+      setupManualPkEntity();
+      const repo = new Repository('ManualPkEntity');
+
+      let capturedBucket: relationalStore.ValuesBucket | null = null;
+      const fakeStore = {
+        insertSync: (_table: string, values: relationalStore.ValuesBucket) => {
+          capturedBucket = values;
+          return 1;
+        }
+      } as unknown as relationalStore.RdbStore;
+
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      const entityData = new EntityData('ManualPkEntity');
+      entityData.addProperty('id', 10, 'number');
+      entityData.addProperty('name', 'manual', 'string');
+
+      await (repo as unknown as { insert: (data: EntityData) => Promise<SaveResult> }).insert(entityData);
+
+      expect(capturedBucket !== null).assertEqual(true);
+      if (capturedBucket !== null) {
+        expect(capturedBucket['id']).assertEqual(10);
+      }
     });
   });
 }

@@ -24,6 +24,16 @@ import { ConditionOperator } from '../types/ConditionOperator'
 import { WhereCondition, LogicalOperator } from './WhereCondition'
 import { ResultSetUtils } from '../mapping/ResultSetUtils'
 
+class WhereClauseResult {
+  whereClause: string
+  args: Array<relationalStore.ValueType>
+
+  constructor(whereClause: string, args: Array<relationalStore.ValueType>) {
+    this.whereClause = whereClause
+    this.args = args
+  }
+}
+
 /**
  * 查询执行器类
  * 执行 QueryBuilder 构建的查询并返回映射后的实体数据
@@ -40,6 +50,8 @@ export class QueryExecutor {
 
   /** TaskPool 优化阈值：数据量超过此值时启用 TaskPool */
   private static readonly TASKPOOL_THRESHOLD: number = 100
+  /** 子查询 IN 条件参数数量限制 */
+  private static readonly SUBQUERY_IN_LIMIT: number = 500
 
   /**
    * 构造函数
@@ -71,18 +83,33 @@ export class QueryExecutor {
    * @returns Promise<Array<EntityData>>
    */
   async get(): Promise<Array<EntityData>> {
+    const originalConditionCount = this.queryBuilder.getConditions().length
+    let subQueryFilterApplied = false
+    let inMemoryFilterIds: Set<string> | null = null
+    const originalLimit = this.queryBuilder.getLimitValue()
+    const originalOffset = this.queryBuilder.getOffsetValue()
+    let limitAdjusted = false
     try {
       const store = this.getStore()
 
       // 处理子查询（whereExists）
       if (this.queryBuilder.hasSubQueries()) {
-        const subQueryIds = await this.executeSubQueries()
+        const subQueryIds = this.normalizeSubQueryIds(await this.executeSubQueries())
         if (subQueryIds.length === 0) {
           // 子查询没有匹配结果，直接返回空数组
           return []
         }
-        // 将子查询结果作为 IN 条件添加到主查询
-        this.applySubQueryFilter(subQueryIds)
+        if (subQueryIds.length > QueryExecutor.SUBQUERY_IN_LIMIT) {
+          inMemoryFilterIds = this.buildIdSet(subQueryIds)
+          if (originalLimit > 0 || originalOffset > 0) {
+            this.queryBuilder.limit(0)
+            this.queryBuilder.offset(0)
+            limitAdjusted = true
+          }
+        } else {
+          // 将子查询结果作为 IN 条件添加到主查询
+          subQueryFilterApplied = this.applySubQueryFilter(subQueryIds)
+        }
       }
 
       // 构建 RdbPredicates
@@ -93,10 +120,11 @@ export class QueryExecutor {
 
       // 执行查询
       const selectedColumns = this.queryBuilder.getSelectedColumns()
+      const queryColumns = inMemoryFilterIds ? this.ensurePrimaryKeySelected(selectedColumns) : selectedColumns
       let resultSet: relationalStore.ResultSet
 
-      if (selectedColumns.length > 0) {
-        resultSet = await store.query(buildResult.predicates, selectedColumns)
+      if (queryColumns.length > 0) {
+        resultSet = await store.query(buildResult.predicates, queryColumns)
       } else {
         resultSet = await store.query(buildResult.predicates)
       }
@@ -109,6 +137,11 @@ export class QueryExecutor {
       }
 
       resultSet.close()
+
+      if (inMemoryFilterIds) {
+        results = this.filterByIds(results, inMemoryFilterIds)
+        results = this.applyLimitOffset(results, originalLimit, originalOffset)
+      }
 
       // 加载关联数据
       if (this.queryBuilder.hasRelations() && results.length > 0) {
@@ -123,6 +156,14 @@ export class QueryExecutor {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('SELECT', errorMessage)
+    } finally {
+      if (limitAdjusted) {
+        this.queryBuilder.limit(originalLimit)
+        this.queryBuilder.offset(originalOffset)
+      }
+      if (subQueryFilterApplied) {
+        this.restoreConditions(originalConditionCount)
+      }
     }
   }
 
@@ -246,28 +287,37 @@ export class QueryExecutor {
    * @returns Promise<number>
    */
   async count(): Promise<number> {
+    const originalConditionCount = this.queryBuilder.getConditions().length
+    let subQueryFilterApplied = false
+    let inMemoryFilterIds: Set<string> | null = null
     try {
       const store = this.getStore()
 
       // 处理子查询（whereExists）
       if (this.queryBuilder.hasSubQueries()) {
-        const subQueryIds = await this.executeSubQueries()
+        const subQueryIds = this.normalizeSubQueryIds(await this.executeSubQueries())
         if (subQueryIds.length === 0) {
           return 0
         }
-        this.applySubQueryFilter(subQueryIds)
+        if (subQueryIds.length > QueryExecutor.SUBQUERY_IN_LIMIT) {
+          inMemoryFilterIds = this.buildIdSet(subQueryIds)
+        } else {
+          subQueryFilterApplied = this.applySubQueryFilter(subQueryIds)
+        }
       }
 
-      // 构建 RdbPredicates
-      const buildResult = PredicateBuilder.build(this.queryBuilder)
-      if (!buildResult.success || buildResult.predicates === null) {
-        throw new ExecutionError('COUNT', buildResult.errorMessage)
+      if (inMemoryFilterIds) {
+        return await this.countWithInMemoryFilter(store, inMemoryFilterIds)
       }
 
       return await this.countByPredicates(store)
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('COUNT', errorMessage)
+    } finally {
+      if (subQueryFilterApplied) {
+        this.restoreConditions(originalConditionCount)
+      }
     }
   }
 
@@ -278,6 +328,12 @@ export class QueryExecutor {
    * Requirements: 2.4, 2.5, 2.6
    */
   async getPaginated(): Promise<PaginatedResult> {
+    const originalConditionCount = this.queryBuilder.getConditions().length
+    let subQueryFilterApplied = false
+    let inMemoryFilterIds: Set<string> | null = null
+    const originalLimit = this.queryBuilder.getLimitValue()
+    const originalOffset = this.queryBuilder.getOffsetValue()
+    let limitAdjusted = false
     try {
       const store = this.getStore()
 
@@ -295,11 +351,65 @@ export class QueryExecutor {
 
       // 处理子查询（whereExists）
       if (this.queryBuilder.hasSubQueries()) {
-        const subQueryIds = await this.executeSubQueries()
+        const subQueryIds = this.normalizeSubQueryIds(await this.executeSubQueries())
         if (subQueryIds.length === 0) {
           return PaginatedResult.create([], 0, page, pageSize)
         }
-        this.applySubQueryFilter(subQueryIds)
+        if (subQueryIds.length > QueryExecutor.SUBQUERY_IN_LIMIT) {
+          inMemoryFilterIds = this.buildIdSet(subQueryIds)
+          if (originalLimit > 0 || originalOffset > 0) {
+            this.queryBuilder.limit(0)
+            this.queryBuilder.offset(0)
+            limitAdjusted = true
+          }
+        } else {
+          subQueryFilterApplied = this.applySubQueryFilter(subQueryIds)
+        }
+      }
+
+      if (inMemoryFilterIds) {
+        const buildResult = PredicateBuilder.build(this.queryBuilder)
+        if (!buildResult.success || buildResult.predicates === null) {
+          throw new ExecutionError('SELECT', buildResult.errorMessage)
+        }
+
+        const selectedColumns = this.queryBuilder.getSelectedColumns()
+        const queryColumns = this.ensurePrimaryKeySelected(selectedColumns)
+        let resultSet: relationalStore.ResultSet
+
+        if (queryColumns.length > 0) {
+          resultSet = await store.query(buildResult.predicates, queryColumns)
+        } else {
+          resultSet = await store.query(buildResult.predicates)
+        }
+
+        let results: Array<EntityData> = []
+        while (resultSet.goToNextRow()) {
+          const row = this.resultSetToRow(resultSet)
+          results.push(this.dataMapper.fromResultSetRow(row))
+        }
+
+        resultSet.close()
+
+        results = this.filterByIds(results, inMemoryFilterIds)
+        const total = results.length
+        const totalPages = PaginatedResult.calculateTotalPages(total, pageSize)
+
+        if (page > totalPages && totalPages > 0) {
+          return PaginatedResult.create([], total, page, pageSize)
+        }
+
+        results = this.applyLimitOffset(results, pageSize, (page - 1) * pageSize)
+
+        if (this.queryBuilder.hasRelations() && results.length > 0) {
+          results = await this.loadRelations(results)
+        }
+
+        if (this.queryBuilder.hasLazyRelations() && results.length > 0) {
+          this.attachLazyRelations(results)
+        }
+
+        return PaginatedResult.create(results, total, page, pageSize)
       }
 
       // 先执行 COUNT 查询获取总数
@@ -351,6 +461,14 @@ export class QueryExecutor {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('SELECT', errorMessage)
+    } finally {
+      if (limitAdjusted) {
+        this.queryBuilder.limit(originalLimit)
+        this.queryBuilder.offset(originalOffset)
+      }
+      if (subQueryFilterApplied) {
+        this.restoreConditions(originalConditionCount)
+      }
     }
   }
 
@@ -414,8 +532,32 @@ export class QueryExecutor {
    */
   async getAsync(): Promise<Array<EntityData>> {
     const startTime = Date.now()
+    const originalConditionCount = this.queryBuilder.getConditions().length
+    let subQueryFilterApplied = false
+    let inMemoryFilterIds: Set<string> | null = null
+    const originalLimit = this.queryBuilder.getLimitValue()
+    const originalOffset = this.queryBuilder.getOffsetValue()
+    let limitAdjusted = false
     try {
       const store = this.getStore()
+
+      // 处理子查询（whereExists）
+      if (this.queryBuilder.hasSubQueries()) {
+        const subQueryIds = this.normalizeSubQueryIds(await this.executeSubQueries())
+        if (subQueryIds.length === 0) {
+          return []
+        }
+        if (subQueryIds.length > QueryExecutor.SUBQUERY_IN_LIMIT) {
+          inMemoryFilterIds = this.buildIdSet(subQueryIds)
+          if (originalLimit > 0 || originalOffset > 0) {
+            this.queryBuilder.limit(0)
+            this.queryBuilder.offset(0)
+            limitAdjusted = true
+          }
+        } else {
+          subQueryFilterApplied = this.applySubQueryFilter(subQueryIds)
+        }
+      }
 
       // 构建 RdbPredicates
       const buildResult = PredicateBuilder.build(this.queryBuilder)
@@ -425,10 +567,11 @@ export class QueryExecutor {
 
       // 执行查询
       const selectedColumns = this.queryBuilder.getSelectedColumns()
+      const queryColumns = inMemoryFilterIds ? this.ensurePrimaryKeySelected(selectedColumns) : selectedColumns
       let resultSet: relationalStore.ResultSet
 
-      if (selectedColumns.length > 0) {
-        resultSet = await store.query(buildResult.predicates, selectedColumns)
+      if (queryColumns.length > 0) {
+        resultSet = await store.query(buildResult.predicates, queryColumns)
       } else {
         resultSet = await store.query(buildResult.predicates)
       }
@@ -456,6 +599,11 @@ export class QueryExecutor {
       const duration = Date.now() - startTime
       this.logger.logDebug(`getAsync 执行完成，数据量: ${rowCount}，耗时: ${duration}ms`)
 
+      if (inMemoryFilterIds) {
+        results = this.filterByIds(results, inMemoryFilterIds)
+        results = this.applyLimitOffset(results, originalLimit, originalOffset)
+      }
+
       // 加载关联数据
       if (this.queryBuilder.hasRelations() && results.length > 0) {
         results = await this.loadRelations(results)
@@ -469,6 +617,14 @@ export class QueryExecutor {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('SELECT', errorMessage)
+    } finally {
+      if (limitAdjusted) {
+        this.queryBuilder.limit(originalLimit)
+        this.queryBuilder.offset(originalOffset)
+      }
+      if (subQueryFilterApplied) {
+        this.restoreConditions(originalConditionCount)
+      }
     }
   }
 
@@ -1118,15 +1274,19 @@ export class QueryExecutor {
    * 将子查询结果作为 IN 条件应用到主查询
    * @param sourceIds 源实体 ID 数组
    */
-  private applySubQueryFilter(sourceIds: Array<ValueType>): void {
+  private applySubQueryFilter(sourceIds: Array<ValueType>): boolean {
     const metadata = this.queryBuilder.getEntityMetadata()
     const pkColumn = metadata.getPrimaryKeyColumn()
     if (pkColumn === null) {
-      return
+      return false
+    }
+    if (sourceIds.length === 0) {
+      return false
     }
 
     // 使用 whereIn 添加 IN 条件
     this.queryBuilder.whereIn(pkColumn.columnName, sourceIds)
+    return true
   }
 
   private applySoftDeleteToPredicates(predicates: relationalStore.RdbPredicates, metadata: EntityMetadata): void {
@@ -1140,80 +1300,13 @@ export class QueryExecutor {
   private async countByPredicates(
     store: relationalStore.RdbStore
   ): Promise<number> {
-    const tableName = this.queryBuilder.getTableName()
+    const tableName = this.escapeIdentifier(this.queryBuilder.getTableName())
     const conditions = this.queryBuilder.getAllConditions()
     if (conditions.length === 0) {
       return await this.countBySql(store, tableName)
     }
-
-    const whereParts: Array<string> = []
-    const args: Array<relationalStore.ValueType> = []
-    for (let i = 0; i < conditions.length; i++) {
-      const cond = conditions[i]
-      if (i > 0) {
-        whereParts.push(cond.logicalOperator === LogicalOperator.OR ? 'OR' : 'AND')
-      }
-      if (cond.operator === ConditionOperator.IN || cond.operator === ConditionOperator.NOT_IN) {
-        if (!Array.isArray(cond.value) || cond.value.length === 0) {
-          whereParts.push(cond.operator === ConditionOperator.IN ? '1=0' : '1=1')
-          continue
-        }
-        const placeholders = cond.value.map(() => '?').join(',')
-        whereParts.push(`${cond.column} ${cond.operator === ConditionOperator.IN ? 'IN' : 'NOT IN'} (${placeholders})`)
-        for (let j = 0; j < cond.value.length; j++) {
-          args.push(this.toRdbValue(cond.value[j]))
-        }
-        continue
-      }
-
-      switch (cond.operator) {
-        case ConditionOperator.EQUAL:
-          whereParts.push(`${cond.column} = ?`)
-          args.push(this.toRdbValue(cond.value))
-          break
-        case ConditionOperator.NOT_EQUAL:
-          whereParts.push(`${cond.column} != ?`)
-          args.push(this.toRdbValue(cond.value))
-          break
-        case ConditionOperator.GREATER:
-          whereParts.push(`${cond.column} > ?`)
-          args.push(this.toRdbValue(cond.value))
-          break
-        case ConditionOperator.LESS:
-          whereParts.push(`${cond.column} < ?`)
-          args.push(this.toRdbValue(cond.value))
-          break
-        case ConditionOperator.GREATER_EQUAL:
-          whereParts.push(`${cond.column} >= ?`)
-          args.push(this.toRdbValue(cond.value))
-          break
-        case ConditionOperator.LESS_EQUAL:
-          whereParts.push(`${cond.column} <= ?`)
-          args.push(this.toRdbValue(cond.value))
-          break
-        case ConditionOperator.LIKE:
-          whereParts.push(`${cond.column} LIKE ?`)
-          args.push(cond.value !== null ? String(cond.value) : '')
-          break
-        case ConditionOperator.BETWEEN:
-          whereParts.push(`${cond.column} BETWEEN ? AND ?`)
-          args.push(this.toRdbValue(cond.value))
-          args.push(this.toRdbValue(cond.secondValue))
-          break
-        case ConditionOperator.IS_NULL:
-          whereParts.push(`${cond.column} IS NULL`)
-          break
-        case ConditionOperator.IS_NOT_NULL:
-          whereParts.push(`${cond.column} IS NOT NULL`)
-          break
-        default:
-          whereParts.push('1=1')
-          break
-      }
-    }
-
-    const whereClause = whereParts.length > 0 ? ` WHERE ${whereParts.join(' ')}` : ''
-    return await this.countBySql(store, tableName, whereClause, args)
+    const whereResult = this.buildWhereClause(conditions)
+    return await this.countBySql(store, tableName, whereResult.whereClause, whereResult.args)
   }
 
   private async countBySql(
@@ -1253,6 +1346,301 @@ export class QueryExecutor {
         } catch (e) {
           // ignore
         }
+      }
+    }
+  }
+
+  private buildWhereClause(
+    conditions: Array<WhereCondition>
+  ): WhereClauseResult {
+    const whereParts: Array<string> = []
+    const args: Array<relationalStore.ValueType> = []
+
+    for (let i = 0; i < conditions.length; i++) {
+      const cond = conditions[i]
+      if (i > 0) {
+        whereParts.push(cond.logicalOperator === LogicalOperator.OR ? 'OR' : 'AND')
+      }
+
+      const column = this.escapeIdentifier(cond.column)
+
+      if (cond.operator === ConditionOperator.IN || cond.operator === ConditionOperator.NOT_IN) {
+        if (!Array.isArray(cond.value) || cond.value.length === 0) {
+          whereParts.push(cond.operator === ConditionOperator.IN ? '1=0' : '1=1')
+          continue
+        }
+        const placeholders = cond.value.map(() => '?').join(',')
+        whereParts.push(`${column} ${cond.operator === ConditionOperator.IN ? 'IN' : 'NOT IN'} (${placeholders})`)
+        for (let j = 0; j < cond.value.length; j++) {
+          args.push(this.toRdbValue(cond.value[j]))
+        }
+        continue
+      }
+
+      switch (cond.operator) {
+        case ConditionOperator.EQUAL:
+          whereParts.push(`${column} = ?`)
+          args.push(this.toRdbValue(cond.value))
+          break
+        case ConditionOperator.NOT_EQUAL:
+          whereParts.push(`${column} != ?`)
+          args.push(this.toRdbValue(cond.value))
+          break
+        case ConditionOperator.GREATER:
+          whereParts.push(`${column} > ?`)
+          args.push(this.toRdbValue(cond.value))
+          break
+        case ConditionOperator.LESS:
+          whereParts.push(`${column} < ?`)
+          args.push(this.toRdbValue(cond.value))
+          break
+        case ConditionOperator.GREATER_EQUAL:
+          whereParts.push(`${column} >= ?`)
+          args.push(this.toRdbValue(cond.value))
+          break
+        case ConditionOperator.LESS_EQUAL:
+          whereParts.push(`${column} <= ?`)
+          args.push(this.toRdbValue(cond.value))
+          break
+        case ConditionOperator.LIKE:
+          whereParts.push(`${column} LIKE ?`)
+          args.push(cond.value !== null ? String(cond.value) : '')
+          break
+        case ConditionOperator.BETWEEN:
+          whereParts.push(`${column} BETWEEN ? AND ?`)
+          args.push(this.toRdbValue(cond.value))
+          args.push(this.toRdbValue(cond.secondValue))
+          break
+        case ConditionOperator.IS_NULL:
+          whereParts.push(`${column} IS NULL`)
+          break
+        case ConditionOperator.IS_NOT_NULL:
+          whereParts.push(`${column} IS NOT NULL`)
+          break
+        default:
+          whereParts.push('1=1')
+          break
+      }
+    }
+
+    const whereClause = whereParts.length > 0 ? ` WHERE ${whereParts.join(' ')}` : ''
+    return new WhereClauseResult(whereClause, args)
+  }
+
+  private escapeIdentifier(identifier: string): string {
+    if (identifier === '*') {
+      return identifier
+    }
+    const parts = identifier.split('.')
+    const escapedParts: Array<string> = []
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i].replace(/"/g, '""')
+      escapedParts.push(`"${part}"`)
+    }
+    return escapedParts.join('.')
+  }
+
+  private ensurePrimaryKeySelected(selectedColumns: Array<string>): Array<string> {
+    if (selectedColumns.length === 0) {
+      return selectedColumns
+    }
+    const metadata = this.queryBuilder.getEntityMetadata()
+    const pkColumn = metadata.getPrimaryKeyColumn()
+    if (pkColumn === null) {
+      return selectedColumns
+    }
+    if (selectedColumns.includes(pkColumn.columnName)) {
+      return selectedColumns
+    }
+    const columns: Array<string> = []
+    for (let i = 0; i < selectedColumns.length; i++) {
+      columns.push(selectedColumns[i])
+    }
+    columns.push(pkColumn.columnName)
+    return columns
+  }
+
+  private restoreConditions(originalCount: number): void {
+    const conditions = this.queryBuilder.getConditions()
+    if (conditions.length > originalCount) {
+      conditions.splice(originalCount, conditions.length - originalCount)
+    }
+  }
+
+  private normalizeSubQueryIds(sourceIds: Array<ValueType>): Array<ValueType> {
+    const result: Array<ValueType> = []
+    const seen: Set<string> = new Set()
+    for (let i = 0; i < sourceIds.length; i++) {
+      const id = sourceIds[i]
+      if (id === null) {
+        continue
+      }
+      const key = this.toIdKey(id)
+      if (!seen.has(key)) {
+        seen.add(key)
+        result.push(id)
+      }
+    }
+    return result
+  }
+
+  private buildIdSet(sourceIds: Array<ValueType>): Set<string> {
+    const idSet: Set<string> = new Set()
+    for (let i = 0; i < sourceIds.length; i++) {
+      const id = sourceIds[i]
+      if (id === null) {
+        continue
+      }
+      idSet.add(this.toIdKey(id))
+    }
+    return idSet
+  }
+
+  private toIdKey(value: ValueType): string {
+    if (value === null) {
+      return ''
+    }
+    if (typeof value === 'number') {
+      return `n:${value}`
+    }
+    if (typeof value === 'boolean') {
+      return `b:${value ? 1 : 0}`
+    }
+    return `s:${String(value)}`
+  }
+
+  private filterByIds(results: Array<EntityData>, idSet: Set<string>): Array<EntityData> {
+    if (idSet.size === 0) {
+      return []
+    }
+    const filtered: Array<EntityData> = []
+    for (let i = 0; i < results.length; i++) {
+      const entity = results[i]
+      const pkValue = this.dataMapper.getPrimaryKeyValue(entity)
+      if (pkValue !== null && idSet.has(this.toIdKey(pkValue))) {
+        filtered.push(entity)
+      }
+    }
+    return filtered
+  }
+
+  private applyLimitOffset(results: Array<EntityData>, limit: number, offset: number): Array<EntityData> {
+    const safeOffset = offset > 0 ? offset : 0
+    if (limit > 0) {
+      return results.slice(safeOffset, safeOffset + limit)
+    }
+    if (safeOffset > 0) {
+      return results.slice(safeOffset)
+    }
+    return results
+  }
+
+  private async countWithInMemoryFilter(
+    store: relationalStore.RdbStore,
+    idSet: Set<string>
+  ): Promise<number> {
+    const metadata = this.queryBuilder.getEntityMetadata()
+    const pkColumn = metadata.getPrimaryKeyColumn()
+    if (pkColumn === null) {
+      return 0
+    }
+
+    const originalLimit = this.queryBuilder.getLimitValue()
+    const originalOffset = this.queryBuilder.getOffsetValue()
+    let limitAdjusted = false
+    let resultSet: relationalStore.ResultSet | null = null
+
+    try {
+      if (originalLimit > 0 || originalOffset > 0) {
+        try {
+          this.queryBuilder.limit(0)
+          this.queryBuilder.offset(0)
+        } catch (e) {
+          const errorMessage = e instanceof Error ? e.message : String(e)
+          throw new ExecutionError('COUNT', errorMessage)
+        }
+        limitAdjusted = true
+      }
+
+      const buildResult = PredicateBuilder.build(this.queryBuilder)
+      if (!buildResult.success || buildResult.predicates === null) {
+        throw new ExecutionError('COUNT', buildResult.errorMessage)
+      }
+
+      try {
+        resultSet = await store.query(buildResult.predicates, [pkColumn.columnName])
+      } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : String(e)
+        throw new ExecutionError('COUNT', `执行统计查询失败: ${errorMessage}`)
+      }
+
+      let count = 0
+      let columnIndex = -1
+      try {
+        columnIndex = resultSet.getColumnIndex(pkColumn.columnName)
+      } catch (e) {
+        columnIndex = -1
+      }
+
+      try {
+        while (true) {
+          let hasRow = false
+          try {
+            hasRow = resultSet.goToNextRow()
+          } catch (e) {
+            break
+          }
+          if (!hasRow) {
+            break
+          }
+
+          let idx = columnIndex
+          if (idx < 0) {
+            try {
+              idx = resultSet.getColumnIndex(pkColumn.columnName)
+            } catch (e) {
+              idx = -1
+            }
+          }
+          if (idx >= 0) {
+            let isNull = true
+            try {
+              isNull = resultSet.isColumnNull(idx)
+            } catch (e) {
+              isNull = true
+            }
+            if (!isNull) {
+              const rawValue = ResultSetUtils.getValueByRuntimeType(resultSet, idx)
+              if (rawValue !== null && !(rawValue instanceof Uint8Array)) {
+                if (idSet.has(this.toIdKey(rawValue as ValueType))) {
+                  count++
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      return count
+    } catch (error) {
+      if (error instanceof ExecutionError) {
+        throw error
+      }
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      throw new ExecutionError('COUNT', errorMessage)
+    } finally {
+      if (resultSet !== null) {
+        try {
+          resultSet.close()
+        } catch (e) {
+          // ignore
+        }
+      }
+      if (limitAdjusted) {
+        this.queryBuilder.limit(originalLimit)
+        this.queryBuilder.offset(originalOffset)
       }
     }
   }
@@ -1360,6 +1748,19 @@ export class QueryExecutor {
     }
     if (typeof value === 'boolean') {
       return value ? 1 : 0
+    }
+    if (value instanceof Date) {
+      return value.getTime()
+    }
+    if (value instanceof Uint8Array) {
+      return value
+    }
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value as object)
+      } catch (e) {
+        return null
+      }
     }
     return null
   }
