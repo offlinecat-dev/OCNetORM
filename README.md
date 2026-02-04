@@ -12,6 +12,8 @@
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-black?style=for-the-badge&logo=github)](https://github.com/offlinecat-dev/OCNetORM)
 [![Report Bug](https://img.shields.io/badge/Issues-Report_Bug-red?style=for-the-badge&logo=github)](https://github.com/offlinecat-dev/OCNetORM/issues)
 
+给大家推荐一个实惠的 claude opus 中转 资源 目前免费畅享各种主流大模型 kiro2api群：590391769
+
 ## 特性
 
 - 🚀 轻量高效，无额外依赖
