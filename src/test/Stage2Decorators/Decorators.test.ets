@@ -20,7 +20,7 @@ class DecoratorColumnOptionsValue implements DecoratorColumnOptions {
   type?: ColumnType;
   nullable?: boolean;
   unique?: boolean;
-  defaultValue?: string | number | null;
+  defaultValue?: string | number | boolean | null;
   length?: number;
 }
 
@@ -112,6 +112,26 @@ export default function decoratorsTest() {
           expect(column.isUnique).assertEqual(true);
           expect(column.defaultValue).assertEqual('guest');
           expect(column.length).assertEqual(64);
+        }
+      }
+    });
+
+    it('Column should support boolean default value', 0, () => {
+      class FeatureEntity {}
+      const featureInstance = new FeatureEntity();
+      registerEntity(featureInstance.constructor.name);
+      const columnOptions = new DecoratorColumnOptionsValue();
+      columnOptions.type = ColumnType.INTEGER;
+      columnOptions.defaultValue = true;
+      Column(columnOptions)(featureInstance, 'enabled');
+
+      const metadata = MetadataStorage.getInstance().getEntityMetadata(featureInstance.constructor.name);
+      expect(metadata !== null).assertEqual(true);
+      if (metadata) {
+        const column = metadata.getColumnByProperty('enabled');
+        expect(column !== null).assertEqual(true);
+        if (column) {
+          expect(column.defaultValue).assertEqual(true);
         }
       }
     });

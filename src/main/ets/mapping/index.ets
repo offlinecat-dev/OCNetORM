@@ -3,7 +3,7 @@
  */
 
 // 类型转换器
-export { TypeConverter } from './TypeConverter'
+export { TypeConverter, TypeConversionOptions } from './TypeConverter'
 
 // 数据映射器
 export {

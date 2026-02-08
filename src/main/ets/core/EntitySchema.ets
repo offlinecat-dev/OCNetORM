@@ -24,7 +24,7 @@ export interface ColumnSchema {
   /** 是否唯一 */
   unique?: boolean
   /** 默认值 */
-  defaultValue?: string | number | null
+  defaultValue?: string | number | boolean | null
   /** TEXT 长度 */
   length?: number
   /** 是否主键 */

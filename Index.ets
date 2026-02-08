@@ -38,6 +38,8 @@ export {
   getErrorLocale,
   registerErrorLocaleMessages,
   formatErrorMessage,
+  sanitizeErrorMessage,
+  sanitizeSqlPreview,
   // 基础错误类
   OrmError,
   ErrorContext,
@@ -193,6 +195,7 @@ export {
 export {
   // 类型转换器
   TypeConverter,
+  TypeConversionOptions,
   // 数据映射器
   ValuesBucket,
   EntityPropertyValue,

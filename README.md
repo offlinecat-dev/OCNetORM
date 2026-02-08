@@ -1,9 +1,15 @@
 # OCORM
 
+> **QQ 交流群：`1012852504`**  
+> 欢迎加入交流 OCORM 使用经验、问题反馈与最佳实践。
+>
+> **kiro2api 群：`590391769`**  
+> 推荐一个实惠的 Claude Opus 中转，资源目前免费畅享各种主流大模型。
+
 **轻量级 HarmonyOS SQLite ORM 框架**
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.4.20-green.svg)](https://github.com/offlinecat-dev/OCNetORM/releases)
+[![Version](https://img.shields.io/badge/Version-2.4.30-green.svg)](https://github.com/offlinecat-dev/OCNetORM/releases)
 [![HarmonyOS](https://img.shields.io/badge/HarmonyOS-Next-orange.svg)](https://developer.harmonyos.com)
 [![OpenHarmony](https://img.shields.io/badge/OpenHarmony-5.0+-purple.svg)](https://www.openharmony.cn)
 
@@ -55,14 +61,14 @@
 
 ## 安装
 
-[![ohpm](https://img.shields.io/badge/ohpm-v2.4.20-blue?style=for-the-badge)](https://ohpm.openharmony.cn/)
+[![ohpm](https://img.shields.io/badge/ohpm-v2.4.30-blue?style=for-the-badge)](https://ohpm.openharmony.cn/)
 
 在 HarmonyOS 项目的 `oh-package.json5` 中添加依赖：
 
 ```json5
 {
   "dependencies": {
-    "@offlinecat/ocorm": "2.4.20"
+    "@offlinecat/ocorm": "2.4.30"
   }
 }
 ```

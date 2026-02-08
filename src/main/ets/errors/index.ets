@@ -47,6 +47,7 @@ export {
 
 // 基础错误类
 export { OrmError, ErrorContext } from './OrmError'
+export { sanitizeErrorMessage, sanitizeSqlPreview } from './ErrorSanitizer'
 
 // 元数据错误
 export {

@@ -40,6 +40,24 @@ const setupNoKeyMetadata = (): void => {
   storage.registerColumn('NoKey', nameColumn);
 };
 
+const setupFeatureMetadata = (): void => {
+  const storage = MetadataStorage.getInstance();
+  storage.registerEntity('Feature');
+
+  const idColumn = new ColumnMetadata('id', 'id')
+    .setType(ColumnType.INTEGER)
+    .setPrimaryKey(true)
+    .setAutoIncrement(true)
+    .setNullable(false);
+  storage.registerColumn('Feature', idColumn);
+
+  const enabledColumn = new ColumnMetadata('enabled', 'enabled')
+    .setType(ColumnType.INTEGER)
+    .setNullable(false)
+    .setDefaultValue(true);
+  storage.registerColumn('Feature', enabledColumn);
+};
+
 export default function dataMapperTest() {
   describe('dataMapperTest', () => {
     beforeEach(() => {
@@ -87,6 +105,15 @@ export default function dataMapperTest() {
       }
 
       expect(threw).assertEqual(true);
+    });
+
+    it('toValuesBucket should convert boolean default values to integers', 0, () => {
+      setupFeatureMetadata();
+      const mapper = new DataMapper('Feature');
+      const data = new EntityData('Feature');
+
+      const bucket = mapper.toValuesBucket(data);
+      expect(bucket.get('enabled')).assertEqual(1);
     });
 
     it('fromResultSetRow should convert types and apply defaults', 0, () => {

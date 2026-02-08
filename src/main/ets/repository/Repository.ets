@@ -146,6 +146,17 @@ export class Repository {
     }
   }
 
+  private closeResultSet(resultSet: relationalStore.ResultSet | null): void {
+    if (resultSet === null) {
+      return
+    }
+    try {
+      resultSet.close()
+    } catch (e) {
+      // ignore
+    }
+  }
+
   /**
    * 保存实体（插入或更新）
    * 根据主键值判断是 INSERT 还是 UPDATE
@@ -381,30 +392,33 @@ export class Repository {
         predicates.isNull(deletedAtColumn)
       }
 
-      const resultSet = await store.query(predicates)
+      let resultSet: relationalStore.ResultSet | null = null
+      try {
+        resultSet = await store.query(predicates)
 
-      // 记录查询日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`SELECT * FROM ${this.entityMetadata.tableName} WHERE ${pkColumn.columnName} = ${String(id)}`, duration)
+        // 记录查询日志
+        const duration = Date.now() - startTime
+        this.logger.logQuery(`SELECT * FROM ${this.entityMetadata.tableName} WHERE ${pkColumn.columnName} = ${String(id)}`, duration)
 
-      if (resultSet.goToFirstRow()) {
-        const row = ResultSetUtils.toRow(resultSet, this.entityMetadata)
-        resultSet.close()
-        const entityData = this.dataMapper.fromResultSetRow(row)
+        if (resultSet.goToFirstRow()) {
+          const row = ResultSetUtils.toRow(resultSet, this.entityMetadata)
+          const entityData = this.dataMapper.fromResultSetRow(row)
 
-        // 执行 afterLoad 钩子
-        await this.hooksProcessor.executeAfterLoad(this.entityName, entityData)
+          // 执行 afterLoad 钩子
+          await this.hooksProcessor.executeAfterLoad(this.entityName, entityData)
 
-        // 缓存查询结果（仅在不包含已删除数据时缓存）
-        if (useCache && !includeDeleted && this.queryCache.isEnabled()) {
-          this.queryCache.set(this.entityName, id, entityData)
+          // 缓存查询结果（仅在不包含已删除数据时缓存）
+          if (useCache && !includeDeleted && this.queryCache.isEnabled()) {
+            this.queryCache.set(this.entityName, id, entityData)
+          }
+
+          return entityData
         }
 
-        return entityData
+        return null
+      } finally {
+        this.closeResultSet(resultSet)
       }
-
-      resultSet.close()
-      return null
     } catch (error) {
       // 如果是钩子执行错误，直接抛出
       if (error instanceof HookExecutionError) {
@@ -436,20 +450,22 @@ export class Repository {
         predicates.isNull(deletedAtColumn)
       }
 
-      const resultSet = await store.query(predicates)
-
-      // 记录查询日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`SELECT * FROM ${this.entityMetadata.tableName}`, duration)
-
+      let resultSet: relationalStore.ResultSet | null = null
       const results: Array<EntityData> = []
+      try {
+        resultSet = await store.query(predicates)
 
-      while (resultSet.goToNextRow()) {
-        const row = this.resultSetToRow(resultSet)
-        results.push(this.dataMapper.fromResultSetRow(row))
+        // 记录查询日志
+        const duration = Date.now() - startTime
+        this.logger.logQuery(`SELECT * FROM ${this.entityMetadata.tableName}`, duration)
+
+        while (resultSet.goToNextRow()) {
+          const row = this.resultSetToRow(resultSet)
+          results.push(this.dataMapper.fromResultSetRow(row))
+        }
+      } finally {
+        this.closeResultSet(resultSet)
       }
-
-      resultSet.close()
 
       // 批量执行 afterLoad 钩子
       await this.hooksProcessor.executeAfterLoadBatch(this.entityName, results)
@@ -1416,9 +1432,14 @@ export class Repository {
       checkPredicates.and()
       checkPredicates.equalTo(relation.joinTargetKey, targetId)
 
-      const checkResult = await store.query(checkPredicates)
-      const exists = checkResult.rowCount > 0
-      checkResult.close()
+      let checkResult: relationalStore.ResultSet | null = null
+      let exists = false
+      try {
+        checkResult = await store.query(checkPredicates)
+        exists = checkResult.rowCount > 0
+      } finally {
+        this.closeResultSet(checkResult)
+      }
 
       if (exists) {
         // 关联已存在，直接返回成功

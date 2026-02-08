@@ -14,7 +14,7 @@ import { HookExecutionError } from '../errors/HookError'
  */
 export class HooksProcessor {
   /** 单例实例 */
-  private static instance: HooksProcessor | null = null
+  private static instance: HooksProcessor = new HooksProcessor()
 
   /**
    * 私有构造函数，防止外部实例化
@@ -27,9 +27,6 @@ export class HooksProcessor {
    * @returns HooksProcessor 实例
    */
   static getInstance(): HooksProcessor {
-    if (HooksProcessor.instance === null) {
-      HooksProcessor.instance = new HooksProcessor()
-    }
     return HooksProcessor.instance
   }
 
@@ -37,7 +34,7 @@ export class HooksProcessor {
    * 重置单例实例（主要用于测试）
    */
   static resetInstance(): void {
-    HooksProcessor.instance = null
+    HooksProcessor.instance = new HooksProcessor()
   }
 
   /**

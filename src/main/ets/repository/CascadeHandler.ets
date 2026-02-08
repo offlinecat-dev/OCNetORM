@@ -29,16 +29,17 @@ export type CascadeRepositoryFactory = (entityName: string) => CascadeRepository
  * 级联处理器
  */
 export class CascadeHandler {
-  private static instance: CascadeHandler | null = null
+  private static instance: CascadeHandler = new CascadeHandler()
 
   private constructor() {
   }
 
   static getInstance(): CascadeHandler {
-    if (CascadeHandler.instance === null) {
-      CascadeHandler.instance = new CascadeHandler()
-    }
     return CascadeHandler.instance
+  }
+
+  static resetInstance(): void {
+    CascadeHandler.instance = new CascadeHandler()
   }
 
   async handleBeforeSave(

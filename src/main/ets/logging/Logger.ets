@@ -38,7 +38,7 @@ const MAX_LOG_HISTORY: number = 200
  */
 export class Logger {
   /** 单例实例 */
-  private static instance: Logger | null = null
+  private static instance: Logger = new Logger()
   /** 是否启用日志 */
   private enabled: boolean = false
   /** 日志级别 */
@@ -63,9 +63,6 @@ export class Logger {
    * @returns Logger 实例
    */
   static getInstance(): Logger {
-    if (Logger.instance === null) {
-      Logger.instance = new Logger()
-    }
     return Logger.instance
   }
 
@@ -73,7 +70,7 @@ export class Logger {
    * 重置单例实例（仅用于测试）
    */
   static resetInstance(): void {
-    Logger.instance = null
+    Logger.instance = new Logger()
   }
 
   /**

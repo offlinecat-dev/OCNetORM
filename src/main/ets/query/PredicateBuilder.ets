@@ -229,7 +229,8 @@ export class PredicateBuilder {
       return PredicateBuilder.arrayToString(value)
     }
     if (typeof value === 'string') {
-      return `'${value}'`
+      const escaped = value.replace(/'/g, "''")
+      return `'${escaped}'`
     }
     return String(value)
   }
@@ -278,7 +279,7 @@ export class PredicateBuilder {
   private static arrayToString(values: Array<ValueType>): string {
     const strs: Array<string> = []
     for (let i = 0; i < values.length; i++) {
-      strs.push(PredicateBuilder.valueToString(values[i]))
+      strs.push(PredicateBuilder.singleValueToString(values[i]))
     }
     return strs.join(', ')
   }

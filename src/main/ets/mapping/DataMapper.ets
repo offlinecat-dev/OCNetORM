@@ -625,7 +625,12 @@ export class DataMapper {
           }
           // 使用默认值或 null
           if (column.defaultValue !== null) {
-            bucket.set(column.columnName, column.defaultValue)
+            const defaultDbValue = TypeConverter.toDbValue(
+              column.defaultValue,
+              column.columnType,
+              this.inferPropertyType(column)
+            )
+            bucket.set(column.columnName, defaultDbValue)
           } else {
             bucket.set(column.columnName, null)
           }

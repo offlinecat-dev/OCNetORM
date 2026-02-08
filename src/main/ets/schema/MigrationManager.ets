@@ -180,6 +180,17 @@ export class MigrationManager {
     }
   }
 
+  private closeResultSet(resultSet: relationalStore.ResultSet | null): void {
+    if (resultSet === null) {
+      return
+    }
+    try {
+      resultSet.close()
+    } catch (e) {
+      // ignore
+    }
+  }
+
   /**
    * 注册迁移脚本
    * @param migration 迁移脚本
@@ -215,22 +226,8 @@ export class MigrationManager {
    * @returns 排序后的迁移脚本数组
    */
   getMigrationsByOrder(): Array<Migration> {
-    // 复制数组以避免修改原数组
-    const sorted: Array<Migration> = []
-    for (let i = 0; i < this.migrations.length; i++) {
-      sorted.push(this.migrations[i])
-    }
-
-    // 冒泡排序（按版本号升序）
-    for (let i = 0; i < sorted.length - 1; i++) {
-      for (let j = 0; j < sorted.length - 1 - i; j++) {
-        if (sorted[j].version > sorted[j + 1].version) {
-          const temp = sorted[j]
-          sorted[j] = sorted[j + 1]
-          sorted[j + 1] = temp
-        }
-      }
-    }
+    const sorted = this.migrations.slice()
+    sorted.sort((left: Migration, right: Migration) => left.version - right.version)
 
     return sorted
   }
@@ -390,18 +387,21 @@ export class MigrationManager {
 
       // 查询当前版本
       const predicates = new relationalStore.RdbPredicates(MigrationManager.VERSION_TABLE)
-      const resultSet = await store.query(predicates)
+      let resultSet: relationalStore.ResultSet | null = null
+      try {
+        resultSet = await store.query(predicates)
 
-      if (resultSet.goToFirstRow()) {
-        const versionIndex = resultSet.getColumnIndex('version')
-        const version = resultSet.getLong(versionIndex)
-        resultSet.close()
-        this.currentVersion = version
-        return version
+        if (resultSet.goToFirstRow()) {
+          const versionIndex = resultSet.getColumnIndex('version')
+          const version = resultSet.getLong(versionIndex)
+          this.currentVersion = version
+          return version
+        }
+
+        return 0
+      } finally {
+        this.closeResultSet(resultSet)
       }
-
-      resultSet.close()
-      return 0
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('SELECT', `获取数据库版本失败: ${errorMessage}`)
@@ -424,9 +424,14 @@ export class MigrationManager {
 
       // 检查是否有记录，如果没有则插入初始记录
       const predicates = new relationalStore.RdbPredicates(MigrationManager.VERSION_TABLE)
-      const resultSet = await store.query(predicates)
-      const hasRecord = resultSet.goToFirstRow()
-      resultSet.close()
+      let resultSet: relationalStore.ResultSet | null = null
+      let hasRecord = false
+      try {
+        resultSet = await store.query(predicates)
+        hasRecord = resultSet.goToFirstRow()
+      } finally {
+        this.closeResultSet(resultSet)
+      }
 
       if (!hasRecord) {
         const insertValues: relationalStore.ValuesBucket = {
@@ -474,6 +479,8 @@ export class MigrationManager {
   async migrateTo(store: relationalStore.RdbStore, targetVersion: number): Promise<MigrationExecutionResult> {
     const currentVersion = await this.getCurrentVersionFromDb(store)
     const results: Array<MigrationResult> = []
+    const successLogRecords: Array<MigrationLogRecord> = []
+    let transactionActive = false
 
     if (targetVersion === currentVersion) {
       return MigrationExecutionResult.createSuccess(currentVersion, targetVersion, results)
@@ -482,6 +489,7 @@ export class MigrationManager {
     try {
       // 开始事务
       store.beginTransaction()
+      transactionActive = true
 
       if (targetVersion > currentVersion) {
         // 升级
@@ -502,7 +510,7 @@ export class MigrationManager {
             await migration.up(store)
             const executionTime = Date.now() - startTime
             results.push(new MigrationResult(migration.version, true, executionTime))
-            await this.safeLog(store, {
+            successLogRecords.push({
               version: migration.version,
               name: migration.description,
               type: 'MIGRATION',
@@ -515,8 +523,8 @@ export class MigrationManager {
             const errorMessage = error instanceof Error ? error.message : String(error)
             results.push(new MigrationResult(migration.version, false, executionTime, errorMessage))
 
-            // 回滚事务
-            store.rollBack()
+            const rollbackErrorMessage = this.rollbackSafely(store)
+            const finalErrorMessage = this.mergeFailureMessage(errorMessage, rollbackErrorMessage)
             await this.safeLog(store, {
               version: migration.version,
               name: migration.description,
@@ -524,11 +532,11 @@ export class MigrationManager {
               direction: MigrationDirection.UP,
               summary: `迁移 v${migration.version} 执行失败`,
               success: false,
-              errorMessage
+              errorMessage: finalErrorMessage
             })
             return MigrationExecutionResult.createFailure(
               currentVersion, targetVersion, currentVersion, results,
-              `迁移 v${migration.version} 失败: ${errorMessage}`
+              `迁移 v${migration.version} 失败: ${finalErrorMessage}`
             )
           }
         }
@@ -544,7 +552,7 @@ export class MigrationManager {
             await migration.down(store)
             const executionTime = Date.now() - startTime
             results.push(new MigrationResult(migration.version, true, executionTime))
-            await this.safeLog(store, {
+            successLogRecords.push({
               version: migration.version,
               name: migration.description,
               type: 'MIGRATION',
@@ -557,8 +565,8 @@ export class MigrationManager {
             const errorMessage = error instanceof Error ? error.message : String(error)
             results.push(new MigrationResult(migration.version, false, executionTime, errorMessage))
 
-            // 回滚事务
-            store.rollBack()
+            const rollbackErrorMessage = this.rollbackSafely(store)
+            const finalErrorMessage = this.mergeFailureMessage(errorMessage, rollbackErrorMessage)
             await this.safeLog(store, {
               version: migration.version,
               name: migration.description,
@@ -566,11 +574,11 @@ export class MigrationManager {
               direction: MigrationDirection.DOWN,
               summary: `回滚 v${migration.version} 执行失败`,
               success: false,
-              errorMessage
+              errorMessage: finalErrorMessage
             })
             return MigrationExecutionResult.createFailure(
               currentVersion, targetVersion, currentVersion, results,
-              `回滚 v${migration.version} 失败: ${errorMessage}`
+              `回滚 v${migration.version} 失败: ${finalErrorMessage}`
             )
           }
         }
@@ -581,19 +589,23 @@ export class MigrationManager {
 
       // 提交事务
       store.commit()
+      transactionActive = false
+      await this.safeLogBatch(store, successLogRecords)
 
       return MigrationExecutionResult.createSuccess(currentVersion, targetVersion, results)
     } catch (error) {
-      // 尝试回滚
-      try {
-        store.rollBack()
-      } catch (rollbackError) {
-        // 忽略回滚错误
-      }
-
+      const rollbackErrorMessage = transactionActive ? this.rollbackSafely(store) : ''
       const errorMessage = error instanceof Error ? error.message : String(error)
+      const finalErrorMessage = this.mergeFailureMessage(errorMessage, rollbackErrorMessage)
+      await this.safeLog(store, {
+        type: 'MIGRATION',
+        direction: targetVersion > currentVersion ? MigrationDirection.UP : MigrationDirection.DOWN,
+        summary: '迁移事务执行失败',
+        success: false,
+        errorMessage: finalErrorMessage
+      })
       return MigrationExecutionResult.createFailure(
-        currentVersion, targetVersion, currentVersion, results, errorMessage
+        currentVersion, targetVersion, currentVersion, results, finalErrorMessage
       )
     }
   }
@@ -669,17 +681,13 @@ export class MigrationManager {
 
       return SchemaMigrationExecutionResult.createSuccess(diff, executedSql, skippedChanges)
     } catch (error) {
-      try {
-        store.rollBack()
-      } catch (rollbackError) {
-        // 忽略回滚错误
-      }
-
+      const rollbackErrorMessage = this.rollbackSafely(store)
       const errorMessage = error instanceof Error ? error.message : String(error)
+      const finalErrorMessage = this.mergeFailureMessage(errorMessage, rollbackErrorMessage)
       if (logChanges && currentChange !== null) {
-        await this.safeLogSchemaChange(store, currentChange, false, '自动迁移执行失败', currentSql, errorMessage)
+        await this.safeLogSchemaChange(store, currentChange, false, '自动迁移执行失败', currentSql, finalErrorMessage)
       }
-      return SchemaMigrationExecutionResult.createFailure(diff, executedSql, skippedChanges, errorMessage)
+      return SchemaMigrationExecutionResult.createFailure(diff, executedSql, skippedChanges, finalErrorMessage)
     }
   }
 
@@ -733,6 +741,31 @@ export class MigrationManager {
       await this.logManager.log(store, record)
     } catch (error) {
       // 忽略日志写入错误
+    }
+  }
+
+  private rollbackSafely(store: relationalStore.RdbStore): string {
+    try {
+      store.rollBack()
+      return ''
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  private mergeFailureMessage(errorMessage: string, rollbackErrorMessage: string): string {
+    if (!rollbackErrorMessage) {
+      return errorMessage
+    }
+    return `${errorMessage}; 回滚失败: ${rollbackErrorMessage}`
+  }
+
+  private async safeLogBatch(store: relationalStore.RdbStore, records: Array<MigrationLogRecord>): Promise<void> {
+    if (records.length === 0) {
+      return
+    }
+    for (let i = 0; i < records.length; i++) {
+      await this.safeLog(store, records[i])
     }
   }
 

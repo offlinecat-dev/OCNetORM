@@ -15,21 +15,18 @@ export interface ValidationRule {
 }
 
 export class ValidationMetadataStorage {
-  private static instance: ValidationMetadataStorage | null = null
+  private static instance: ValidationMetadataStorage = new ValidationMetadataStorage()
   private rules: Map<string, Map<string, Array<ValidationRule>>> = new Map()
 
   private constructor() {
   }
 
   static getInstance(): ValidationMetadataStorage {
-    if (ValidationMetadataStorage.instance === null) {
-      ValidationMetadataStorage.instance = new ValidationMetadataStorage()
-    }
     return ValidationMetadataStorage.instance
   }
 
   static resetInstance(): void {
-    ValidationMetadataStorage.instance = null
+    ValidationMetadataStorage.instance = new ValidationMetadataStorage()
   }
 
   registerRule(entityName: string, propertyName: string, rule: ValidationRule): void {

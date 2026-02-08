@@ -32,7 +32,7 @@ export class ColumnMetadata {
   isUnique: boolean = false
 
   /** 默认值 */
-  defaultValue: string | number | null = null
+  defaultValue: string | number | boolean | null = null
 
   /** TEXT 类型最大长度，0 表示无限制 */
   length: number = 0
@@ -102,7 +102,7 @@ export class ColumnMetadata {
    * @param value 默认值
    * @returns 当前实例，支持链式调用
    */
-  setDefaultValue(value: string | number | null): ColumnMetadata {
+  setDefaultValue(value: string | number | boolean | null): ColumnMetadata {
     this.defaultValue = value
     return this
   }

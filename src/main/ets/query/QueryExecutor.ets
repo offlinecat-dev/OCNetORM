@@ -78,6 +78,59 @@ export class QueryExecutor {
     }
   }
 
+  private closeResultSet(resultSet: relationalStore.ResultSet | null): void {
+    if (resultSet === null) {
+      return
+    }
+    try {
+      resultSet.close()
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  private getEffectiveQueryTimeoutMs(): number {
+    const queryLevelTimeout = this.queryBuilder.getQueryTimeoutMs()
+    if (queryLevelTimeout > 0) {
+      return queryLevelTimeout
+    }
+    return DatabaseManager.getInstance().getQueryTimeoutMs()
+  }
+
+  private async withQueryTimeout<T>(task: Promise<T>, operation: string): Promise<T> {
+    const timeoutMs = this.getEffectiveQueryTimeoutMs()
+    if (timeoutMs <= 0) {
+      return await task
+    }
+
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false
+      const timeoutId = setTimeout(() => {
+        if (settled) {
+          return
+        }
+        settled = true
+        reject(new ExecutionError(operation, `查询超时 (${timeoutMs}ms)`))
+      }, timeoutMs)
+
+      task.then((value: T) => {
+        if (settled) {
+          return
+        }
+        settled = true
+        clearTimeout(timeoutId)
+        resolve(value)
+      }).catch((error: Error | Object | string) => {
+        if (settled) {
+          return
+        }
+        settled = true
+        clearTimeout(timeoutId)
+        reject(error)
+      })
+    })
+  }
+
   /**
    * 执行查询并返回所有结果
    * @returns Promise<Array<EntityData>>
@@ -89,6 +142,9 @@ export class QueryExecutor {
     const originalLimit = this.queryBuilder.getLimitValue()
     const originalOffset = this.queryBuilder.getOffsetValue()
     let limitAdjusted = false
+    let querySlotAcquired = false
+    await DatabaseManager.getInstance().acquireQuerySlot()
+    querySlotAcquired = true
     try {
       const store = this.getStore()
 
@@ -121,22 +177,22 @@ export class QueryExecutor {
       // 执行查询
       const selectedColumns = this.queryBuilder.getSelectedColumns()
       const queryColumns = inMemoryFilterIds ? this.ensurePrimaryKeySelected(selectedColumns) : selectedColumns
-      let resultSet: relationalStore.ResultSet
-
-      if (queryColumns.length > 0) {
-        resultSet = await store.query(buildResult.predicates, queryColumns)
-      } else {
-        resultSet = await store.query(buildResult.predicates)
-      }
-
-      // 转换结果
+      let resultSet: relationalStore.ResultSet | null = null
       let results: Array<EntityData> = []
-      while (resultSet.goToNextRow()) {
-        const row = this.resultSetToRow(resultSet)
-        results.push(this.dataMapper.fromResultSetRow(row))
-      }
+      try {
+        if (queryColumns.length > 0) {
+          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates, queryColumns), 'SELECT')
+        } else {
+          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates), 'SELECT')
+        }
 
-      resultSet.close()
+        while (resultSet !== null && resultSet.goToNextRow()) {
+          const row = this.resultSetToRow(resultSet)
+          results.push(this.dataMapper.fromResultSetRow(row))
+        }
+      } finally {
+        this.closeResultSet(resultSet)
+      }
 
       if (inMemoryFilterIds) {
         results = this.filterByIds(results, inMemoryFilterIds)
@@ -157,6 +213,9 @@ export class QueryExecutor {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('SELECT', errorMessage)
     } finally {
+      if (querySlotAcquired) {
+        DatabaseManager.getInstance().releaseQuerySlot()
+      }
       if (limitAdjusted) {
         this.queryBuilder.limit(originalLimit)
         this.queryBuilder.offset(originalOffset)
@@ -290,6 +349,9 @@ export class QueryExecutor {
     const originalConditionCount = this.queryBuilder.getConditions().length
     let subQueryFilterApplied = false
     let inMemoryFilterIds: Set<string> | null = null
+    let querySlotAcquired = false
+    await DatabaseManager.getInstance().acquireQuerySlot()
+    querySlotAcquired = true
     try {
       const store = this.getStore()
 
@@ -315,6 +377,9 @@ export class QueryExecutor {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('COUNT', errorMessage)
     } finally {
+      if (querySlotAcquired) {
+        DatabaseManager.getInstance().releaseQuerySlot()
+      }
       if (subQueryFilterApplied) {
         this.restoreConditions(originalConditionCount)
       }
@@ -334,6 +399,9 @@ export class QueryExecutor {
     const originalLimit = this.queryBuilder.getLimitValue()
     const originalOffset = this.queryBuilder.getOffsetValue()
     let limitAdjusted = false
+    let querySlotAcquired = false
+    await DatabaseManager.getInstance().acquireQuerySlot()
+    querySlotAcquired = true
     try {
       const store = this.getStore()
 
@@ -375,21 +443,22 @@ export class QueryExecutor {
 
         const selectedColumns = this.queryBuilder.getSelectedColumns()
         const queryColumns = this.ensurePrimaryKeySelected(selectedColumns)
-        let resultSet: relationalStore.ResultSet
-
-        if (queryColumns.length > 0) {
-          resultSet = await store.query(buildResult.predicates, queryColumns)
-        } else {
-          resultSet = await store.query(buildResult.predicates)
-        }
-
         let results: Array<EntityData> = []
-        while (resultSet.goToNextRow()) {
-          const row = this.resultSetToRow(resultSet)
-          results.push(this.dataMapper.fromResultSetRow(row))
-        }
+        let resultSet: relationalStore.ResultSet | null = null
+        try {
+          if (queryColumns.length > 0) {
+            resultSet = await this.withQueryTimeout(store.query(buildResult.predicates, queryColumns), 'SELECT')
+          } else {
+            resultSet = await this.withQueryTimeout(store.query(buildResult.predicates), 'SELECT')
+          }
 
-        resultSet.close()
+          while (resultSet !== null && resultSet.goToNextRow()) {
+            const row = this.resultSetToRow(resultSet)
+            results.push(this.dataMapper.fromResultSetRow(row))
+          }
+        } finally {
+          this.closeResultSet(resultSet)
+        }
 
         results = this.filterByIds(results, inMemoryFilterIds)
         const total = results.length
@@ -431,22 +500,23 @@ export class QueryExecutor {
 
       // 执行查询
       const selectedColumns = this.queryBuilder.getSelectedColumns()
-      let resultSet: relationalStore.ResultSet
-
-      if (selectedColumns.length > 0) {
-        resultSet = await store.query(buildResult.predicates, selectedColumns)
-      } else {
-        resultSet = await store.query(buildResult.predicates)
-      }
-
       // 转换结果
       let results: Array<EntityData> = []
-      while (resultSet.goToNextRow()) {
-        const row = this.resultSetToRow(resultSet)
-        results.push(this.dataMapper.fromResultSetRow(row))
-      }
+      let resultSet: relationalStore.ResultSet | null = null
+      try {
+        if (selectedColumns.length > 0) {
+          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates, selectedColumns), 'SELECT')
+        } else {
+          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates), 'SELECT')
+        }
 
-      resultSet.close()
+        while (resultSet !== null && resultSet.goToNextRow()) {
+          const row = this.resultSetToRow(resultSet)
+          results.push(this.dataMapper.fromResultSetRow(row))
+        }
+      } finally {
+        this.closeResultSet(resultSet)
+      }
 
       // 加载关联数据
       if (this.queryBuilder.hasRelations() && results.length > 0) {
@@ -462,6 +532,9 @@ export class QueryExecutor {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('SELECT', errorMessage)
     } finally {
+      if (querySlotAcquired) {
+        DatabaseManager.getInstance().releaseQuerySlot()
+      }
       if (limitAdjusted) {
         this.queryBuilder.limit(originalLimit)
         this.queryBuilder.offset(originalOffset)
@@ -538,6 +611,9 @@ export class QueryExecutor {
     const originalLimit = this.queryBuilder.getLimitValue()
     const originalOffset = this.queryBuilder.getOffsetValue()
     let limitAdjusted = false
+    let querySlotAcquired = false
+    await DatabaseManager.getInstance().acquireQuerySlot()
+    querySlotAcquired = true
     try {
       const store = this.getStore()
 
@@ -568,32 +644,32 @@ export class QueryExecutor {
       // 执行查询
       const selectedColumns = this.queryBuilder.getSelectedColumns()
       const queryColumns = inMemoryFilterIds ? this.ensurePrimaryKeySelected(selectedColumns) : selectedColumns
-      let resultSet: relationalStore.ResultSet
-
-      if (queryColumns.length > 0) {
-        resultSet = await store.query(buildResult.predicates, queryColumns)
-      } else {
-        resultSet = await store.query(buildResult.predicates)
-      }
-
-      // 获取数据量
-      const rowCount = resultSet.rowCount
-
+      let resultSet: relationalStore.ResultSet | null = null
+      let rowCount = 0
       let results: Array<EntityData> = []
+      try {
+        if (queryColumns.length > 0) {
+          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates, queryColumns), 'SELECT')
+        } else {
+          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates), 'SELECT')
+        }
 
-      // 根据数据量决定是否使用 TaskPool
-      // Requirements: 1.4, 1.5
-      if (rowCount > QueryExecutor.TASKPOOL_THRESHOLD) {
-        // 数据量超过阈值，尝试使用 TaskPool 优化
-        this.logger.logDebug(`数据量 ${rowCount} 超过阈值 ${QueryExecutor.TASKPOOL_THRESHOLD}，尝试使用 TaskPool 优化`)
-        results = await this.transformWithTaskPool(resultSet)
-      } else {
-        // 数据量小于等于阈值，在主线程直接执行
-        this.logger.logDebug(`数据量 ${rowCount} 未超过阈值，在主线程执行数据转换`)
-        results = this.transformInMainThread(resultSet)
+        if (resultSet === null) {
+          throw new ExecutionError('SELECT', '查询结果集为空')
+        }
+
+        rowCount = resultSet.rowCount
+
+        if (rowCount > QueryExecutor.TASKPOOL_THRESHOLD) {
+          this.logger.logDebug(`数据量 ${rowCount} 超过阈值 ${QueryExecutor.TASKPOOL_THRESHOLD}，尝试使用 TaskPool 优化`)
+          results = await this.transformWithTaskPool(resultSet)
+        } else {
+          this.logger.logDebug(`数据量 ${rowCount} 未超过阈值，在主线程执行数据转换`)
+          results = this.transformInMainThread(resultSet)
+        }
+      } finally {
+        this.closeResultSet(resultSet)
       }
-
-      resultSet.close()
 
       // 记录 TaskPool 执行耗时
       const duration = Date.now() - startTime
@@ -618,6 +694,9 @@ export class QueryExecutor {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('SELECT', errorMessage)
     } finally {
+      if (querySlotAcquired) {
+        DatabaseManager.getInstance().releaseQuerySlot()
+      }
       if (limitAdjusted) {
         this.queryBuilder.limit(originalLimit)
         this.queryBuilder.offset(originalOffset)
@@ -985,9 +1064,9 @@ export class QueryExecutor {
     }
 
     // 执行查询，只获取外键列
-    let resultSet: relationalStore.ResultSet
+    let resultSet: relationalStore.ResultSet | null = null
     try {
-      resultSet = await store.query(predicates, [inverseKey])
+      resultSet = await this.withQueryTimeout(store.query(predicates, [inverseKey]), 'SUBQUERY')
     } catch (e) {
       this.logger.logError(`子查询执行失败: ${e instanceof Error ? e.message : String(e)}`)
       return []
@@ -996,7 +1075,7 @@ export class QueryExecutor {
     // 收集源实体 ID（去重）
     const sourceIds: Set<string> = new Set()
     try {
-      while (resultSet.goToNextRow()) {
+      while (resultSet !== null && resultSet.goToNextRow()) {
         const columnIndex = resultSet.getColumnIndex(inverseKey)
         if (!resultSet.isColumnNull(columnIndex)) {
           const fkValue = ResultSetUtils.getValueByRuntimeType(resultSet, columnIndex)
@@ -1007,12 +1086,8 @@ export class QueryExecutor {
       }
     } catch (e) {
       // 忽略遍历错误
-    }
-
-    try {
-      resultSet.close()
-    } catch (e) {
-      // 忽略关闭错误
+    } finally {
+      this.closeResultSet(resultSet)
     }
 
     // 转换为数组
@@ -1072,9 +1147,9 @@ export class QueryExecutor {
       }
     }
 
-    let targetResultSet: relationalStore.ResultSet
+    let targetResultSet: relationalStore.ResultSet | null = null
     try {
-      targetResultSet = await store.query(targetPredicates, [targetPkColumn.columnName])
+      targetResultSet = await this.withQueryTimeout(store.query(targetPredicates, [targetPkColumn.columnName]), 'SUBQUERY')
     } catch (e) {
       this.logger.logError(`子查询目标表查询失败: ${e instanceof Error ? e.message : String(e)}`)
       return []
@@ -1083,7 +1158,7 @@ export class QueryExecutor {
     // 收集目标实体主键
     const targetPkValues: Array<relationalStore.ValueType> = []
     try {
-      while (targetResultSet.goToNextRow()) {
+      while (targetResultSet !== null && targetResultSet.goToNextRow()) {
         const columnIndex = targetResultSet.getColumnIndex(targetPkColumn.columnName)
         if (!targetResultSet.isColumnNull(columnIndex)) {
           const pkValue = ResultSetUtils.getValueByRuntimeType(targetResultSet, columnIndex)
@@ -1094,12 +1169,8 @@ export class QueryExecutor {
       }
     } catch (e) {
       // 忽略遍历错误
-    }
-
-    try {
-      targetResultSet.close()
-    } catch (e) {
-      // 忽略关闭错误
+    } finally {
+      this.closeResultSet(targetResultSet)
     }
 
     if (targetPkValues.length === 0) {
@@ -1116,9 +1187,9 @@ export class QueryExecutor {
     this.applySoftDeleteToPredicates(sourcePredicates, sourceMetadata)
     sourcePredicates.in(inverseKey, targetPkValues)
 
-    let sourceResultSet: relationalStore.ResultSet
+    let sourceResultSet: relationalStore.ResultSet | null = null
     try {
-      sourceResultSet = await store.query(sourcePredicates, [sourcePkColumn])
+      sourceResultSet = await this.withQueryTimeout(store.query(sourcePredicates, [sourcePkColumn]), 'SUBQUERY')
     } catch (e) {
       this.logger.logError(`子查询源表查询失败: ${e instanceof Error ? e.message : String(e)}`)
       return []
@@ -1127,7 +1198,7 @@ export class QueryExecutor {
     // 收集源实体 ID
     const sourceIds: Array<ValueType> = []
     try {
-      while (sourceResultSet.goToNextRow()) {
+      while (sourceResultSet !== null && sourceResultSet.goToNextRow()) {
         const columnIndex = sourceResultSet.getColumnIndex(sourcePkColumn)
         if (!sourceResultSet.isColumnNull(columnIndex)) {
           const pkValue = ResultSetUtils.getValueByRuntimeType(sourceResultSet, columnIndex)
@@ -1138,12 +1209,8 @@ export class QueryExecutor {
       }
     } catch (e) {
       // 忽略遍历错误
-    }
-
-    try {
-      sourceResultSet.close()
-    } catch (e) {
-      // 忽略关闭错误
+    } finally {
+      this.closeResultSet(sourceResultSet)
     }
 
     return sourceIds
@@ -1190,9 +1257,9 @@ export class QueryExecutor {
       }
     }
 
-    let targetResultSet: relationalStore.ResultSet
+    let targetResultSet: relationalStore.ResultSet | null = null
     try {
-      targetResultSet = await store.query(targetPredicates, [targetPkColumn.columnName])
+      targetResultSet = await this.withQueryTimeout(store.query(targetPredicates, [targetPkColumn.columnName]), 'SUBQUERY')
     } catch (e) {
       this.logger.logError(`子查询目标表查询失败: ${e instanceof Error ? e.message : String(e)}`)
       return []
@@ -1201,7 +1268,7 @@ export class QueryExecutor {
     // 收集目标实体主键
     const targetPkValues: Array<relationalStore.ValueType> = []
     try {
-      while (targetResultSet.goToNextRow()) {
+      while (targetResultSet !== null && targetResultSet.goToNextRow()) {
         const columnIndex = targetResultSet.getColumnIndex(targetPkColumn.columnName)
         if (!targetResultSet.isColumnNull(columnIndex)) {
           const pkValue = targetResultSet.getLong(columnIndex)
@@ -1210,12 +1277,8 @@ export class QueryExecutor {
       }
     } catch (e) {
       // 忽略遍历错误
-    }
-
-    try {
-      targetResultSet.close()
-    } catch (e) {
-      // 忽略关闭错误
+    } finally {
+      this.closeResultSet(targetResultSet)
     }
 
     if (targetPkValues.length === 0) {
@@ -1226,9 +1289,9 @@ export class QueryExecutor {
     const joinPredicates = new relationalStore.RdbPredicates(relation.joinTable)
     joinPredicates.in(relation.joinTargetKey, targetPkValues)
 
-    let joinResultSet: relationalStore.ResultSet
+    let joinResultSet: relationalStore.ResultSet | null = null
     try {
-      joinResultSet = await store.query(joinPredicates, [relation.joinSourceKey])
+      joinResultSet = await this.withQueryTimeout(store.query(joinPredicates, [relation.joinSourceKey]), 'SUBQUERY')
     } catch (e) {
       this.logger.logError(`子查询中间表查询失败: ${e instanceof Error ? e.message : String(e)}`)
       return []
@@ -1237,7 +1300,7 @@ export class QueryExecutor {
     // 收集源实体 ID（去重）
     const sourceIds: Set<string> = new Set()
     try {
-      while (joinResultSet.goToNextRow()) {
+      while (joinResultSet !== null && joinResultSet.goToNextRow()) {
         const columnIndex = joinResultSet.getColumnIndex(relation.joinSourceKey)
         if (!joinResultSet.isColumnNull(columnIndex)) {
           const sourceId = ResultSetUtils.getValueByRuntimeType(joinResultSet, columnIndex)
@@ -1248,12 +1311,8 @@ export class QueryExecutor {
       }
     } catch (e) {
       // 忽略遍历错误
-    }
-
-    try {
-      joinResultSet.close()
-    } catch (e) {
-      // 忽略关闭错误
+    } finally {
+      this.closeResultSet(joinResultSet)
     }
 
     // 转换为数组
@@ -1318,7 +1377,7 @@ export class QueryExecutor {
     const sql = `SELECT COUNT(*) AS total FROM ${tableName}${whereClause}`
     let resultSet: relationalStore.ResultSet | null = null
     try {
-      resultSet = await store.querySql(sql, args)
+      resultSet = await this.withQueryTimeout(store.querySql(sql, args), 'COUNT')
       try {
         if (resultSet.goToFirstRow()) {
           const index = resultSet.getColumnIndex('total')
@@ -1340,13 +1399,7 @@ export class QueryExecutor {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError(sql, `执行统计查询失败: ${errorMessage}`)
     } finally {
-      if (resultSet !== null) {
-        try {
-          resultSet.close()
-        } catch (e) {
-          // ignore
-        }
-      }
+      this.closeResultSet(resultSet)
     }
   }
 
@@ -1568,7 +1621,7 @@ export class QueryExecutor {
       }
 
       try {
-        resultSet = await store.query(buildResult.predicates, [pkColumn.columnName])
+        resultSet = await this.withQueryTimeout(store.query(buildResult.predicates, [pkColumn.columnName]), 'COUNT')
       } catch (e) {
         const errorMessage = e instanceof Error ? e.message : String(e)
         throw new ExecutionError('COUNT', `执行统计查询失败: ${errorMessage}`)
@@ -1631,13 +1684,7 @@ export class QueryExecutor {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('COUNT', errorMessage)
     } finally {
-      if (resultSet !== null) {
-        try {
-          resultSet.close()
-        } catch (e) {
-          // ignore
-        }
-      }
+      this.closeResultSet(resultSet)
       if (limitAdjusted) {
         this.queryBuilder.limit(originalLimit)
         this.queryBuilder.offset(originalOffset)

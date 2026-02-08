@@ -102,8 +102,8 @@ export class EntityValidator {
   }
 }
 
-function isEmptyValue(value: ValueType): boolean {
-  if (value === null) {
+function isEmptyValue(value: ValueType | undefined): boolean {
+  if (value === null || value === undefined) {
     return true
   }
   if (typeof value === 'string') {
@@ -142,8 +142,13 @@ function validateEmail(
   if (trimmed.length === 0) {
     return
   }
-  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-  if (!emailPattern.test(trimmed)) {
+  const emailPattern = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/
+  const atIndex = trimmed.lastIndexOf('@')
+  const domainPart = atIndex >= 0 ? trimmed.slice(atIndex + 1) : ''
+  const lastDot = domainPart.lastIndexOf('.')
+  const topLevelDomain = lastDot >= 0 ? domainPart.slice(lastDot + 1) : ''
+
+  if (!emailPattern.test(trimmed) || topLevelDomain.length < 2) {
     result.addError(new EmailValidationError(entityName, columnName, trimmed))
   }
 }

@@ -245,15 +245,17 @@ export class SchemaBuilder {
    * @param columnType 列类型
    * @returns 格式化后的默认值字符串
    */
-  private formatDefaultValue(value: string | number, columnType: ColumnType): string {
+  private formatDefaultValue(value: string | number | boolean, columnType: ColumnType): string {
     if (typeof value === 'string') {
       // 字符串类型需要用单引号包裹，并转义内部的单引号
       const escaped = value.replace(/'/g, "''")
       return `'${escaped}'`
-    } else {
-      // 数字类型直接返回
-      return value.toString()
     }
+    if (typeof value === 'boolean') {
+      return value ? '1' : '0'
+    }
+    // 数字类型直接返回
+    return value.toString()
   }
 
   /**

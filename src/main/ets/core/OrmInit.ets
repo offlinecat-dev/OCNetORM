@@ -8,6 +8,7 @@ import { DatabaseManager, DatabaseManagerAdapter } from '../database/DatabaseMan
 import { DatabaseConfig } from '../database/DatabaseConfig'
 import { Logger } from '../logging/Logger'
 import { LogLevel } from '../logging/LogLevel'
+import { RelationLoader } from '../query/RelationLoader'
 import { SchemaBuilder, CreateAllTablesResult } from '../schema/SchemaBuilder'
 import {
   AutoMigrationOptions,
@@ -60,6 +61,7 @@ export async function OCORMInit(
     : options.config.loggerLevel
 
   Logger.getInstance().configure(enableLogger, logLevel)
+  RelationLoader.setInClauseLimit(options.config.relationInClauseLimit)
 
   if (options.autoMigrate === true) {
     const manager = options.migrationManager ? options.migrationManager : new MigrationManager()

@@ -10,6 +10,7 @@ import {
   ERROR_INVALID_OPERATOR,
   ERROR_SUB_QUERY
 } from './ErrorCodes'
+import { sanitizeErrorMessage } from './ErrorSanitizer'
 
 /**
  * 查询错误基类
@@ -26,11 +27,12 @@ export class QueryError extends OrmError {
  */
 export class InvalidConditionError extends QueryError {
   constructor(columnName: string, reason: string) {
+    const sanitizedReason = sanitizeErrorMessage(reason)
     const context = new ErrorContext()
     context.columnName = columnName
     context.operation = '构建查询条件'
-    context.details = reason
-    super(`查询条件无效: ${reason}`, ERROR_INVALID_CONDITION, context)
+    context.details = sanitizedReason
+    super(`查询条件无效: ${sanitizedReason}`, ERROR_INVALID_CONDITION, context)
     this.name = 'InvalidConditionError'
   }
 }
@@ -40,11 +42,12 @@ export class InvalidConditionError extends QueryError {
  */
 export class PredicateBuildError extends QueryError {
   constructor(entityName: string, reason: string) {
+    const sanitizedReason = sanitizeErrorMessage(reason)
     const context = new ErrorContext()
     context.entityName = entityName
     context.operation = '构建 RdbPredicates'
-    context.details = reason
-    super(`构建 RdbPredicates 失败: ${reason}`, ERROR_PREDICATE_BUILD_FAILED, context)
+    context.details = sanitizedReason
+    super(`构建 RdbPredicates 失败: ${sanitizedReason}`, ERROR_PREDICATE_BUILD_FAILED, context)
     this.name = 'PredicateBuildError'
   }
 }
@@ -72,10 +75,11 @@ export class SubQueryError extends QueryError {
    * @param message 错误消息
    */
   constructor(message: string) {
+    const sanitizedMessage = sanitizeErrorMessage(message)
     const context = new ErrorContext()
     context.operation = '构建子查询'
-    context.details = message
-    super(`子查询构建失败: ${message}`, ERROR_SUB_QUERY, context)
+    context.details = sanitizedMessage
+    super(`子查询构建失败: ${sanitizedMessage}`, ERROR_SUB_QUERY, context)
     this.name = 'SubQueryError'
   }
 }

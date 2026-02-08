@@ -27,8 +27,10 @@ export class RelationLoader {
   /** 源实体名称 */
   private sourceEntityName: string
 
-  /** IN 条件参数数量限制（SQLite 默认限制为 999，保守设置为 500） */
-  private static readonly IN_CLAUSE_LIMIT: number = 500
+  /** IN 条件参数数量限制默认值 */
+  private static readonly DEFAULT_IN_CLAUSE_LIMIT: number = 500
+  /** IN 条件参数数量限制（可配置） */
+  private static inClauseLimit: number = RelationLoader.DEFAULT_IN_CLAUSE_LIMIT
 
   /**
    * 构造函数
@@ -36,6 +38,25 @@ export class RelationLoader {
    */
   constructor(sourceEntityName: string) {
     this.sourceEntityName = sourceEntityName
+  }
+
+  static setInClauseLimit(limit: number): void {
+    RelationLoader.inClauseLimit = RelationLoader.normalizeInClauseLimit(limit)
+  }
+
+  static getInClauseLimit(): number {
+    return RelationLoader.inClauseLimit
+  }
+
+  static resetInClauseLimit(): void {
+    RelationLoader.inClauseLimit = RelationLoader.DEFAULT_IN_CLAUSE_LIMIT
+  }
+
+  private static normalizeInClauseLimit(limit: number): number {
+    if (limit < 1) {
+      return 1
+    }
+    return Math.floor(limit)
   }
 
   /**
@@ -56,6 +77,14 @@ export class RelationLoader {
     return batches
   }
 
+  private resolveInClauseLimit(): number {
+    const config = DatabaseManager.getInstance().getConfig()
+    if (config !== null && config.relationInClauseLimit > 0) {
+      return config.relationInClauseLimit
+    }
+    return RelationLoader.inClauseLimit
+  }
+
   /**
    * 获取 RdbStore 实例
    * @returns RdbStore 实例
@@ -67,6 +96,17 @@ export class RelationLoader {
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : String(e)
       throw new ExecutionError('DATABASE', errorMessage)
+    }
+  }
+
+  private closeResultSet(resultSet: relationalStore.ResultSet | null): void {
+    if (resultSet === null) {
+      return
+    }
+    try {
+      resultSet.close()
+    } catch (e) {
+      // ignore
     }
   }
 
@@ -311,7 +351,7 @@ export class RelationLoader {
     const relatedByFk: Map<string, Array<EntityData>> = new Map()
 
     // 分批处理 IN 条件，避免超出 SQLite 参数限制
-    const batches = this.splitIntoBatches(pkValues, RelationLoader.IN_CLAUSE_LIMIT)
+    const batches = this.splitIntoBatches(pkValues, this.resolveInClauseLimit())
 
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex]
@@ -330,7 +370,7 @@ export class RelationLoader {
         continue
       }
 
-      let resultSet: relationalStore.ResultSet
+      let resultSet: relationalStore.ResultSet | null = null
       try {
         resultSet = await store.query(predicates)
       } catch (e) {
@@ -339,7 +379,7 @@ export class RelationLoader {
       }
 
       try {
-        while (resultSet.goToNextRow()) {
+        while (resultSet !== null && resultSet.goToNextRow()) {
           const row = this.resultSetToRow(resultSet, targetMetadata)
           const relatedEntity = targetMapper.fromResultSetRow(row)
 
@@ -372,12 +412,8 @@ export class RelationLoader {
         }
       } catch (e) {
         // 遍历结果集失败，忽略
-      }
-
-      try {
-        resultSet.close()
-      } catch (e) {
-        // 关闭失败，忽略
+      } finally {
+        this.closeResultSet(resultSet)
       }
     }
 
@@ -478,7 +514,7 @@ export class RelationLoader {
     const relatedByPk: Map<string, EntityData> = new Map()
 
     // 分批处理 IN 条件，避免超出 SQLite 参数限制
-    const fkBatches = this.splitIntoBatches(fkValues, RelationLoader.IN_CLAUSE_LIMIT)
+    const fkBatches = this.splitIntoBatches(fkValues, this.resolveInClauseLimit())
 
     for (let batchIndex = 0; batchIndex < fkBatches.length; batchIndex++) {
       const batch = fkBatches[batchIndex]
@@ -497,7 +533,7 @@ export class RelationLoader {
         continue
       }
 
-      let resultSet: relationalStore.ResultSet
+      let resultSet: relationalStore.ResultSet | null = null
       try {
         resultSet = await store.query(predicates)
       } catch (e) {
@@ -506,7 +542,7 @@ export class RelationLoader {
       }
 
       try {
-        while (resultSet.goToNextRow()) {
+        while (resultSet !== null && resultSet.goToNextRow()) {
           const row = this.resultSetToRow(resultSet, targetMetadata)
           const relatedEntity = targetMapper.fromResultSetRow(row)
 
@@ -519,12 +555,8 @@ export class RelationLoader {
         }
       } catch (e) {
         // 遍历结果集失败，忽略
-      }
-
-      try {
-        resultSet.close()
-      } catch (e) {
-        // 关闭失败，忽略
+      } finally {
+        this.closeResultSet(resultSet)
       }
     }
 
@@ -670,7 +702,7 @@ export class RelationLoader {
       return entities
     }
 
-    let resultSet: relationalStore.ResultSet
+    let resultSet: relationalStore.ResultSet | null = null
     try {
       resultSet = await store.query(predicates)
     } catch (e) {
@@ -687,7 +719,7 @@ export class RelationLoader {
     const relatedByPk: Map<string, EntityData> = new Map()
 
     try {
-      while (resultSet.goToNextRow()) {
+      while (resultSet !== null && resultSet.goToNextRow()) {
         const row = this.resultSetToRow(resultSet, targetMetadata)
         const relatedEntity = targetMapper.fromResultSetRow(row)
 
@@ -700,12 +732,8 @@ export class RelationLoader {
       }
     } catch (e) {
       // 遍历结果集失败，忽略
-    }
-
-    try {
-      resultSet.close()
-    } catch (e) {
-      // 关闭失败，忽略
+    } finally {
+      this.closeResultSet(resultSet)
     }
 
     // 将关联数据设置到主实体
@@ -819,7 +847,7 @@ export class RelationLoader {
       return entities
     }
 
-    let resultSet: relationalStore.ResultSet
+    let resultSet: relationalStore.ResultSet | null = null
     try {
       resultSet = await store.query(predicates)
     } catch (e) {
@@ -836,7 +864,7 @@ export class RelationLoader {
     const relatedByFk: Map<string, EntityData> = new Map()
 
     try {
-      while (resultSet.goToNextRow()) {
+      while (resultSet !== null && resultSet.goToNextRow()) {
         const row = this.resultSetToRow(resultSet, targetMetadata)
         const relatedEntity = targetMapper.fromResultSetRow(row)
 
@@ -864,12 +892,8 @@ export class RelationLoader {
       }
     } catch (e) {
       // 遍历结果集失败，忽略
-    }
-
-    try {
-      resultSet.close()
-    } catch (e) {
-      // 关闭失败，忽略
+    } finally {
+      this.closeResultSet(resultSet)
     }
 
     // 将关联数据设置到主实体
@@ -972,7 +996,7 @@ export class RelationLoader {
     const targetIdSet: Set<string> = new Set()
 
     // 分批查询中间表
-    const pkBatches = this.splitIntoBatches(pkValues, RelationLoader.IN_CLAUSE_LIMIT)
+    const pkBatches = this.splitIntoBatches(pkValues, this.resolveInClauseLimit())
 
     for (let batchIndex = 0; batchIndex < pkBatches.length; batchIndex++) {
       const batch = pkBatches[batchIndex]
@@ -990,7 +1014,7 @@ export class RelationLoader {
         continue
       }
 
-      let joinResultSet: relationalStore.ResultSet
+      let joinResultSet: relationalStore.ResultSet | null = null
       try {
         joinResultSet = await store.query(joinPredicates)
       } catch (e) {
@@ -999,7 +1023,7 @@ export class RelationLoader {
       }
 
       try {
-        while (joinResultSet.goToNextRow()) {
+        while (joinResultSet !== null && joinResultSet.goToNextRow()) {
           // 获取源实体外键值
           const sourceKeyIndex = joinResultSet.getColumnIndex(relation.joinSourceKey)
           const targetKeyIndex = joinResultSet.getColumnIndex(relation.joinTargetKey)
@@ -1043,12 +1067,8 @@ export class RelationLoader {
         }
       } catch (e) {
         // 遍历结果集失败，忽略
-      }
-
-      try {
-        joinResultSet.close()
-      } catch (e) {
-        // 关闭失败，忽略
+      } finally {
+        this.closeResultSet(joinResultSet)
       }
     }
 
@@ -1069,7 +1089,7 @@ export class RelationLoader {
     const targetEntitiesByPk: Map<string, EntityData> = new Map()
 
     // 分批查询目标表
-    const targetIdBatches = this.splitIntoBatches(allTargetIds, RelationLoader.IN_CLAUSE_LIMIT)
+    const targetIdBatches = this.splitIntoBatches(allTargetIds, this.resolveInClauseLimit())
 
     for (let batchIndex = 0; batchIndex < targetIdBatches.length; batchIndex++) {
       const batch = targetIdBatches[batchIndex]
@@ -1088,7 +1108,7 @@ export class RelationLoader {
         continue
       }
 
-      let targetResultSet: relationalStore.ResultSet
+      let targetResultSet: relationalStore.ResultSet | null = null
       try {
         targetResultSet = await store.query(targetPredicates)
       } catch (e) {
@@ -1097,7 +1117,7 @@ export class RelationLoader {
       }
 
       try {
-        while (targetResultSet.goToNextRow()) {
+        while (targetResultSet !== null && targetResultSet.goToNextRow()) {
           const row = this.resultSetToRow(targetResultSet, targetMetadata)
           const targetEntity = targetMapper.fromResultSetRow(row)
 
@@ -1110,12 +1130,8 @@ export class RelationLoader {
         }
       } catch (e) {
         // 遍历结果集失败，忽略
-      }
-
-      try {
-        targetResultSet.close()
-      } catch (e) {
-        // 关闭失败，忽略
+      } finally {
+        this.closeResultSet(targetResultSet)
       }
     }
 

@@ -7,6 +7,11 @@ import { ColumnType } from '../types/ColumnType'
 import { ValueType, DbValueType } from '../types/ValueTypes'
 import { TypeConversionError } from '../errors/MappingError'
 
+export interface TypeConversionOptions {
+  strict?: boolean
+  fallbackValue?: ValueType
+}
+
 /**
  * 类型转换器类
  * 提供 ArkTS 类型与数据库类型之间的转换方法
@@ -148,6 +153,21 @@ export class TypeConverter {
     }
   }
 
+  private static handleConversionError(
+    actualType: string,
+    expectedType: string,
+    columnName: string,
+    options?: TypeConversionOptions
+  ): ValueType {
+    if (options?.strict === false) {
+      if (options.fallbackValue !== undefined) {
+        return options.fallbackValue
+      }
+      return null
+    }
+    throw new TypeConversionError(actualType, expectedType, columnName)
+  }
+
   /**
    * 数据库值转换为 ArkTS 值
    * 根据目标属性类型进行适当的转换
@@ -156,7 +176,12 @@ export class TypeConverter {
    * @param columnName 列名（用于错误报告）
    * @returns ArkTS 值
    */
-  static fromDbValue(value: DbValueType, propertyType: string, columnName: string): ValueType {
+  static fromDbValue(
+    value: DbValueType,
+    propertyType: string,
+    columnName: string,
+    options?: TypeConversionOptions
+  ): ValueType {
     // 处理 null 值
     if (value === null) {
       return null
@@ -171,7 +196,7 @@ export class TypeConverter {
         if (typeof value === 'number') {
           return String(value)
         }
-        throw new TypeConversionError(typeof value, 'string', columnName)
+        return TypeConverter.handleConversionError(typeof value, 'string', columnName, options)
 
       case 'number':
         if (typeof value === 'number') {
@@ -183,27 +208,27 @@ export class TypeConverter {
             return num
           }
         }
-        throw new TypeConversionError(typeof value, 'number', columnName)
+        return TypeConverter.handleConversionError(typeof value, 'number', columnName, options)
 
       case 'boolean':
         if (typeof value === 'number') {
           return TypeConverter.intToBoolean(value)
         }
-        throw new TypeConversionError(typeof value, 'boolean', columnName)
+        return TypeConverter.handleConversionError(typeof value, 'boolean', columnName, options)
 
       case 'Date':
         if (typeof value === 'number') {
           // 返回时间戳，由调用方转换为 Date
           return value
         }
-        throw new TypeConversionError(typeof value, 'Date', columnName)
+        return TypeConverter.handleConversionError(typeof value, 'Date', columnName, options)
 
       case 'object':
         if (typeof value === 'string') {
           // 返回 JSON 字符串，由调用方解析
           return value
         }
-        throw new TypeConversionError(typeof value, 'object', columnName)
+        return TypeConverter.handleConversionError(typeof value, 'object', columnName, options)
 
       case 'Uint8Array':
       case 'blob':

@@ -120,6 +120,37 @@ export default function queryCacheTest() {
       expect(result).assertEqual(null);
     });
 
+    it('keys should not collide when id contains null character', 0, () => {
+      const cache = QueryCache.getInstance();
+      cache.configure({ enabled: true });
+
+      const plain = new EntityData('User');
+      plain.addProperty('id', 'abc', 'string');
+      plain.addProperty('name', 'Plain', 'string');
+
+      const withNull = new EntityData('User');
+      withNull.addProperty('id', 'abc\u0000def', 'string');
+      withNull.addProperty('name', 'WithNull', 'string');
+
+      cache.set('User', 'abc', plain);
+      cache.set('User', 'abc\u0000def', withNull);
+
+      expect(cache.get('User', 'abc')?.getPropertyValue('name')).assertEqual('Plain');
+      expect(cache.get('User', 'abc\u0000def')?.getPropertyValue('name')).assertEqual('WithNull');
+    });
+
+    it('invalidateEntity should handle entityName with null character safely', 0, () => {
+      const cache = QueryCache.getInstance();
+      cache.configure({ enabled: true });
+      cache.set('User', 1, createEntityData('User', 1, 'UserOnly'));
+      cache.set('User\u0000Archive', 1, createEntityData('User\u0000Archive', 1, 'Archived'));
+
+      cache.invalidateEntity('User\u0000Archive');
+
+      expect(cache.get('User\u0000Archive', 1)).assertEqual(null);
+      expect(cache.get('User', 1)?.getPropertyValue('name')).assertEqual('UserOnly');
+    });
+
     it('set should not store when disabled', 0, () => {
       const cache = QueryCache.getInstance();
       cache.configure({ enabled: false });
@@ -168,6 +199,18 @@ export default function queryCacheTest() {
       expect(result?.getPropertyValue('name')).assertEqual('Original');
     });
 
+    it('set should deep clone related entity from original data', 0, () => {
+      const cache = QueryCache.getInstance();
+      cache.configure({ enabled: true });
+      const entityData = createEntityDataWithRelated('User', 1);
+      cache.set('User', 1, entityData);
+
+      entityData.getRelatedSingle('profile')?.setPropertyValue('id', 777);
+
+      const result = cache.get('User', 1);
+      expect(result?.getRelatedSingle('profile')?.getPropertyValue('id')).assertEqual(100);
+    });
+
     it('deep clone should preserve transient data', 0, () => {
       const cache = QueryCache.getInstance();
       cache.configure({ enabled: true });
@@ -190,6 +233,19 @@ export default function queryCacheTest() {
       expect(related?.singleEntity?.getPropertyValue('id')).assertEqual(100);
     });
 
+    it('deep clone should isolate related single entity mutation', 0, () => {
+      const cache = QueryCache.getInstance();
+      cache.configure({ enabled: true });
+      const entityData = createEntityDataWithRelated('User', 1);
+      cache.set('User', 1, entityData);
+
+      const result1 = cache.get('User', 1);
+      result1?.getRelatedSingle('profile')?.setPropertyValue('id', 999);
+
+      const result2 = cache.get('User', 1);
+      expect(result2?.getRelatedSingle('profile')?.getPropertyValue('id')).assertEqual(100);
+    });
+
     it('deep clone should preserve related array', 0, () => {
       const cache = QueryCache.getInstance();
       cache.configure({ enabled: true });
@@ -206,6 +262,44 @@ export default function queryCacheTest() {
       const related = result?.getRelatedValue('posts');
       expect(related?.isArray).assertEqual(true);
       expect(related?.entityArray.length).assertEqual(2);
+    });
+
+    it('deep clone should isolate related array entity mutation', 0, () => {
+      const cache = QueryCache.getInstance();
+      cache.configure({ enabled: true });
+      const entityData = new EntityData('User');
+      entityData.addProperty('id', 1, 'number');
+      const post = new EntityData('Post');
+      post.addProperty('id', 10, 'number');
+      entityData.setRelatedArray('posts', [post]);
+      cache.set('User', 1, entityData);
+
+      const result1 = cache.get('User', 1);
+      if (result1 !== null) {
+        result1.getRelatedArray('posts')[0].setPropertyValue('id', 888);
+      }
+
+      const result2 = cache.get('User', 1);
+      const relatedPosts = result2 ? result2.getRelatedArray('posts') : [];
+      expect(relatedPosts.length).assertEqual(1);
+      expect(relatedPosts[0].getPropertyValue('id')).assertEqual(10);
+    });
+
+    it('deep clone should handle cyclic related entities', 0, () => {
+      const cache = QueryCache.getInstance();
+      cache.configure({ enabled: true });
+      const user = new EntityData('User');
+      user.addProperty('id', 1, 'number');
+      const profile = new EntityData('Profile');
+      profile.addProperty('id', 100, 'number');
+      user.setRelatedSingle('profile', profile);
+      profile.setRelatedSingle('user', user);
+
+      cache.set('User', 1, user);
+
+      const result = cache.get('User', 1);
+      expect(result?.getRelatedSingle('profile') !== null).assertEqual(true);
+      expect(result?.getRelatedSingle('profile')?.getRelatedSingle('user') !== null).assertEqual(true);
     });
 
     // ==================== TTL 过期测试 ====================
@@ -436,6 +530,24 @@ export default function queryCacheTest() {
 
       const stats = cache.getStatistics();
       expect(stats.hitRate).assertEqual(1);
+    });
+
+    it('counters should scale down near MAX_SAFE_INTEGER and continue increment', 0, () => {
+      const cache = QueryCache.getInstance();
+      cache.configure({ enabled: true });
+      cache.set('User', 1, createEntityData('User', 1));
+
+      cache.setStatisticsForTest(Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER - 1);
+
+      cache.get('User', 1);
+      const afterScale = cache.getStatistics();
+      expect(afterScale.hits < Number.MAX_SAFE_INTEGER).assertEqual(true);
+      expect(afterScale.misses < Number.MAX_SAFE_INTEGER).assertEqual(true);
+      expect(afterScale.hitRate <= 1).assertEqual(true);
+
+      cache.get('User', 999);
+      const afterMiss = cache.getStatistics();
+      expect(afterMiss.misses).assertEqual(afterScale.misses + 1);
     });
 
     it('size should reflect current cache entries', 0, () => {

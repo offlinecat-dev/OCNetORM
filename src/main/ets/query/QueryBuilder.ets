@@ -60,6 +60,8 @@ export class QueryBuilder {
 
   /** 子查询列表（用于 whereExists 深层过滤） */
   private subQueries: Array<SubQuery> = []
+  /** 查询超时（毫秒），0 表示禁用 */
+  private queryTimeoutMs: number = 0
 
   /**
    * 构造函数
@@ -611,6 +613,24 @@ export class QueryBuilder {
   }
 
   /**
+   * 设置查询超时（毫秒）
+   * @param timeoutMs 超时时间，<= 0 表示禁用
+   * @returns 当前实例（支持链式调用）
+   */
+  timeout(timeoutMs: number): QueryBuilder {
+    this.queryTimeoutMs = timeoutMs > 0 ? Math.floor(timeoutMs) : 0
+    return this
+  }
+
+  /**
+   * 获取查询超时（毫秒）
+   * @returns 超时时间，0 表示禁用
+   */
+  getQueryTimeoutMs(): number {
+    return this.queryTimeoutMs
+  }
+
+  /**
    * 获取分页参数
    * @returns PaginationParams 实例，如果未设置分页则返回 null
    */
@@ -662,6 +682,7 @@ export class QueryBuilder {
     this.pageNumber = 0
     this.pageSizeValue = 0
     this.subQueries = []
+    this.queryTimeoutMs = 0
     return this
   }
 

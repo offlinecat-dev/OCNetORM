@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## [2.4.30] - 2026-02-08
+
+### Bug 修复
+- 修复 `TypeConverter.fromDbValue()` 仅支持严格抛错的问题，新增宽松模式可返回兜底值
+- 修复 `EntityValidator` 对 `undefined` 空值处理不一致的问题，并收紧邮箱校验（拒绝短 TLD）
+- 修复单例初始化并发安全问题（`MetadataStorage`/`DatabaseManager`/`QueryCache` 等）
+- 优化 `MigrationManager.getMigrationsByOrder()`，由冒泡排序改为内置排序
+- 修复 `MigrationManager` 日志写入与事务边界不清晰问题，统一失败日志路径并在提交后记录成功日志
+- 修复 `RelationLoader` IN 条件上限硬编码问题，支持运行时配置
+- 补充 `CascadeHandler.resetInstance()`，提升测试隔离性
+- 修复 `QueryCache` 统计计数在接近 `MAX_SAFE_INTEGER` 时停滞的问题，改为可缩放并持续增长
+- 错误链路增加统一脱敏（路径/长数字/字面量）以降低敏感信息泄露风险
+
+### 改进
+- `DatabaseConfig` 新增查询超时、并发查询上限、关联 IN 上限配置
+- `QueryBuilder` 新增 `timeout()`；`QueryExecutor` 支持查询超时与并发槽位控制
+- `DatabaseManager` 支持运行时应用日志级别、查询超时和并发查询限制
+
+### 测试
+- `entry/src/main/ets/suites` 新增对应回归用例（Mapping/Validation/Schema/Relation/Query/Database/Error）
+
 ## [2.4.20] - 2026-01-30
 
 ### 严重 Bug 修复

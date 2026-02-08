@@ -17,7 +17,7 @@ import { RelationType } from '../types/RelationType'
  */
 export class MetadataStorage {
   /** 单例实例 */
-  private static instance: MetadataStorage | null = null
+  private static instance: MetadataStorage = new MetadataStorage()
 
   /** 实体元数据映射表，键为实体类名 */
   private entities: Map<string, EntityMetadata> = new Map()
@@ -39,9 +39,6 @@ export class MetadataStorage {
    * @returns MetadataStorage 实例
    */
   static getInstance(): MetadataStorage {
-    if (MetadataStorage.instance === null) {
-      MetadataStorage.instance = new MetadataStorage()
-    }
     return MetadataStorage.instance
   }
 
@@ -290,6 +287,6 @@ export class MetadataStorage {
    * 重置单例实例（主要用于测试）
    */
   static resetInstance(): void {
-    MetadataStorage.instance = null
+    MetadataStorage.instance = new MetadataStorage()
   }
 }

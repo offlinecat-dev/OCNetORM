@@ -62,6 +62,28 @@ export default function schemaBuilderTest() {
       expect(sql.indexOf("DEFAULT 'default_name'") >= 0).assertEqual(true);
     });
 
+    it('generateCreateTableSql should handle boolean default values', 0, () => {
+      const metadata = new EntityMetadata('FeatureConfig', 'feature_configs');
+      const idColumn = new ColumnMetadata('id', 'id');
+      idColumn.columnType = ColumnType.INTEGER;
+      idColumn.isPrimaryKey = true;
+      metadata.addColumn(idColumn);
+
+      const enabledColumn = new ColumnMetadata('enabled', 'enabled');
+      enabledColumn.columnType = ColumnType.INTEGER;
+      enabledColumn.defaultValue = true;
+      metadata.addColumn(enabledColumn);
+
+      const archivedColumn = new ColumnMetadata('archived', 'archived');
+      archivedColumn.columnType = ColumnType.INTEGER;
+      archivedColumn.defaultValue = false;
+      metadata.addColumn(archivedColumn);
+
+      const sql = builder.generateCreateTableSql(metadata);
+      expect(sql.indexOf('"enabled" INTEGER DEFAULT 1') >= 0).assertEqual(true);
+      expect(sql.indexOf('"archived" INTEGER DEFAULT 0') >= 0).assertEqual(true);
+    });
+
     // generateCreateTableSql - 唯一约束
     it('generateCreateTableSql should handle unique constraint', 0, () => {
       const metadata = new EntityMetadata('User', 'users');

@@ -21,7 +21,7 @@ export class ColumnOptions {
   /** 是否唯一，默认 false */
   unique: boolean = false
   /** 默认值 */
-  defaultValue: string | number | null = null
+  defaultValue: string | number | boolean | null = null
   /** TEXT 类型最大长度，0 表示无限制 */
   length: number = 0
 
@@ -37,7 +37,7 @@ export interface DecoratorColumnOptions {
   type?: ColumnType
   nullable?: boolean
   unique?: boolean
-  defaultValue?: string | number | null
+  defaultValue?: string | number | boolean | null
   length?: number
 }
 

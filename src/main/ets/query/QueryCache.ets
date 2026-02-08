@@ -53,9 +53,9 @@ export interface CacheStatistics {
  */
 export class QueryCache {
   /** 单例实例 */
-  private static instance: QueryCache | null = null
+  private static instance: QueryCache = new QueryCache()
 
-  /** 缓存存储 - 键格式: entityName:id */
+  /** 缓存存储 - 键格式: encode(entityName)\x00encode(id) */
   private cache: Map<string, CacheEntry> = new Map()
   /** 最大缓存条目数 */
   private maxSize: number = 100
@@ -67,16 +67,32 @@ export class QueryCache {
   private hits: number = 0
   /** 缓存未命中次数 */
   private misses: number = 0
+  /** 统计计数缩放阈值，保持 hits + misses 在安全整数范围内 */
+  private static readonly COUNTER_SCALE_THRESHOLD: number = Math.floor(Number.MAX_SAFE_INTEGER / 2)
 
   private safeIncrement(value: number): number {
-    return value < Number.MAX_SAFE_INTEGER ? value + 1 : value
+    return value + 1
+  }
+
+  private scaleDownCounters(): void {
+    this.hits = Math.floor(this.hits / 2)
+    this.misses = Math.floor(this.misses / 2)
+  }
+
+  private ensureCounterHeadroom(): void {
+    while (this.hits >= QueryCache.COUNTER_SCALE_THRESHOLD ||
+      this.misses >= QueryCache.COUNTER_SCALE_THRESHOLD) {
+      this.scaleDownCounters()
+    }
   }
 
   private recordHit(): void {
+    this.ensureCounterHeadroom()
     this.hits = this.safeIncrement(this.hits)
   }
 
   private recordMiss(): void {
+    this.ensureCounterHeadroom()
     this.misses = this.safeIncrement(this.misses)
   }
 
@@ -91,9 +107,6 @@ export class QueryCache {
    * @returns QueryCache 实例
    */
   static getInstance(): QueryCache {
-    if (QueryCache.instance === null) {
-      QueryCache.instance = new QueryCache()
-    }
     return QueryCache.instance
   }
 
@@ -115,24 +128,36 @@ export class QueryCache {
 
   /**
    * 生成缓存键
-   * 使用特殊分隔符避免实体名或 ID 中包含分隔符时产生的键冲突
+   * 对键组件进行编码，避免分隔符冲突
    * @param entityName 实体名称
    * @param id 实体主键值
    * @returns 缓存键
    */
+  private encodeKeyPart(value: string): string {
+    return encodeURIComponent(value)
+  }
+
   private generateKey(entityName: string, id: ValueType): string {
-    // 使用 \x00 作为分隔符，该字符不会出现在正常的实体名或 ID 中
-    return `${entityName}\x00${String(id)}`
+    const encodedEntity = this.encodeKeyPart(entityName)
+    const encodedId = this.encodeKeyPart(String(id))
+    return `${encodedEntity}\x00${encodedId}`
   }
 
   /**
    * 深拷贝 EntityData 对象
    * 避免缓存数据被外部修改污染
    * @param data 原始 EntityData
+   * @param visited 已访问映射（用于处理循环引用）
    * @returns 深拷贝后的 EntityData
    */
-  private deepCloneEntityData(data: EntityData): EntityData {
+  private deepCloneEntityData(data: EntityData, visited: Map<EntityData, EntityData> = new Map()): EntityData {
+    const existing = visited.get(data)
+    if (existing !== undefined) {
+      return existing
+    }
+
     const cloned = new EntityData(data.entityName)
+    visited.set(data, cloned)
 
     // 复制所有属性
     // 优先从 propertyMap 获取值（支持通过 setPropertyValue 设置的属性）
@@ -160,7 +185,7 @@ export class QueryCache {
       cloned.setTransient(key, value)
     }
 
-    // 复制关联数据（浅拷贝关联实体引用，避免丢失已加载的关系）
+    // 复制关联数据（深拷贝，避免关联实体引用污染缓存）
     const relatedKeys = data.getRelatedPropertyNames()
     for (let i = 0; i < relatedKeys.length; i++) {
       const key = relatedKeys[i]
@@ -169,9 +194,19 @@ export class QueryCache {
         continue
       }
       if (relatedValue.isArray) {
-        cloned.setRelatedArray(key, [...relatedValue.entityArray])
+        const clonedArray: Array<EntityData> = []
+        for (let j = 0; j < relatedValue.entityArray.length; j++) {
+          const item = relatedValue.entityArray[j]
+          clonedArray.push(this.deepCloneEntityData(item, visited))
+        }
+        cloned.setRelatedArray(key, clonedArray)
       } else {
-        cloned.setRelatedSingle(key, relatedValue.singleEntity)
+        if (relatedValue.singleEntity !== null) {
+          const clonedRelated = this.deepCloneEntityData(relatedValue.singleEntity, visited)
+          cloned.setRelatedSingle(key, clonedRelated)
+        } else {
+          cloned.setRelatedSingle(key, null)
+        }
       }
     }
 
@@ -254,7 +289,7 @@ export class QueryCache {
    * @param entityName 实体名称
    */
   invalidateEntity(entityName: string): void {
-    const prefix = `${entityName}\x00`
+    const prefix = `${this.encodeKeyPart(entityName)}\x00`
     const keysToDelete: Array<string> = []
 
     this.cache.forEach((_: CacheEntry, key: string) => {
@@ -285,6 +320,26 @@ export class QueryCache {
     this.cache.clear()
     this.hits = 0
     this.misses = 0
+  }
+
+  /**
+   * 设置统计计数（仅用于测试）
+   * @param hits 命中次数
+   * @param misses 未命中次数
+   */
+  setStatisticsForTest(hits: number, misses: number): void {
+    this.hits = this.normalizeCounterForTest(hits)
+    this.misses = this.normalizeCounterForTest(misses)
+  }
+
+  private normalizeCounterForTest(value: number): number {
+    if (value <= 0) {
+      return 0
+    }
+    if (value > Number.MAX_SAFE_INTEGER) {
+      return Number.MAX_SAFE_INTEGER
+    }
+    return Math.floor(value)
   }
 
   /**
@@ -337,9 +392,7 @@ export class QueryCache {
    * 重置单例实例（主要用于测试）
    */
   static resetInstance(): void {
-    if (QueryCache.instance !== null) {
-      QueryCache.instance.clear()
-      QueryCache.instance = null
-    }
+    QueryCache.instance.clear()
+    QueryCache.instance = new QueryCache()
   }
 }

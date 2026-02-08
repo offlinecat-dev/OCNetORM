@@ -9,6 +9,7 @@ import {
   ERROR_TRANSACTION_ROLLBACK,
   ERROR_TRANSACTION_COMMIT_FAILED
 } from './ErrorCodes'
+import { sanitizeErrorMessage } from './ErrorSanitizer'
 
 /**
  * 事务错误基类
@@ -37,10 +38,11 @@ export class TransactionNotStartedError extends TransactionError {
  */
 export class TransactionRollbackError extends TransactionError {
   constructor(reason: string) {
+    const sanitizedReason = sanitizeErrorMessage(reason)
     const context = new ErrorContext()
     context.operation = '事务回滚'
-    context.details = reason
-    super(`事务已回滚: ${reason}`, ERROR_TRANSACTION_ROLLBACK, context)
+    context.details = sanitizedReason
+    super(`事务已回滚: ${sanitizedReason}`, ERROR_TRANSACTION_ROLLBACK, context)
     this.name = 'TransactionRollbackError'
   }
 }
@@ -50,10 +52,11 @@ export class TransactionRollbackError extends TransactionError {
  */
 export class TransactionCommitError extends TransactionError {
   constructor(reason: string) {
+    const sanitizedReason = sanitizeErrorMessage(reason)
     const context = new ErrorContext()
     context.operation = '事务提交'
-    context.details = reason
-    super(`事务提交失败: ${reason}`, ERROR_TRANSACTION_COMMIT_FAILED, context)
+    context.details = sanitizedReason
+    super(`事务提交失败: ${sanitizedReason}`, ERROR_TRANSACTION_COMMIT_FAILED, context)
     this.name = 'TransactionCommitError'
   }
 }

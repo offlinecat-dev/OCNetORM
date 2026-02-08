@@ -29,7 +29,7 @@ export interface DatabaseManagerAdapter {
  */
 export class DatabaseManager implements DatabaseManagerAdapter {
   /** 单例实例 */
-  private static instance: DatabaseManager | null = null
+  private static instance: DatabaseManager = new DatabaseManager()
   /** RdbStore 实例 */
   private store: relationalStore.RdbStore | null = null
   /** 数据库配置 */
@@ -40,14 +40,19 @@ export class DatabaseManager implements DatabaseManagerAdapter {
   private healthCheckIntervalId: number = 0
   /** 连接是否健康 */
   private healthy: boolean = false
-  /** 日志记录器 */
-  private logger: Logger
+  /** 查询超时（毫秒），0 表示禁用 */
+  private queryTimeoutMs: number = 0
+  /** 最大并发查询数，0 表示不限制 */
+  private maxConcurrentQueries: number = 0
+  /** 当前已占用的查询槽位 */
+  private activeQuerySlots: number = 0
+  /** 等待查询槽位的队列 */
+  private pendingQueryResolvers: Array<() => void> = []
 
   /**
    * 私有构造函数，防止外部实例化
    */
   private constructor() {
-    this.logger = Logger.getInstance()
   }
 
   /**
@@ -55,10 +60,11 @@ export class DatabaseManager implements DatabaseManagerAdapter {
    * @returns DatabaseManager 实例
    */
   static getInstance(): DatabaseManager {
-    if (DatabaseManager.instance === null) {
-      DatabaseManager.instance = new DatabaseManager()
-    }
     return DatabaseManager.instance
+  }
+
+  private getLogger(): Logger {
+    return Logger.getInstance()
   }
 
   /**
@@ -127,12 +133,21 @@ export class DatabaseManager implements DatabaseManagerAdapter {
     // 停止健康检查
     this.stopHealthCheck()
 
-    if (this.store !== null) {
-      // RdbStore 没有显式的 close 方法，设置为 null 让 GC 回收
-      this.store = null
-      this.initialized = false
-      this.healthy = false
+    const currentStore = this.store
+    if (currentStore !== null) {
+      try {
+        await currentStore.close()
+      } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : String(e)
+        this.getLogger().logError(`关闭数据库连接失败: ${errorMessage}`)
+      }
     }
+
+    this.store = null
+    this.initialized = false
+    this.healthy = false
+    this.activeQuerySlots = 0
+    this.releaseAllWaitingQueries()
   }
 
   /**
@@ -148,16 +163,16 @@ export class DatabaseManager implements DatabaseManagerAdapter {
         const isHealthy = await this.ping()
         if (!isHealthy && this.healthy) {
           this.healthy = false
-          this.logger.logError('数据库连接健康检查失败')
+          this.getLogger().logError('数据库连接健康检查失败')
         } else if (isHealthy && !this.healthy) {
           this.healthy = true
-          this.logger.logInfo('数据库连接已恢复')
+          this.getLogger().logInfo('数据库连接已恢复')
         }
       } catch (e) {
         if (this.healthy) {
           this.healthy = false
           const errorMessage = e instanceof Error ? e.message : String(e)
-          this.logger.logError(`数据库健康检查异常: ${errorMessage}`)
+          this.getLogger().logError(`数据库健康检查异常: ${errorMessage}`)
         }
       }
     }, intervalMs)
@@ -216,18 +231,59 @@ export class DatabaseManager implements DatabaseManagerAdapter {
     return this.config
   }
 
+  getQueryTimeoutMs(): number {
+    return this.queryTimeoutMs
+  }
+
+  getMaxConcurrentQueries(): number {
+    return this.maxConcurrentQueries
+  }
+
+  getActiveQuerySlots(): number {
+    return this.activeQuerySlots
+  }
+
+  async acquireQuerySlot(): Promise<void> {
+    if (this.maxConcurrentQueries <= 0) {
+      return
+    }
+    while (this.maxConcurrentQueries > 0 && this.activeQuerySlots >= this.maxConcurrentQueries) {
+      await new Promise<void>((resolve) => {
+        this.pendingQueryResolvers.push(resolve)
+      })
+    }
+    if (this.maxConcurrentQueries <= 0) {
+      return
+    }
+    this.activeQuerySlots++
+  }
+
+  releaseQuerySlot(): void {
+    if (this.activeQuerySlots > 0) {
+      this.activeQuerySlots--
+    }
+    if (this.maxConcurrentQueries <= 0) {
+      this.releaseAllWaitingQueries()
+      return
+    }
+    this.resolveWaitingQuery()
+  }
+
   /**
    * 重置单例实例（仅用于测试）
    */
   static resetInstance(): void {
-    if (DatabaseManager.instance !== null) {
-      DatabaseManager.instance.stopHealthCheck()
-      DatabaseManager.instance.store = null
-      DatabaseManager.instance.config = null
-      DatabaseManager.instance.initialized = false
-      DatabaseManager.instance.healthy = false
-      DatabaseManager.instance = null
-    }
+    const current = DatabaseManager.instance
+    current.stopHealthCheck()
+    current.releaseAllWaitingQueries()
+    current.store = null
+    current.config = null
+    current.initialized = false
+    current.healthy = false
+    current.queryTimeoutMs = 0
+    current.maxConcurrentQueries = 0
+    current.activeQuerySlots = 0
+    DatabaseManager.instance = new DatabaseManager()
   }
 
   /**
@@ -238,6 +294,28 @@ export class DatabaseManager implements DatabaseManagerAdapter {
     return QueryCache.getInstance()
   }
 
+  private resolveWaitingQuery(): void {
+    if (this.pendingQueryResolvers.length === 0) {
+      return
+    }
+    if (this.maxConcurrentQueries > 0 && this.activeQuerySlots >= this.maxConcurrentQueries) {
+      return
+    }
+    const resolver = this.pendingQueryResolvers.shift()
+    if (resolver !== undefined) {
+      resolver()
+    }
+  }
+
+  private releaseAllWaitingQueries(): void {
+    while (this.pendingQueryResolvers.length > 0) {
+      const resolver = this.pendingQueryResolvers.shift()
+      if (resolver !== undefined) {
+        resolver()
+      }
+    }
+  }
+
   private isSameConnectionConfig(current: DatabaseConfig, next: DatabaseConfig): boolean {
     return current.name === next.name &&
       current.securityLevel === next.securityLevel &&
@@ -245,6 +323,8 @@ export class DatabaseManager implements DatabaseManagerAdapter {
   }
 
   private applyRuntimeConfig(config: DatabaseConfig): void {
+    this.getLogger().configure(config.enableLogger, config.loggerLevel)
+
     if (config.enableQueryCache) {
       QueryCache.getInstance().configure({
         enabled: true,
@@ -255,6 +335,14 @@ export class DatabaseManager implements DatabaseManagerAdapter {
       QueryCache.getInstance().configure({
         enabled: false
       })
+    }
+
+    this.queryTimeoutMs = config.queryTimeoutMs > 0 ? config.queryTimeoutMs : 0
+    this.maxConcurrentQueries = config.maxConcurrentQueries > 0 ? config.maxConcurrentQueries : 0
+    if (this.maxConcurrentQueries === 0) {
+      this.releaseAllWaitingQueries()
+    } else {
+      this.resolveWaitingQuery()
     }
 
     if (config.healthCheckIntervalMs > 0) {

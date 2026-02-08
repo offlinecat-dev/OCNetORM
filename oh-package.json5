@@ -1,6 +1,6 @@
 {
   "name": "ocorm",
-  "version": "2.4.20",
+  "version": "2.4.30",
   "description": "A lightweight SQLite ORM framework designed for HarmonyOS (Next/OpenHarmony). Built on @ohos.data.relationalStore with Data Mapper and Repository patterns.",
   "main": "Index.ets",
   "author": "offlinecat-dev",
@@ -15,10 +15,7 @@
     "RDB"
   ],
   "homepage": "https://github.com/offlinecat-dev/OCNetORM",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/offlinecat-dev/OCNetORM.git"
-  },
+  "repository": "https://github.com/offlinecat-dev/OCNetORM.git",
   "bugs": {
     "url": "https://github.com/offlinecat-dev/OCNetORM/issues"
   },

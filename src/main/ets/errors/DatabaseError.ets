@@ -9,6 +9,7 @@ import {
   ERROR_SQL_EXECUTION_FAILED,
   ERROR_DATABASE_NOT_INITIALIZED
 } from './ErrorCodes'
+import { sanitizeErrorMessage, sanitizeSqlPreview } from './ErrorSanitizer'
 
 /**
  * 数据库错误基类
@@ -25,11 +26,12 @@ export class DatabaseError extends OrmError {
  */
 export class ConnectionError extends DatabaseError {
   constructor(dbName: string, reason: string) {
+    const sanitizedReason = sanitizeErrorMessage(reason)
     const context = new ErrorContext()
     context.tableName = dbName
     context.operation = '数据库连接'
-    context.details = reason
-    super(`数据库 "${dbName}" 连接失败: ${reason}`, ERROR_DATABASE_CONNECTION_FAILED, context)
+    context.details = sanitizedReason
+    super(`数据库 "${dbName}" 连接失败: ${sanitizedReason}`, ERROR_DATABASE_CONNECTION_FAILED, context)
     this.name = 'ConnectionError'
   }
 }
@@ -39,10 +41,12 @@ export class ConnectionError extends DatabaseError {
  */
 export class ExecutionError extends DatabaseError {
   constructor(sql: string, reason: string) {
+    const sanitizedSql = sanitizeSqlPreview(sql)
+    const sanitizedReason = sanitizeErrorMessage(reason)
     const context = new ErrorContext()
     context.operation = 'SQL 执行'
-    context.details = `SQL: ${sql.substring(0, 100)}... | 原因: ${reason}`
-    super(`SQL 执行失败: ${reason}`, ERROR_SQL_EXECUTION_FAILED, context)
+    context.details = `SQL: ${sanitizedSql} | 原因: ${sanitizedReason}`
+    super(`SQL 执行失败: ${sanitizedReason}`, ERROR_SQL_EXECUTION_FAILED, context)
     this.name = 'ExecutionError'
   }
 }

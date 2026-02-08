@@ -462,10 +462,13 @@ export class SchemaDiffer {
     return parts.join(' ')
   }
 
-  private formatDefaultValue(value: string | number, columnType: ColumnType): string {
+  private formatDefaultValue(value: string | number | boolean, columnType: ColumnType): string {
     if (typeof value === 'string') {
       const escaped = value.replace(/'/g, "''")
       return `'${escaped}'`
+    }
+    if (typeof value === 'boolean') {
+      return value ? '1' : '0'
     }
     return value.toString()
   }

@@ -29,6 +29,12 @@ export class DatabaseConfig {
   queryCacheMaxSize: number = 100
   /** 查询缓存 TTL（毫秒） */
   queryCacheTtlMs: number = 60000
+  /** 查询超时（毫秒），0 表示禁用 */
+  queryTimeoutMs: number = 0
+  /** 最大并发查询数，0 表示不限制 */
+  maxConcurrentQueries: number = 0
+  /** 关联加载 IN 条件单批上限 */
+  relationInClauseLimit: number = 500
 
   constructor(
     name: string,
@@ -77,6 +83,21 @@ export class DatabaseConfig {
     if (ttlMs !== undefined) {
       this.queryCacheTtlMs = ttlMs
     }
+    return this
+  }
+
+  setQueryTimeout(timeoutMs: number): DatabaseConfig {
+    this.queryTimeoutMs = timeoutMs > 0 ? Math.floor(timeoutMs) : 0
+    return this
+  }
+
+  setMaxConcurrentQueries(limit: number): DatabaseConfig {
+    this.maxConcurrentQueries = limit > 0 ? Math.floor(limit) : 0
+    return this
+  }
+
+  setRelationInClauseLimit(limit: number): DatabaseConfig {
+    this.relationInClauseLimit = limit > 0 ? Math.floor(limit) : 1
     return this
   }
 }
