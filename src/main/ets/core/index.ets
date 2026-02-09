@@ -29,5 +29,23 @@ export { OCORMInit, OCORMInitOptions } from './OrmInit'
 // 快速实体注册工具
 export { defineEntity, EntitySchema, ColumnSchema, SoftDeleteSchema } from './EntitySchema'
 
+// 查询作用域注册表
+export {
+  ScopeRegistry,
+  ScopeFunction,
+  ScopeDefinitions,
+  registerScope,
+  registerScopes,
+  registerEntityScope,
+  registerEntityScopes
+} from './ScopeRegistry'
+
 // 验证模块
-export { ValidationMetadataStorage, ValidationRuleType, ValidationRule, EntityValidator, ValidationResult } from '../validation/index'
+export {
+  ValidationMetadataStorage,
+  ValidationRuleType,
+  ValidationRule,
+  EntityValidator,
+  ValidationResult,
+  ValidationOptions
+} from '../validation/index'

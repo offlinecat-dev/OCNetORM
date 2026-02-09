@@ -3,7 +3,7 @@
  * 提供简单的一级缓存，减少重复查询，提升性能
  */
 
-import { EntityData } from '../mapping/DataMapper'
+import { EntityData } from '../mapping/EntityData'
 import { ValueType } from '../types/ValueTypes'
 
 /**

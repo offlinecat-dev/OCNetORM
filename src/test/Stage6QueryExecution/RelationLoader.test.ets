@@ -6,10 +6,11 @@ import { ManyToManyMetadata } from '../../main/ets/core/ManyToManyMetadata';
 import { RelationType } from '../../main/ets/types/RelationType';
 import { ColumnType } from '../../main/ets/types/ColumnType';
 import { RelationLoader } from '../../main/ets/query/RelationLoader';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 import { RelationNotFoundError } from '../../main/ets/errors/RelationError';
 import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
 import { relationalStore } from '@kit.ArkData';
+import { RelationQueryOptions } from '../../main/ets/query/RelationQueryOptions';
 
 class FakeResultSet {
   rowCount: number;
@@ -270,6 +271,20 @@ export default function relationLoaderTest() {
       entity.addProperty('id', 1, 'number');
 
       const result = await loader.loadRelation([entity], 'posts');
+      expect(result.length).assertEqual(1);
+    });
+
+    it('loadRelation should accept relation query options', 0, async () => {
+      setupUserEntity();
+      setupPostEntity();
+      setupOneToManyRelation();
+      const loader = new RelationLoader('User');
+      const entity = new EntityData('User');
+      entity.addProperty('id', 1, 'number');
+      const options = new RelationQueryOptions();
+      options.limitValue = 5;
+      options.offsetValue = 1;
+      const result = await loader.loadRelation([entity], 'posts', options);
       expect(result.length).assertEqual(1);
     });
 

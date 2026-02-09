@@ -295,6 +295,41 @@ qb.withLazy('posts')
 
 ---
 
+## 查询作用域（Scopes）
+
+查询作用域用于复用常见过滤条件。推荐优先使用 `registerScope()` 逐个注册，兼容 ArkTS 严格模式。
+
+```typescript
+import {
+  registerScope,
+  QueryBuilder,
+  QueryExecutor,
+  ConditionOperator
+} from '@offlinecat/ocorm'
+
+registerScope('User', 'active', (qb: QueryBuilder) => {
+  return qb.where('status', ConditionOperator.EQUAL, 1)
+})
+
+registerScope('User', 'adult', (qb: QueryBuilder) => {
+  return qb.where('age', ConditionOperator.GREATER_EQUAL, 18)
+})
+
+// 应用单个作用域
+const activeUsers = await new QueryExecutor(
+  new QueryBuilder('User').scope('active')
+).get()
+
+// 应用多个作用域
+const activeAdults = await new QueryExecutor(
+  new QueryBuilder('User').scopes(['active', 'adult'])
+).get()
+```
+
+> 说明：`registerScopes(entityName, scopes)` 也可用；在 ArkTS 严格规则下，若对象字面量触发限制，改用多次 `registerScope`。
+
+---
+
 ## 软删除相关
 
 ### withDeleted - 包含已删除数据

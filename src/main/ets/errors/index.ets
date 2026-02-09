@@ -32,7 +32,17 @@ export {
   ERROR_VALIDATION_FAILED,
   ERROR_VALIDATION_REQUIRED,
   ERROR_VALIDATION_LENGTH,
-  ERROR_VALIDATION_EMAIL
+  ERROR_VALIDATION_EMAIL,
+  ERROR_VALIDATION_MIN,
+  ERROR_VALIDATION_MAX,
+  ERROR_VALIDATION_RANGE,
+  ERROR_VALIDATION_PATTERN,
+  ERROR_VALIDATION_URL,
+  ERROR_VALIDATION_PHONE,
+  ERROR_VALIDATION_DATE,
+  ERROR_VALIDATION_ENUM,
+  ERROR_VALIDATION_CUSTOM,
+  ERROR_VALIDATION_UNIQUE
 } from './ErrorCodes'
 
 // 错误国际化
@@ -65,7 +75,8 @@ export {
   InvalidConditionError,
   PredicateBuildError,
   InvalidOperatorError,
-  SubQueryError
+  SubQueryError,
+  ScopeNotFoundError
 } from './QueryError'
 
 // 映射错误
@@ -113,5 +124,15 @@ export {
   RequiredValidationError,
   LengthValidationError,
   EmailValidationError,
+  MinValidationError,
+  MaxValidationError,
+  RangeValidationError,
+  PatternValidationError,
+  UrlValidationError,
+  PhoneValidationError,
+  DateValidationError,
+  EnumValidationError,
+  CustomValidationError,
+  UniqueValidationError,
   EntityValidationError
 } from './ValidationError'

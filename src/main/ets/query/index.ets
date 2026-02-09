@@ -6,7 +6,7 @@
 export { WhereCondition, LogicalOperator } from './WhereCondition'
 
 // 查询构建器
-export { QueryBuilder } from './QueryBuilder'
+export { QueryBuilder, BatchUpdateValues } from './QueryBuilder'
 
 // 子查询构建器
 export { SubQuery, SubQueryCallback } from './SubQuery'
@@ -24,6 +24,9 @@ export { RelationLoader } from './RelationLoader'
 export { PaginationParams } from './PaginationParams'
 export { PaginatedResult } from './PaginatedResult'
 
+// 聚合查询结果
+export { AggregateResult, AggregateRow } from './AggregateResult'
+
 // 关联加载结果
 export { RelationLoadResult, ParallelRelationLoadResult } from './RelationLoadResult'
 
@@ -32,3 +35,6 @@ export { TransformTaskParams, TransformTaskResult, TransformedEntityItem, RowDat
 
 // 查询缓存
 export { QueryCache, CacheEntry, QueryCacheConfig, CacheStatistics } from './QueryCache'
+
+// 关联增强配置
+export { RelationQueryOptions, RelationCountOption } from './RelationQueryOptions'

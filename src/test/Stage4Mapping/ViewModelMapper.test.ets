@@ -1,5 +1,5 @@
 import { describe, beforeEach, it, expect } from '@ohos/hypium';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 import { ViewModelMapper, ViewModelMappingConfig } from '../../main/ets/mapping/ViewModelMapper';
 import { EntityMappingError } from '../../main/ets/errors/MappingError';
 import { MetadataStorage } from '../../main/ets/core/MetadataStorage';

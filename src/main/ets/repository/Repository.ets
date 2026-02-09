@@ -6,9 +6,10 @@
 import { relationalStore } from '@kit.ArkData'
 import { EntityMetadata } from '../core/EntityMetadata'
 import { MetadataStorage } from '../core/MetadataStorage'
-import { ManyToManyMetadata } from '../core/ManyToManyMetadata'
 import { HooksProcessor } from '../core/HooksProcessor'
-import { DataMapper, EntityData, ResultSetRow } from '../mapping/DataMapper'
+import { DataMapper } from '../mapping/DataMapper'
+import { EntityData } from '../mapping/EntityData'
+import { ResultSetRow } from '../mapping/ResultSetRow'
 import { QueryBuilder } from '../query/QueryBuilder'
 import { QueryExecutor } from '../query/QueryExecutor'
 import { PaginatedResult } from '../query/PaginatedResult'
@@ -18,80 +19,21 @@ import { ValueType } from '../types/ValueTypes'
 import { ColumnType } from '../types/ColumnType'
 import { EntityNotRegisteredError, PrimaryKeyNotDefinedError } from '../errors/MetadataError'
 import { ExecutionError } from '../errors/DatabaseError'
-import { TransactionRollbackError } from '../errors/TransactionError'
-import { SoftDeleteNotEnabledError } from '../errors/SoftDeleteError'
 import { HookExecutionError } from '../errors/HookError'
-import { RelationNotFoundError } from '../errors/RelationError'
 import { BatchInsertResult } from './BatchInsertResult'
 import { BatchInsertOptions } from './BatchInsertOptions'
-import { RelationType } from '../types/RelationType'
-import { TransactionOptions, IsolationLevel } from './TransactionOptions'
+import { TransactionOptions } from './TransactionOptions'
 import { QueryCache } from '../query/QueryCache'
 import { ResultSetUtils } from '../mapping/ResultSetUtils'
-import { CascadeHandler, CascadeOperation } from './CascadeHandler'
-import { EntityValidator } from '../validation/EntityValidator'
-import { ValidationError } from '../errors/ValidationError'
-
-class TimeoutState {
-  timedOut: boolean = false
-  commitStarted: boolean = false
-  finished: boolean = false
-}
-
-/**
- * 保存结果类
- */
-export class SaveResult {
-  /** 是否成功 */
-  success: boolean = false
-  /** 受影响的行数 */
-  affectedRows: number = 0
-  /** 插入的行 ID（仅 INSERT 操作） */
-  insertId: number = 0
-  /** 错误信息 */
-  errorMessage: string = ''
-
-  static createSuccess(affectedRows: number, insertId: number = 0): SaveResult {
-    const result = new SaveResult()
-    result.success = true
-    result.affectedRows = affectedRows
-    result.insertId = insertId
-    return result
-  }
-
-  static createFailure(errorMessage: string): SaveResult {
-    const result = new SaveResult()
-    result.success = false
-    result.errorMessage = errorMessage
-    return result
-  }
-}
-
-/**
- * 删除结果类
- */
-export class DeleteResult {
-  /** 是否成功 */
-  success: boolean = false
-  /** 受影响的行数 */
-  affectedRows: number = 0
-  /** 错误信息 */
-  errorMessage: string = ''
-
-  static createSuccess(affectedRows: number): DeleteResult {
-    const result = new DeleteResult()
-    result.success = true
-    result.affectedRows = affectedRows
-    return result
-  }
-
-  static createFailure(errorMessage: string): DeleteResult {
-    const result = new DeleteResult()
-    result.success = false
-    result.errorMessage = errorMessage
-    return result
-  }
-}
+import { CascadeHandler } from './CascadeHandler'
+import { SaveResult } from './SaveResult'
+import { DeleteResult } from './DeleteResult'
+import { TransactionResult } from './TransactionResult'
+import { RelationManager } from './RelationManager'
+import { TransactionManager } from './TransactionManager'
+import { BatchOperations } from './BatchOperations'
+import { CrudOperations } from './CrudOperations'
+import { DeleteOperations } from './DeleteOperations'
 
 /**
  * 泛型仓库类
@@ -112,6 +54,16 @@ export class Repository {
   private queryCache: QueryCache
   /** 级联处理器 */
   private cascadeHandler: CascadeHandler
+  /** 关系管理器 */
+  private relationManager: RelationManager
+  /** 事务管理器 */
+  private transactionManager: TransactionManager
+  /** 批量操作管理器 */
+  private batchOperations: BatchOperations
+  /** CRUD 操作管理器 */
+  private crudOperations: CrudOperations
+  /** 删除操作管理器 */
+  private deleteOperations: DeleteOperations
 
   /**
    * 构造函数
@@ -130,6 +82,54 @@ export class Repository {
     this.logger = Logger.getInstance()
     this.queryCache = QueryCache.getInstance()
     this.cascadeHandler = CascadeHandler.getInstance()
+    this.relationManager = new RelationManager(
+      this.entityName,
+      this.logger,
+      () => this.getStore(),
+      (value) => this.toRdbValue(value),
+      (resultSet) => this.closeResultSet(resultSet)
+    )
+    this.transactionManager = new TransactionManager(
+      this.logger,
+      () => this.getStore()
+    )
+    this.batchOperations = new BatchOperations(
+      this.entityName,
+      this.entityMetadata.tableName,
+      this.dataMapper,
+      this.hooksProcessor,
+      this.logger,
+      this.queryCache,
+      () => this.getStore(),
+      async (entityData) => await this.save(entityData)
+    )
+    this.crudOperations = new CrudOperations(
+      this.entityName,
+      this.entityMetadata,
+      this.dataMapper,
+      this.hooksProcessor,
+      this.logger,
+      this.queryCache,
+      this.cascadeHandler,
+      () => this.getStore(),
+      () => this.getUpdatedAtColumnName(),
+      (value) => this.toRdbValue(value),
+      () => this,
+      (name) => new Repository(name)
+    )
+    this.deleteOperations = new DeleteOperations(
+      this.entityName,
+      this.entityMetadata,
+      this.dataMapper,
+      this.hooksProcessor,
+      this.logger,
+      this.queryCache,
+      this.cascadeHandler,
+      () => this.getStore(),
+      (value) => this.toRdbValue(value),
+      () => this,
+      (name) => new Repository(name)
+    )
   }
 
   /**
@@ -165,192 +165,7 @@ export class Repository {
    * @returns Promise<SaveResult>
    */
   async save(entityData: EntityData): Promise<SaveResult> {
-    try {
-      // 执行数据验证
-      EntityValidator.validateOrThrow(this.entityName, entityData)
-
-      // 执行 beforeSave 钩子
-      await this.hooksProcessor.executeBeforeSave(this.entityName, entityData)
-
-      const isNew = this.dataMapper.isNewRecord(entityData)
-      const operation: CascadeOperation = isNew ? 'insert' : 'update'
-
-      // 处理级联保存（先保存依赖实体）
-      await this.cascadeHandler.handleBeforeSave(
-        this.entityName,
-        entityData,
-        operation,
-        (name) => new Repository(name)
-      )
-
-      let result: SaveResult
-      if (isNew) {
-        // INSERT 操作
-        result = await this.insert(entityData)
-      } else {
-        // UPDATE 操作
-        result = await this.update(entityData)
-      }
-
-      // 处理级联保存（保存子实体/同步中间表）
-      await this.cascadeHandler.handleAfterSave(
-        this.entityName,
-        entityData,
-        operation,
-        this,
-        (name) => new Repository(name)
-      )
-
-      return result
-    } catch (error) {
-      // 如果是钩子执行错误，直接抛出
-      if (error instanceof HookExecutionError) {
-        throw error
-      }
-      if (error instanceof ValidationError) {
-        throw error
-      }
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      return SaveResult.createFailure(errorMessage)
-    }
-  }
-
-  /**
-   * 插入新实体
-   * @param entityData 实体数据
-   * @returns Promise<SaveResult>
-   */
-  private async insert(entityData: EntityData): Promise<SaveResult> {
-    const startTime = Date.now()
-    try {
-      const store = this.getStore()
-      const pkColumn = this.entityMetadata.getPrimaryKeyColumn()
-      if (pkColumn === null) {
-        throw new PrimaryKeyNotDefinedError(this.entityName)
-      }
-      const valuesBucket = this.dataMapper.toValuesBucket(entityData, false)
-
-      // 转换为 relationalStore.ValuesBucket
-      const rdbValuesBucket: relationalStore.ValuesBucket = {}
-      const keys = valuesBucket.keys()
-      for (let i = 0; i < keys.length; i++) {
-        const key = keys[i]
-        if (key === pkColumn.columnName && pkColumn.isAutoIncrement) {
-          continue
-        }
-        const value = valuesBucket.get(key)
-        rdbValuesBucket[key] = value
-      }
-
-      const updatedAtColumn = this.getUpdatedAtColumnName()
-      if (updatedAtColumn !== null) {
-        rdbValuesBucket[updatedAtColumn] = Date.now()
-      }
-
-      // 确保软删除列被显式设置为 null（新记录未删除）
-      if (this.entityMetadata.isSoftDeleteEnabled()) {
-        const deletedAtColumn = this.entityMetadata.getDeletedAtColumn()
-        if (rdbValuesBucket[deletedAtColumn] === undefined) {
-          rdbValuesBucket[deletedAtColumn] = null
-        }
-      }
-
-      // 使用同步方法 insertSync，以确保事务回滚能正常工作
-      // HarmonyOS 的事务控制与同步操作兼容
-      const rowId = store.insertSync(this.entityMetadata.tableName, rdbValuesBucket)
-
-      // 记录查询日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`INSERT INTO ${this.entityMetadata.tableName}`, duration)
-
-      // 如果有自增主键，更新实体数据中的主键值
-      if (pkColumn.isAutoIncrement) {
-        this.dataMapper.setPrimaryKeyValue(entityData, rowId)
-      }
-
-      // 使缓存失效
-      this.queryCache.invalidateEntity(this.entityName)
-
-      return SaveResult.createSuccess(1, rowId)
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      // 记录错误日志
-      this.logger.logError(`INSERT 失败: ${errorMessage}`)
-      throw new ExecutionError('INSERT', errorMessage)
-    }
-  }
-
-  /**
-   * 更新已有实体
-   * @param entityData 实体数据
-   * @returns Promise<SaveResult>
-   */
-  private async update(entityData: EntityData): Promise<SaveResult> {
-    const startTime = Date.now()
-    try {
-      const store = this.getStore()
-      const pkColumn = this.entityMetadata.getPrimaryKeyColumn()
-
-      if (pkColumn === null) {
-        throw new PrimaryKeyNotDefinedError(this.entityName)
-      }
-
-      const pkValue = this.dataMapper.getPrimaryKeyValue(entityData)
-      if (pkValue === null) {
-        throw new ExecutionError('UPDATE', '主键值不能为空')
-      }
-
-      // 构建更新条件
-      const predicates = new relationalStore.RdbPredicates(this.entityMetadata.tableName)
-      predicates.equalTo(pkColumn.columnName, this.toRdbValue(pkValue))
-
-      // 转换为 relationalStore.ValuesBucket
-      const valuesBucket = this.dataMapper.toValuesBucket(entityData, false)
-      const rdbValuesBucket: relationalStore.ValuesBucket = {}
-      const keys = valuesBucket.keys()
-      for (let i = 0; i < keys.length; i++) {
-        const key = keys[i]
-        if (key === pkColumn.columnName) {
-          continue
-        }
-        const value = valuesBucket.get(key)
-        rdbValuesBucket[key] = value
-      }
-
-      const updatedAtColumn = this.getUpdatedAtColumnName()
-      if (updatedAtColumn !== null) {
-        rdbValuesBucket[updatedAtColumn] = Date.now()
-      }
-
-      // 使用同步方法 executeSync 执行 UPDATE，以确保事务回滚能正常工作
-      // 构建 UPDATE SQL
-      const setClauses: string[] = []
-      const values: relationalStore.ValueType[] = []
-      const bucketKeys = Object.keys(rdbValuesBucket)
-      for (let i = 0; i < bucketKeys.length; i++) {
-        const key = bucketKeys[i]
-        setClauses.push(`${key} = ?`)
-        values.push(rdbValuesBucket[key])
-      }
-      values.push(this.toRdbValue(pkValue))
-
-      const updateSql = `UPDATE ${this.entityMetadata.tableName} SET ${setClauses.join(', ')} WHERE ${pkColumn.columnName} = ?`
-      store.executeSync(updateSql, values)
-
-      // 记录查询日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`UPDATE ${this.entityMetadata.tableName} WHERE ${pkColumn.columnName} = ${String(pkValue)}`, duration)
-
-      // 使缓存失效
-      this.queryCache.invalidate(this.entityName, pkValue)
-
-      return SaveResult.createSuccess(1)
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      // 记录错误日志
-      this.logger.logError(`UPDATE 失败: ${errorMessage}`)
-      throw new ExecutionError('UPDATE', errorMessage)
-    }
+    return await this.crudOperations.save(entityData)
   }
 
   /**
@@ -539,32 +354,7 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async remove(entityData: EntityData): Promise<DeleteResult> {
-    try {
-      const pkValue = this.dataMapper.getPrimaryKeyValue(entityData)
-      if (pkValue === null) {
-        return DeleteResult.createFailure('实体没有主键值')
-      }
-
-      // 执行 beforeDelete 钩子
-      await this.hooksProcessor.executeBeforeDelete(this.entityName, entityData)
-
-      // 处理级联删除
-      await this.cascadeHandler.handleBeforeRemove(
-        this.entityName,
-        entityData,
-        this,
-        (name) => new Repository(name)
-      )
-
-      return await this.removeById(pkValue)
-    } catch (error) {
-      // 如果是钩子执行错误，直接抛出
-      if (error instanceof HookExecutionError) {
-        throw error
-      }
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      return DeleteResult.createFailure(errorMessage)
-    }
+    return await this.deleteOperations.remove(entityData)
   }
 
   /**
@@ -575,99 +365,7 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async removeById(id: ValueType): Promise<DeleteResult> {
-    try {
-      // 检查是否启用软删除
-      if (this.entityMetadata.isSoftDeleteEnabled()) {
-        return await this.softDelete(id)
-      }
-
-      // 执行物理删除
-      return await this.hardDelete(id)
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      return DeleteResult.createFailure(errorMessage)
-    }
-  }
-
-  /**
-   * 执行软删除
-   * 将 deleted_at 字段设置为当前时间戳
-   * @param id 主键值
-   * @returns Promise<DeleteResult>
-   */
-  private async softDelete(id: ValueType): Promise<DeleteResult> {
-    const startTime = Date.now()
-    try {
-      const store = this.getStore()
-      const pkColumn = this.entityMetadata.getPrimaryKeyColumn()
-
-      if (pkColumn === null) {
-        throw new PrimaryKeyNotDefinedError(this.entityName)
-      }
-
-      // 构建更新条件
-      const predicates = new relationalStore.RdbPredicates(this.entityMetadata.tableName)
-      predicates.equalTo(pkColumn.columnName, this.toRdbValue(id))
-
-      // 设置 deleted_at 为当前时间戳
-      const deletedAtColumn = this.entityMetadata.getDeletedAtColumn()
-      const currentTimestamp = Date.now()
-      const rdbValuesBucket: relationalStore.ValuesBucket = {}
-      rdbValuesBucket[deletedAtColumn] = currentTimestamp
-
-      // 使用同步方法 executeSync 执行软删除，以确保事务回滚能正常工作
-      const updateSql = `UPDATE ${this.entityMetadata.tableName} SET ${deletedAtColumn} = ? WHERE ${pkColumn.columnName} = ?`
-      store.executeSync(updateSql, [currentTimestamp, this.toRdbValue(id)])
-
-      // 记录查询日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`UPDATE ${this.entityMetadata.tableName} SET ${deletedAtColumn} = ${currentTimestamp} WHERE ${pkColumn.columnName} = ${String(id)}`, duration)
-
-      // 使缓存失效
-      this.queryCache.invalidate(this.entityName, id)
-
-      return DeleteResult.createSuccess(1)
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      // 记录错误日志
-      this.logger.logError(`SOFT_DELETE 失败: ${errorMessage}`)
-      throw new ExecutionError('SOFT_DELETE', errorMessage)
-    }
-  }
-
-  /**
-   * 执行物理删除
-   * @param id 主键值
-   * @returns Promise<DeleteResult>
-   */
-  private async hardDelete(id: ValueType): Promise<DeleteResult> {
-    const startTime = Date.now()
-    try {
-      const store = this.getStore()
-      const pkColumn = this.entityMetadata.getPrimaryKeyColumn()
-
-      if (pkColumn === null) {
-        throw new PrimaryKeyNotDefinedError(this.entityName)
-      }
-
-      // 使用同步方法 executeSync 执行删除，以确保事务回滚能正常工作
-      const deleteSql = `DELETE FROM ${this.entityMetadata.tableName} WHERE ${pkColumn.columnName} = ?`
-      store.executeSync(deleteSql, [this.toRdbValue(id)])
-
-      // 记录查询日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`DELETE FROM ${this.entityMetadata.tableName} WHERE ${pkColumn.columnName} = ${String(id)}`, duration)
-
-      // 使缓存失效
-      this.queryCache.invalidate(this.entityName, id)
-
-      return DeleteResult.createSuccess(1)
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      // 记录错误日志
-      this.logger.logError(`DELETE 失败: ${errorMessage}`)
-      throw new ExecutionError('DELETE', errorMessage)
-    }
+    return await this.deleteOperations.removeById(id)
   }
 
   /**
@@ -676,16 +374,7 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async forceRemove(entityData: EntityData): Promise<DeleteResult> {
-    try {
-      const pkValue = this.dataMapper.getPrimaryKeyValue(entityData)
-      if (pkValue === null) {
-        return DeleteResult.createFailure('实体没有主键值')
-      }
-      return await this.forceRemoveById(pkValue)
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      return DeleteResult.createFailure(errorMessage)
-    }
+    return await this.deleteOperations.forceRemove(entityData)
   }
 
   /**
@@ -694,12 +383,7 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async forceRemoveById(id: ValueType): Promise<DeleteResult> {
-    try {
-      return await this.hardDelete(id)
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      return DeleteResult.createFailure(errorMessage)
-    }
+    return await this.deleteOperations.forceRemoveById(id)
   }
 
   /**
@@ -710,43 +394,7 @@ export class Repository {
    * @throws SoftDeleteNotEnabledError 如果实体未启用软删除
    */
   async restore(id: ValueType): Promise<SaveResult> {
-    const startTime = Date.now()
-    try {
-      // 检查是否启用软删除
-      if (!this.entityMetadata.isSoftDeleteEnabled()) {
-        throw new SoftDeleteNotEnabledError(this.entityName)
-      }
-
-      const store = this.getStore()
-      const pkColumn = this.entityMetadata.getPrimaryKeyColumn()
-
-      if (pkColumn === null) {
-        throw new PrimaryKeyNotDefinedError(this.entityName)
-      }
-
-      // 构建更新条件
-      const predicates = new relationalStore.RdbPredicates(this.entityMetadata.tableName)
-      predicates.equalTo(pkColumn.columnName, this.toRdbValue(id))
-
-      // 使用同步方法 executeSync 执行恢复，以确保事务回滚能正常工作
-      const deletedAtColumn = this.entityMetadata.getDeletedAtColumn()
-      const updateSql = `UPDATE ${this.entityMetadata.tableName} SET ${deletedAtColumn} = NULL WHERE ${pkColumn.columnName} = ?`
-      store.executeSync(updateSql, [this.toRdbValue(id)])
-
-      // 记录查询日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`UPDATE ${this.entityMetadata.tableName} SET ${deletedAtColumn} = NULL WHERE ${pkColumn.columnName} = ${String(id)}`, duration)
-
-      return SaveResult.createSuccess(1)
-    } catch (error) {
-      if (error instanceof SoftDeleteNotEnabledError) {
-        throw error
-      }
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      // 记录错误日志
-      this.logger.logError(`RESTORE 失败: ${errorMessage}`)
-      return SaveResult.createFailure(errorMessage)
-    }
+    return await this.deleteOperations.restore(id)
   }
 
   /**
@@ -950,60 +598,9 @@ export class Repository {
    * @returns Promise<TransactionResult>
    */
   async transaction(callback: TransactionCallback): Promise<TransactionResult> {
-    let store: relationalStore.RdbStore
-    let committed = false
-
-    try {
-      store = this.getStore()
-    } catch (e) {
-      const errorMessage = e instanceof Error ? e.message : String(e)
-      this.logger.logError(`获取数据库连接失败: ${errorMessage}`)
-      throw new TransactionRollbackError(`获取数据库连接失败: ${errorMessage}`)
-    }
-
-    try {
-      // 开始事务
-      store.beginTransaction()
-      // 记录事务开始日志
-      this.logger.logTransaction('BEGIN')
-
-      // 执行回调
-      try {
-        await callback(this)
-      } catch (callbackError) {
-        if (callbackError instanceof Error) {
-          throw callbackError
-        }
-        throw new Error(String(callbackError))
-      }
-
-      // 提交事务
-      store.commit()
-      committed = true
-      // 记录事务提交日志
-      this.logger.logTransaction('COMMIT')
-
-      return TransactionResult.createSuccess()
-    } catch (error) {
-      // 如果事务未提交，尝试回滚
-      if (!committed) {
-        try {
-          store.rollBack()
-          // 记录事务回滚日志
-          this.logger.logTransaction('ROLLBACK')
-        } catch (rollbackError) {
-          // 回滚失败，记录错误但不覆盖原始错误
-          const rollbackMsg = rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-          const originalMsg = error instanceof Error ? error.message : String(error)
-          this.logger.logError(`事务回滚失败: ${rollbackMsg}`)
-          throw new TransactionRollbackError(`原始错误: ${originalMsg}, 回滚错误: ${rollbackMsg}`)
-        }
-      }
-
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      this.logger.logError(`事务执行失败: ${errorMessage}`)
-      throw new TransactionRollbackError(errorMessage)
-    }
+    return await this.transactionManager.transaction(async () => {
+      await callback(this)
+    })
   }
 
   /**
@@ -1017,234 +614,11 @@ export class Repository {
     callback: TransactionCallback,
     options: TransactionOptions
   ): Promise<TransactionResult> {
-    let lastError: Error | null = null
-    let attempts = 0
-    const maxAttempts = options.retries + 1
-
-    while (attempts < maxAttempts) {
-      attempts++
-      let timeoutId: number = 0
-      let isTimedOut = false
-      const timeoutState = new TimeoutState()
-
-      try {
-        const result = await new Promise<TransactionResult>(
-          (resolve: (value: TransactionResult) => void, reject: (reason: Error) => void) => {
-            // 设置超时定时器
-            timeoutId = setTimeout(() => {
-              if (timeoutState.finished || timeoutState.commitStarted) {
-                return
-              }
-              isTimedOut = true
-              timeoutState.timedOut = true
-              reject(new Error(`事务超时 (${options.timeout}ms)`))
-            }, options.timeout)
-
-            // 执行事务（应用隔离级别与只读选项）
-            this.executeTransactionWithOptions(callback, options, timeoutState)
-              .then((res) => {
-                if (!isTimedOut) {
-                  clearTimeout(timeoutId)
-                  resolve(res)
-                }
-              })
-              .catch((err: Error) => {
-                if (!isTimedOut) {
-                  clearTimeout(timeoutId)
-                  reject(err)
-                }
-              })
-          }
-        )
-        return result
-      } catch (error) {
-        // 确保定时器清理
-        if (timeoutId !== 0) {
-          clearTimeout(timeoutId)
-        }
-        lastError = error instanceof Error ? error : new Error(String(error))
-
-        // 如果还有重试机会，等待后重试
-        if (attempts < maxAttempts) {
-          this.logger.logInfo(`事务执行失败，${options.retryDelay}ms 后重试 (${attempts}/${maxAttempts})`)
-          await this.delay(options.retryDelay)
-        }
-      }
-    }
-
-    // 所有重试都失败
-    const errorMessage = lastError ? lastError.message : '事务执行失败'
-    this.logger.logError(`事务执行失败，已重试 ${options.retries} 次: ${errorMessage}`)
-    throw new TransactionRollbackError(errorMessage)
+    return await this.transactionManager.transactionWithOptions(async () => {
+      await callback(this)
+    }, options)
   }
 
-  /**
-   * 执行带选项的事务
-   * @param callback 事务回调函数
-   * @param options 事务选项
-   */
-  private async executeTransactionWithOptions(
-    callback: TransactionCallback,
-    options: TransactionOptions,
-    timeoutState?: TimeoutState
-  ): Promise<TransactionResult> {
-    let store: relationalStore.RdbStore
-    let committed = false
-    let isolationApplied = false
-    let readOnlyApplied = false
-
-    try {
-      store = this.getStore()
-    } catch (e) {
-      const errorMessage = e instanceof Error ? e.message : String(e)
-      this.logger.logError(`获取数据库连接失败: ${errorMessage}`)
-      throw new TransactionRollbackError(`获取数据库连接失败: ${errorMessage}`)
-    }
-
-    try {
-      // 应用隔离级别（SQLite 通过 PRAGMA read_uncommitted 支持 READ_UNCOMMITTED）
-      await this.applyIsolationLevel(store, options.isolation)
-      isolationApplied = true
-
-      // 应用只读模式（阻止写操作）
-      if (options.readOnly) {
-        await this.setReadOnlyMode(store, true)
-        readOnlyApplied = true
-      }
-
-      // 开始事务
-      store.beginTransaction()
-      const beginLabel = options.readOnly ? 'BEGIN (READ ONLY)' : 'BEGIN'
-      this.logger.logTransaction(beginLabel)
-
-      if (timeoutState?.timedOut) {
-        throw new TransactionRollbackError(`事务超时 (${options.timeout}ms)`)
-      }
-
-      // 执行回调
-      try {
-        await callback(this)
-      } catch (callbackError) {
-        if (callbackError instanceof Error) {
-          throw callbackError
-        }
-        throw new Error(String(callbackError))
-      }
-
-      if (timeoutState?.timedOut) {
-        throw new TransactionRollbackError(`事务超时 (${options.timeout}ms)`)
-      }
-
-      // 提交事务
-      if (timeoutState) {
-        timeoutState.commitStarted = true
-      }
-      store.commit()
-      committed = true
-      this.logger.logTransaction('COMMIT')
-
-      return TransactionResult.createSuccess()
-    } catch (error) {
-      // 如果事务未提交，尝试回滚
-      if (!committed) {
-        try {
-          store.rollBack()
-          this.logger.logTransaction('ROLLBACK')
-        } catch (rollbackError) {
-          const rollbackMsg = rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-          const originalMsg = error instanceof Error ? error.message : String(error)
-          this.logger.logError(`事务回滚失败: ${rollbackMsg}`)
-          throw new TransactionRollbackError(`原始错误: ${originalMsg}, 回滚错误: ${rollbackMsg}`)
-        }
-      }
-
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      this.logger.logError(`事务执行失败: ${errorMessage}`)
-      throw new TransactionRollbackError(errorMessage)
-    } finally {
-      if (timeoutState) {
-        timeoutState.finished = true
-      }
-      // 恢复事务选项
-      await this.resetTransactionOptions(store, isolationApplied, readOnlyApplied)
-    }
-  }
-
-  /**
-   * 应用事务隔离级别
-   * @param store RdbStore 实例
-   * @param isolation 隔离级别
-   */
-  private async applyIsolationLevel(store: relationalStore.RdbStore, isolation: IsolationLevel): Promise<void> {
-    try {
-      if (isolation === IsolationLevel.READ_UNCOMMITTED) {
-        await store.executeSql('PRAGMA read_uncommitted = 1')
-        return
-      }
-      // SQLite 对其他隔离级别等价于 READ_COMMITTED
-      await store.executeSql('PRAGMA read_uncommitted = 0')
-    } catch (e) {
-      const errorMessage = e instanceof Error ? e.message : String(e)
-      throw new TransactionRollbackError(`设置事务隔离级别失败: ${errorMessage}`)
-    }
-  }
-
-  /**
-   * 设置只读模式
-   * @param store RdbStore 实例
-   * @param readOnly 是否只读
-   */
-  private async setReadOnlyMode(store: relationalStore.RdbStore, readOnly: boolean): Promise<void> {
-    const value = readOnly ? 1 : 0
-    try {
-      await store.executeSql(`PRAGMA query_only = ${value}`)
-    } catch (e) {
-      const errorMessage = e instanceof Error ? e.message : String(e)
-      throw new TransactionRollbackError(`设置只读模式失败: ${errorMessage}`)
-    }
-  }
-
-  /**
-   * 恢复事务选项（隔离级别/只读）
-   * @param store RdbStore 实例
-   * @param isolationApplied 是否应用了隔离级别
-   * @param readOnlyApplied 是否应用了只读模式
-   */
-  private async resetTransactionOptions(
-    store: relationalStore.RdbStore,
-    isolationApplied: boolean,
-    readOnlyApplied: boolean
-  ): Promise<void> {
-    if (readOnlyApplied) {
-      try {
-        await this.setReadOnlyMode(store, false)
-      } catch (e) {
-        const errorMessage = e instanceof Error ? e.message : String(e)
-        this.logger.logError(`恢复只读模式失败: ${errorMessage}`)
-      }
-    }
-
-    if (isolationApplied) {
-      try {
-        await this.applyIsolationLevel(store, IsolationLevel.READ_COMMITTED)
-      } catch (e) {
-        const errorMessage = e instanceof Error ? e.message : String(e)
-        this.logger.logError(`恢复事务隔离级别失败: ${errorMessage}`)
-      }
-    }
-  }
-
-  /**
-   * 延迟函数
-   * @param ms 延迟毫秒数
-   */
-  private delay(ms: number): Promise<void> {
-    return new Promise<void>((resolve) => {
-      setTimeout(() => {
-        resolve()
-      }, ms)
-    })
-  }
 
   /**
    * 批量保存实体
@@ -1252,12 +626,7 @@ export class Repository {
    * @returns Promise<Array<SaveResult>>
    */
   async saveAll(entities: Array<EntityData>): Promise<Array<SaveResult>> {
-    const results: Array<SaveResult> = []
-    for (let i = 0; i < entities.length; i++) {
-      const result = await this.save(entities[i])
-      results.push(result)
-    }
-    return results
+    return await this.batchOperations.saveAll(entities)
   }
 
   /**
@@ -1273,136 +642,7 @@ export class Repository {
     entities: Array<EntityData>,
     options: BatchInsertOptions = BatchInsertOptions.createDefault()
   ): Promise<BatchInsertResult> {
-    const startTime = Date.now()
-    const totalCount = entities.length
-
-    // 空数组直接返回成功
-    if (totalCount === 0) {
-      return BatchInsertResult.createSuccess(0, 0)
-    }
-
-    let store: relationalStore.RdbStore
-    try {
-      store = this.getStore()
-    } catch (e) {
-      const errorMessage = e instanceof Error ? e.message : String(e)
-      this.logger.logError(`批量插入获取数据库连接失败: ${errorMessage}`)
-      return BatchInsertResult.createFailure(`获取数据库连接失败: ${errorMessage}`)
-    }
-
-    // 执行 beforeSave 钩子（如果启用）
-    // Requirements: 4.5, 4.6
-    if (options.executeValidation) {
-      for (let i = 0; i < entities.length; i++) {
-        try {
-          EntityValidator.validateOrThrow(this.entityName, entities[i])
-        } catch (error) {
-          if (error instanceof ValidationError) {
-            const errorMessage = error.message
-            this.logger.logError(`批量插入验证失败 (索引 ${i}): ${errorMessage}`)
-            return BatchInsertResult.createFailure(`验证失败 (索引 ${i}): ${errorMessage}`, [i])
-          }
-          const errorMessage = error instanceof Error ? error.message : String(error)
-          this.logger.logError(`批量插入验证失败 (索引 ${i}): ${errorMessage}`)
-          return BatchInsertResult.createFailure(`验证失败 (索引 ${i}): ${errorMessage}`, [i])
-        }
-      }
-    }
-
-    if (options.executeHooks) {
-      for (let i = 0; i < entities.length; i++) {
-        try {
-          await this.hooksProcessor.executeBeforeSave(this.entityName, entities[i])
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error)
-          this.logger.logError(`批量插入钩子执行失败 (索引 ${i}): ${errorMessage}`)
-          // 如果任一 beforeSave 钩子失败，中止并返回错误
-          return BatchInsertResult.createFailure(`beforeSave 钩子执行失败 (索引 ${i}): ${errorMessage}`, [i])
-        }
-      }
-    }
-
-    // 将所有 EntityData 转换为 ValuesBucket 数组
-    // Requirements: 4.2
-    const valueBuckets: Array<relationalStore.ValuesBucket> = []
-    for (let i = 0; i < entities.length; i++) {
-      try {
-        const valuesBucket = this.dataMapper.toValuesBucket(entities[i], false)
-        // 转换为 relationalStore.ValuesBucket
-        const rdbValuesBucket: relationalStore.ValuesBucket = {}
-        const keys = valuesBucket.keys()
-        for (let j = 0; j < keys.length; j++) {
-          const key = keys[j]
-          const value = valuesBucket.get(key)
-          rdbValuesBucket[key] = value
-        }
-        valueBuckets.push(rdbValuesBucket)
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error)
-        this.logger.logError(`批量插入数据转换失败 (索引 ${i}): ${errorMessage}`)
-        return BatchInsertResult.createFailure(`数据转换失败 (索引 ${i}): ${errorMessage}`, [i])
-      }
-    }
-
-    // 执行批量插入
-    // Requirements: 4.1, 4.7, 4.8
-    try {
-      let insertedCount: number = 0
-
-      if (options.useTransaction) {
-        // 在事务中执行批量插入
-        // Requirements: 4.7, 4.8
-        store.beginTransaction()
-        this.logger.logTransaction('BEGIN (batchInsert)')
-
-        try {
-          insertedCount = await store.batchInsert(this.entityMetadata.tableName, valueBuckets)
-          store.commit()
-          this.logger.logTransaction('COMMIT (batchInsert)')
-        } catch (insertError) {
-          // 失败时回滚
-          store.rollBack()
-          this.logger.logTransaction('ROLLBACK (batchInsert)')
-          // ArkTS 要求 throw 必须抛出 Error 类型
-          if (insertError instanceof Error) {
-            throw insertError
-          }
-          throw new Error(`批量插入失败: ${String(insertError)}`)
-        }
-      } else {
-        // 不使用事务，直接执行批量插入
-        insertedCount = await store.batchInsert(this.entityMetadata.tableName, valueBuckets)
-      }
-
-      // 记录批量插入日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`BATCH INSERT INTO ${this.entityMetadata.tableName} (${insertedCount}/${totalCount} 条)`, duration)
-
-      if (insertedCount > 0) {
-        this.queryCache.invalidateEntity(this.entityName)
-      }
-
-      // 检查是否全部成功
-      if (insertedCount === totalCount) {
-        return BatchInsertResult.createSuccess(insertedCount, totalCount)
-      } else {
-        // 部分成功
-        // Requirements: 4.4
-        const failedCount = totalCount - insertedCount
-        // 注意：RdbStore.batchInsert 不返回具体失败的索引，只返回成功数量
-        // 这里无法确定具体哪些失败了，所以 failedIndexes 为空
-        return BatchInsertResult.createPartialSuccess(
-          insertedCount,
-          totalCount,
-          [],
-          `部分插入失败: ${failedCount} 条记录未能插入`
-        )
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      this.logger.logError(`批量插入执行失败: ${errorMessage}`)
-      return BatchInsertResult.createFailure(`批量插入执行失败: ${errorMessage}`)
-    }
+    return await this.batchOperations.batchInsert(entities, options)
   }
 
   /**
@@ -1416,56 +656,7 @@ export class Repository {
    * Requirements: 5.5
    */
   async attach(sourceId: number, targetId: number, relationName: string): Promise<SaveResult> {
-    const startTime = Date.now()
-    try {
-      // 获取多对多关联元数据
-      const relation = MetadataStorage.getInstance().getManyToManyRelation(this.entityName, relationName)
-      if (relation === null) {
-        throw new RelationNotFoundError(this.entityName, relationName)
-      }
-
-      const store = this.getStore()
-
-      // 检查关联是否已存在
-      const checkPredicates = new relationalStore.RdbPredicates(relation.joinTable)
-      checkPredicates.equalTo(relation.joinSourceKey, sourceId)
-      checkPredicates.and()
-      checkPredicates.equalTo(relation.joinTargetKey, targetId)
-
-      let checkResult: relationalStore.ResultSet | null = null
-      let exists = false
-      try {
-        checkResult = await store.query(checkPredicates)
-        exists = checkResult.rowCount > 0
-      } finally {
-        this.closeResultSet(checkResult)
-      }
-
-      if (exists) {
-        // 关联已存在，直接返回成功
-        return SaveResult.createSuccess(0)
-      }
-
-      // 插入关联记录
-      const rdbValuesBucket: relationalStore.ValuesBucket = {}
-      rdbValuesBucket[relation.joinSourceKey] = sourceId
-      rdbValuesBucket[relation.joinTargetKey] = targetId
-
-      const rowId = await store.insert(relation.joinTable, rdbValuesBucket)
-
-      // 记录日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`INSERT INTO ${relation.joinTable} (${relation.joinSourceKey}=${sourceId}, ${relation.joinTargetKey}=${targetId})`, duration)
-
-      return SaveResult.createSuccess(1, rowId)
-    } catch (error) {
-      if (error instanceof RelationNotFoundError) {
-        throw error
-      }
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      this.logger.logError(`ATTACH 失败: ${errorMessage}`)
-      return SaveResult.createFailure(errorMessage)
-    }
+    return await this.relationManager.attach(sourceId, targetId, relationName)
   }
 
   /**
@@ -1479,37 +670,7 @@ export class Repository {
    * Requirements: 5.6
    */
   async detach(sourceId: number, targetId: number, relationName: string): Promise<DeleteResult> {
-    const startTime = Date.now()
-    try {
-      // 获取多对多关联元数据
-      const relation = MetadataStorage.getInstance().getManyToManyRelation(this.entityName, relationName)
-      if (relation === null) {
-        throw new RelationNotFoundError(this.entityName, relationName)
-      }
-
-      const store = this.getStore()
-
-      // 删除关联记录
-      const predicates = new relationalStore.RdbPredicates(relation.joinTable)
-      predicates.equalTo(relation.joinSourceKey, sourceId)
-      predicates.and()
-      predicates.equalTo(relation.joinTargetKey, targetId)
-
-      const affectedRows = await store.delete(predicates)
-
-      // 记录日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`DELETE FROM ${relation.joinTable} WHERE ${relation.joinSourceKey}=${sourceId} AND ${relation.joinTargetKey}=${targetId}`, duration)
-
-      return DeleteResult.createSuccess(affectedRows)
-    } catch (error) {
-      if (error instanceof RelationNotFoundError) {
-        throw error
-      }
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      this.logger.logError(`DETACH 失败: ${errorMessage}`)
-      return DeleteResult.createFailure(errorMessage)
-    }
+    return await this.relationManager.detach(sourceId, targetId, relationName)
   }
 
   /**
@@ -1523,64 +684,145 @@ export class Repository {
    * Requirements: 5.7
    */
   async sync(sourceId: ValueType, targetIds: Array<ValueType>, relationName: string): Promise<SaveResult> {
+    return await this.relationManager.sync(sourceId, targetIds, relationName)
+  }
+
+  // ==================== 聚合函数 ====================
+
+  /**
+   * 计算指定列的总和
+   * @param column 列名或属性名
+   * @returns Promise<number>
+   */
+  async sum(column: string): Promise<number> {
+    const queryBuilder = this.createQueryBuilder()
+    const executor = new QueryExecutor(queryBuilder)
+    return await executor.sum(column)
+  }
+
+  /**
+   * 计算指定列的平均值
+   * @param column 列名或属性名
+   * @returns Promise<number>
+   */
+  async avg(column: string): Promise<number> {
+    const queryBuilder = this.createQueryBuilder()
+    const executor = new QueryExecutor(queryBuilder)
+    return await executor.avg(column)
+  }
+
+  /**
+   * 获取指定列的最大值
+   * @param column 列名或属性名
+   * @returns Promise<ValueType>
+   */
+  async max(column: string): Promise<ValueType> {
+    const queryBuilder = this.createQueryBuilder()
+    const executor = new QueryExecutor(queryBuilder)
+    return await executor.max(column)
+  }
+
+  /**
+   * 获取指定列的最小值
+   * @param column 列名或属性名
+   * @returns Promise<ValueType>
+   */
+  async min(column: string): Promise<ValueType> {
+    const queryBuilder = this.createQueryBuilder()
+    const executor = new QueryExecutor(queryBuilder)
+    return await executor.min(column)
+  }
+
+  // ==================== 原生 SQL 查询 ====================
+
+  /**
+   * 执行原生 SQL 查询（只读）
+   * @param sql SQL 查询语句
+   * @param args 查询参数
+   * @returns Promise<Array<EntityData>>
+   */
+  async rawQuery(sql: string, args: Array<ValueType> = []): Promise<Array<EntityData>> {
     const startTime = Date.now()
     try {
-      // 获取多对多关联元数据
-      const relation = MetadataStorage.getInstance().getManyToManyRelation(this.entityName, relationName)
-      if (relation === null) {
-        throw new RelationNotFoundError(this.entityName, relationName)
-      }
-
+      const normalizedSql = this.validateRawQuerySql(sql)
       const store = this.getStore()
+      const rdbArgs: Array<relationalStore.ValueType> = []
+      for (let i = 0; i < args.length; i++) {
+        rdbArgs.push(this.toRdbValue(args[i]))
+      }
 
-      // 在事务中执行同步操作
-      store.beginTransaction()
-      this.logger.logTransaction('BEGIN (sync)')
-
+      let resultSet: relationalStore.ResultSet | null = null
+      const results: Array<EntityData> = []
       try {
-        // 1. 删除源实体的所有现有关联
-        const deletePredicates = new relationalStore.RdbPredicates(relation.joinTable)
-        deletePredicates.equalTo(relation.joinSourceKey, this.toRdbValue(sourceId))
-        const deletedCount = await store.delete(deletePredicates)
+        resultSet = await store.querySql(normalizedSql, rdbArgs)
 
-        // 2. 插入新的关联记录
-        let insertedCount = 0
-        for (let i = 0; i < targetIds.length; i++) {
-          const targetId = targetIds[i]
-          const rdbValuesBucket: relationalStore.ValuesBucket = {}
-          rdbValuesBucket[relation.joinSourceKey] = this.toRdbValue(sourceId)
-          rdbValuesBucket[relation.joinTargetKey] = this.toRdbValue(targetId)
-
-          await store.insert(relation.joinTable, rdbValuesBucket)
-          insertedCount++
-        }
-
-        // 提交事务
-        store.commit()
-        this.logger.logTransaction('COMMIT (sync)')
-
-        // 记录日志
         const duration = Date.now() - startTime
-        this.logger.logQuery(`SYNC ${relation.joinTable}: 删除 ${deletedCount} 条, 插入 ${insertedCount} 条`, duration)
+        this.logger.logQuery(`RAW: ${normalizedSql}`, duration)
 
-        return SaveResult.createSuccess(insertedCount)
-      } catch (syncError) {
-        // 回滚事务
-        store.rollBack()
-        this.logger.logTransaction('ROLLBACK (sync)')
-        if (syncError instanceof Error) {
-          throw syncError
+        while (resultSet.goToNextRow()) {
+          const row = this.resultSetToRow(resultSet)
+          results.push(this.dataMapper.fromResultSetRow(row))
         }
-        throw new Error(String(syncError))
+      } finally {
+        this.closeResultSet(resultSet)
       }
+
+      return results
     } catch (error) {
-      if (error instanceof RelationNotFoundError) {
-        throw error
-      }
       const errorMessage = error instanceof Error ? error.message : String(error)
-      this.logger.logError(`SYNC 失败: ${errorMessage}`)
-      return SaveResult.createFailure(errorMessage)
+      this.logger.logError(`RAW QUERY 失败: ${errorMessage}`)
+      throw new ExecutionError('RAW_QUERY', errorMessage)
     }
+  }
+
+  /**
+   * 执行原生 SQL 语句（写操作）
+   * @param sql SQL 语句
+   * @param args 参数
+   * @returns Promise<number> 受影响的行数（注意：SQLite 不总是返回准确的受影响行数）
+   */
+  async rawExecute(sql: string, args: Array<ValueType> = []): Promise<void> {
+    const startTime = Date.now()
+    try {
+      const store = this.getStore()
+      const rdbArgs: Array<relationalStore.ValueType> = []
+      for (let i = 0; i < args.length; i++) {
+        rdbArgs.push(this.toRdbValue(args[i]))
+      }
+
+      await store.executeSql(sql, rdbArgs)
+
+      const duration = Date.now() - startTime
+      this.logger.logQuery(`RAW EXECUTE: ${sql}`, duration)
+
+      // 原生 SQL 可能跨实体写入，保守策略：清空缓存
+      this.queryCache.clear()
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      this.logger.logError(`RAW EXECUTE 失败: ${errorMessage}`)
+      throw new ExecutionError('RAW_EXECUTE', errorMessage)
+    }
+  }
+
+  private validateRawQuerySql(sql: string): string {
+    const trimmedSql = sql.trim()
+    if (trimmedSql.length === 0) {
+      throw new ExecutionError('RAW_QUERY', 'SQL 语句不能为空')
+    }
+    const normalized = trimmedSql.endsWith(';') ? trimmedSql.slice(0, trimmedSql.length - 1).trim() : trimmedSql
+    if (normalized.includes(';')) {
+      throw new ExecutionError('RAW_QUERY', 'RAW_QUERY 不允许执行多条 SQL')
+    }
+    const upperSql = normalized.toUpperCase()
+    if (!upperSql.startsWith('SELECT ') && !upperSql.startsWith('WITH ') &&
+      !upperSql.startsWith('EXPLAIN ')) {
+      throw new ExecutionError('RAW_QUERY', 'RAW_QUERY 仅允许 SELECT/WITH/EXPLAIN 只读 SQL')
+    }
+    const hasWriteKeyword = /\b(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|TRUNCATE|ATTACH|DETACH|VACUUM|REINDEX)\b/.test(upperSql)
+    if (hasWriteKeyword) {
+      throw new ExecutionError('RAW_QUERY', 'RAW_QUERY 禁止写操作 SQL')
+    }
+    return normalized
   }
 }
 
@@ -1588,26 +830,3 @@ export class Repository {
  * 事务回调函数类型
  */
 export type TransactionCallback = (repo: Repository) => Promise<void>
-
-/**
- * 事务执行结果类
- */
-export class TransactionResult {
-  /** 是否成功 */
-  success: boolean = false
-  /** 错误信息 */
-  errorMessage: string = ''
-
-  static createSuccess(): TransactionResult {
-    const result = new TransactionResult()
-    result.success = true
-    return result
-  }
-
-  static createFailure(errorMessage: string): TransactionResult {
-    const result = new TransactionResult()
-    result.success = false
-    result.errorMessage = errorMessage
-    return result
-  }
-}

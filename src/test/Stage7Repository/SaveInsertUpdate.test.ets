@@ -2,8 +2,8 @@ import { describe, beforeEach, it, expect } from '@ohos/hypium';
 import { MetadataStorage } from '../../main/ets/core/MetadataStorage';
 import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
 import { ColumnType } from '../../main/ets/types/ColumnType';
-import { Repository, SaveResult } from '../../main/ets/repository/Repository';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
+import { Repository, SaveResult } from '../../main/ets/repository/index';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 import { EntityNotRegisteredError } from '../../main/ets/errors/MetadataError';
 import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
@@ -245,7 +245,7 @@ export default function saveInsertUpdateTest() {
       entityData.addProperty('id', 10, 'number');
       entityData.addProperty('name', 'manual', 'string');
 
-      await (repo as unknown as { insert: (data: EntityData) => Promise<SaveResult> }).insert(entityData);
+      await repo.save(entityData);
 
       expect(capturedBucket !== null).assertEqual(true);
       if (capturedBucket !== null) {

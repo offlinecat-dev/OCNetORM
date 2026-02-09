@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## [2.4.31] - 2026-02-09
+
+### 重构（Phase 4 收口）
+- `Repository` 拆分重构完成：事务、批量、CRUD、删除、关联职责已分别收口到 `TransactionManager`、`BatchOperations`、`CrudOperations`、`DeleteOperations`、`RelationManager`
+- 本轮为内部实现重构，**无 API Breaking Change**
+- Repository 模块导出统一通过 `repository/index.ets` 聚合，对外调用继续走包入口 `Index.ets`（`import { ... } from 'ocorm'`）
+
 ## [2.4.30] - 2026-02-08
 
 ### Bug 修复
@@ -17,6 +24,8 @@
 - `DatabaseConfig` 新增查询超时、并发查询上限、关联 IN 上限配置
 - `QueryBuilder` 新增 `timeout()`；`QueryExecutor` 支持查询超时与并发槽位控制
 - `DatabaseManager` 支持运行时应用日志级别、查询超时和并发查询限制
+- 正式导出查询作用域注册能力：`ScopeRegistry`、`registerScope(s)`、`registerEntityScope(s)`
+- 开发者文档补充查询作用域注册与 `scope/scopes` 使用说明
 
 ### 测试
 - `entry/src/main/ets/suites` 新增对应回归用例（Mapping/Validation/Schema/Relation/Query/Database/Error）

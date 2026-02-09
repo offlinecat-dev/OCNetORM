@@ -104,6 +104,8 @@
 | `select(columns)` | `columns: Array<string>` | `QueryBuilder` | 选择指定列 |
 | `with(relationName)` | `relationName: string` | `QueryBuilder` | 预加载关联 |
 | `withLazy(relationName)` | `relationName: string` | `QueryBuilder` | 延迟加载关联 |
+| `scope(scopeName)` | `scopeName: string` | `QueryBuilder` | 应用单个查询作用域 |
+| `scopes(scopeNames)` | `scopeNames: Array<string>` | `QueryBuilder` | 批量应用查询作用域 |
 
 ### 软删除
 
@@ -120,6 +122,17 @@
 | `getQueryDescription()` | 无 | `string` | 获取查询描述（调试用） |
 | `getConditions()` | 无 | `Array<WhereCondition>` | 获取所有条件 |
 | `getAllConditions()` | 无 | `Array<WhereCondition>` | 获取所有条件（含软删除） |
+
+---
+
+## 查询作用域注册 API
+
+| 方法 | 参数 | 返回值 | 说明 |
+|------|------|--------|------|
+| `registerScope(entityName, scopeName, scopeFunction)` | `entityName: string, scopeName: string, scopeFunction: ScopeFunction` | `void` | 注册单个作用域（推荐） |
+| `registerScopes(entityName, scopes)` | `entityName: string, scopes: Record<string, ScopeFunction>` | `void` | 批量注册作用域 |
+| `registerEntityScope(entityName, scopeName, scopeFunction)` | `entityName: string, scopeName: string, scopeFunction: ScopeFunction` | `void` | `registerScope` 别名 |
+| `registerEntityScopes(entityName, scopes)` | `entityName: string, scopes: Record<string, ScopeFunction>` | `void` | `registerScopes` 别名 |
 
 ---
 
@@ -277,6 +290,7 @@ defineEntity(entityName: string, schema: EntitySchema): EntityMetadata
 | `tableName?` | `string` | 表名 |
 | `columns` | `Array<ColumnSchema>` | 列定义数组 |
 | `softDelete?` | `boolean \| SoftDeleteSchema` | 软删除配置 |
+| `scopes?` | `Record<string, ScopeFunction>` | 查询作用域定义 |
 
 ### SoftDeleteSchema
 

@@ -1,6 +1,6 @@
 import { describe, beforeEach, it, expect } from '@ohos/hypium';
 import { QueryCache, CacheEntry, QueryCacheConfig, CacheStatistics } from '../../main/ets/query/QueryCache';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 
 const createEntityData = (entityName: string, id: number, name: string = 'Test'): EntityData => {
   const data = new EntityData(entityName);

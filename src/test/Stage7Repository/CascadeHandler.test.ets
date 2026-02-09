@@ -4,8 +4,8 @@ import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
 import { RelationMetadata } from '../../main/ets/core/RelationMetadata';
 import { ColumnType } from '../../main/ets/types/ColumnType';
 import { RelationType } from '../../main/ets/types/RelationType';
-import { CascadeHandler, CascadeOperation, CascadeRepository, CascadeResultLike } from '../../main/ets/repository/CascadeHandler';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
+import { CascadeHandler, CascadeOperation, CascadeRepository, CascadeResultLike } from '../../main/ets/repository/index';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { ValueType } from '../../main/ets/types/ValueTypes';
 

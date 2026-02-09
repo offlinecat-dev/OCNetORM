@@ -5,13 +5,43 @@
 
 import { MetadataStorage } from '../core/MetadataStorage'
 import { EntityNotRegisteredError } from '../errors/MetadataError'
+import { EntityData } from '../mapping/EntityData'
+import { ValueType } from '../types/ValueTypes'
 
-export type ValidationRuleType = 'required' | 'length' | 'email'
+export type ValidationRuleType =
+  | 'required'
+  | 'length'
+  | 'email'
+  | 'min'
+  | 'max'
+  | 'range'
+  | 'pattern'
+  | 'unique'
+  | 'phone'
+  | 'url'
+  | 'date'
+  | 'enum'
+  | 'custom'
+  | 'requiredIf'
+  | 'requiredUnless'
+
+export type CustomValidator = (
+  value: ValueType | undefined,
+  entityData: EntityData,
+  entityName: string,
+  propertyName: string
+) => boolean | string
 
 export interface ValidationRule {
   type: ValidationRuleType
   min?: number
   max?: number
+  pattern?: RegExp
+  enumValues?: Array<ValueType>
+  customValidator?: CustomValidator
+  dependentProperty?: string
+  expectedValue?: ValueType
+  groups?: Array<string>
 }
 
 export class ValidationMetadataStorage {

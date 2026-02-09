@@ -6,6 +6,7 @@
 import { ColumnType } from '../types/ColumnType'
 import { MetadataStorage } from './MetadataStorage'
 import { EntityMetadata } from './EntityMetadata'
+import { ScopeRegistry, ScopeFunction } from './ScopeRegistry'
 import { ColumnOptions, createColumnOptions, registerColumn, registerPrimaryKey, registerAutoIncrementPrimaryKey } from '../decorators/ColumnDecorator'
 import { registerEntity, createEntityOptions } from '../decorators/EntityDecorator'
 
@@ -53,6 +54,8 @@ export interface EntitySchema {
   columns: Array<ColumnSchema>
   /** 软删除配置 */
   softDelete?: boolean | SoftDeleteSchema
+  /** 查询作用域定义 */
+  scopes?: Record<string, ScopeFunction>
 }
 
 /**
@@ -119,6 +122,12 @@ export function defineEntity(entityName: string, schema: EntitySchema): EntityMe
         throw new Error(`注册软删除列失败: ${e instanceof Error ? e.message : String(e)}`)
       }
     }
+  }
+
+  // 注册查询作用域
+  if (schema.scopes !== undefined) {
+    const scopeRegistry = ScopeRegistry.getInstance()
+    scopeRegistry.registerScopes(entityName, schema.scopes)
   }
 
   return metadata

@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 import { TypedEntityData } from '../../main/ets/mapping/TypedEntityData';
 
 interface UserSchema {

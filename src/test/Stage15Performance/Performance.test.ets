@@ -4,9 +4,8 @@ import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
 import { ColumnType } from '../../main/ets/types/ColumnType';
 import { QueryCache } from '../../main/ets/query/QueryCache';
 import { RelationLoadResult, ParallelRelationLoadResult } from '../../main/ets/query/RelationLoadResult';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
-import { BatchInsertOptions } from '../../main/ets/repository/BatchInsertOptions';
-import { BatchInsertResult } from '../../main/ets/repository/BatchInsertResult';
+import { EntityData } from '../../main/ets/mapping/EntityData';
+import { BatchInsertOptions, BatchInsertResult } from '../../main/ets/repository/index';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
 import { ValidationMetadataStorage } from '../../main/ets/validation/ValidationMetadataStorage';
 

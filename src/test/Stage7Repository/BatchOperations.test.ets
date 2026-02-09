@@ -2,10 +2,8 @@ import { describe, beforeEach, it, expect } from '@ohos/hypium';
 import { MetadataStorage } from '../../main/ets/core/MetadataStorage';
 import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
 import { ColumnType } from '../../main/ets/types/ColumnType';
-import { Repository, SaveResult } from '../../main/ets/repository/Repository';
-import { BatchInsertOptions } from '../../main/ets/repository/BatchInsertOptions';
-import { BatchInsertResult } from '../../main/ets/repository/BatchInsertResult';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
+import { Repository, BatchInsertOptions, BatchInsertResult } from '../../main/ets/repository/index';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
 import { ValidationMetadataStorage } from '../../main/ets/validation/ValidationMetadataStorage';
 

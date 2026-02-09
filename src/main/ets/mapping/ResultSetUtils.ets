@@ -6,7 +6,7 @@
 
 import { relationalStore } from '@kit.ArkData'
 import { EntityMetadata } from '../core/EntityMetadata'
-import { ResultSetRow } from './DataMapper'
+import { ResultSetRow } from './ResultSetRow'
 import { ColumnType } from '../types/ColumnType'
 import { DbValueType } from '../types/ValueTypes'
 

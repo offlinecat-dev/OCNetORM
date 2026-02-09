@@ -3,7 +3,10 @@
  */
 
 // 仓库类
-export { Repository, SaveResult, DeleteResult, TransactionResult, TransactionCallback } from './Repository'
+export { Repository, TransactionCallback } from './Repository'
+export { SaveResult } from './SaveResult'
+export { DeleteResult } from './DeleteResult'
+export { TransactionResult } from './TransactionResult'
 
 // 批量插入相关
 export { BatchInsertOptions } from './BatchInsertOptions'

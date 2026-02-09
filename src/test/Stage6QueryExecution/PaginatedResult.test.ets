@@ -1,6 +1,6 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { PaginatedResult } from '../../main/ets/query/PaginatedResult';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 
 export default function paginatedResultTest() {
   describe('paginatedResultTest', () => {

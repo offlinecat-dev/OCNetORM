@@ -83,3 +83,23 @@ export class SubQueryError extends QueryError {
     this.name = 'SubQueryError'
   }
 }
+
+/**
+ * 作用域未找到错误
+ * 当使用未注册的查询作用域时抛出
+ */
+export class ScopeNotFoundError extends QueryError {
+  /**
+   * 构造函数
+   * @param entityName 实体名称
+   * @param scopeName 作用域名称
+   */
+  constructor(entityName: string, scopeName: string) {
+    const context = new ErrorContext()
+    context.entityName = entityName
+    context.operation = '应用查询作用域'
+    context.details = `作用域 '${scopeName}' 未在实体 '${entityName}' 中注册`
+    super(`查询作用域未找到: ${scopeName}`, ERROR_SUB_QUERY, context)
+    this.name = 'ScopeNotFoundError'
+  }
+}

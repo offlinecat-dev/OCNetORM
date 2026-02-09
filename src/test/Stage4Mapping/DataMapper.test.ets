@@ -2,7 +2,9 @@ import { describe, beforeEach, it, expect } from '@ohos/hypium';
 import { MetadataStorage } from '../../main/ets/core/MetadataStorage';
 import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
 import { ColumnType } from '../../main/ets/types/ColumnType';
-import { DataMapper, EntityData, ResultSetRow } from '../../main/ets/mapping/DataMapper';
+import { DataMapper } from '../../main/ets/mapping/DataMapper';
+import { EntityData } from '../../main/ets/mapping/EntityData';
+import { ResultSetRow } from '../../main/ets/mapping/ResultSetRow';
 import { EntityMappingError, NullValueError } from '../../main/ets/errors/MappingError';
 
 const setupUserMetadata = (): void => {

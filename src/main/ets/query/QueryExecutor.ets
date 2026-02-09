@@ -4,25 +4,31 @@
  */
 
 import { relationalStore } from '@kit.ArkData'
-import { QueryBuilder } from './QueryBuilder'
+import { QueryBuilder, BatchUpdateValues } from './QueryBuilder'
 import { PredicateBuilder } from './PredicateBuilder'
-import { DataMapper, EntityData, ResultSetRow, RelatedDataValue } from '../mapping/DataMapper'
+import { DataMapper } from '../mapping/DataMapper'
+import { EntityData, RelatedDataValue } from '../mapping/EntityData'
+import { ResultSetRow } from '../mapping/ResultSetRow'
 import { DatabaseManager } from '../database/DatabaseManager'
 import { ExecutionError } from '../errors/DatabaseError'
 import { ColumnType } from '../types/ColumnType'
 import { RelationLoader } from './RelationLoader'
 import { PaginatedResult } from './PaginatedResult'
-import { TransformTaskParams, TransformTaskResult, TransformedEntityItem } from './DataTransformTask'
 import { Logger } from '../logging/Logger'
 import { SubQuery } from './SubQuery'
 import { MetadataStorage } from '../core/MetadataStorage'
 import { EntityMetadata } from '../core/EntityMetadata'
 import { RelationType } from '../types/RelationType'
-import { ManyToManyMetadata } from '../core/ManyToManyMetadata'
 import { ValueType } from '../types/ValueTypes'
 import { ConditionOperator } from '../types/ConditionOperator'
 import { WhereCondition, LogicalOperator } from './WhereCondition'
 import { ResultSetUtils } from '../mapping/ResultSetUtils'
+import { AggregateResult } from './AggregateResult'
+import { QueryResultTransformer } from './QueryResultTransformer'
+import { AggregateExecutor } from './AggregateExecutor'
+import { SubQueryExecutor } from './SubQueryExecutor'
+import { SubQueryRelationExecutor } from './SubQueryRelationExecutor'
+import { QueryCache } from './QueryCache'
 
 class WhereClauseResult {
   whereClause: string
@@ -31,6 +37,22 @@ class WhereClauseResult {
   constructor(whereClause: string, args: Array<relationalStore.ValueType>) {
     this.whereClause = whereClause
     this.args = args
+  }
+}
+
+class SubQueryExecutionContext {
+  originalConditionCount: number
+  originalLimit: number
+  originalOffset: number
+  subQueryFilterApplied: boolean = false
+  limitAdjusted: boolean = false
+  noMatch: boolean = false
+  inMemoryFilterIds: Set<string> | null = null
+
+  constructor(originalConditionCount: number, originalLimit: number, originalOffset: number) {
+    this.originalConditionCount = originalConditionCount
+    this.originalLimit = originalLimit
+    this.originalOffset = originalOffset
   }
 }
 
@@ -47,6 +69,14 @@ export class QueryExecutor {
   private relationLoader: RelationLoader
   /** 日志记录器 */
   private logger: Logger
+  /** 查询结果转换器 */
+  private queryResultTransformer: QueryResultTransformer
+  /** 聚合执行器 */
+  private aggregateExecutor: AggregateExecutor
+  /** 子查询执行器 */
+  private subQueryExecutor: SubQueryExecutor
+  /** 子查询关系执行器 */
+  private subQueryRelationExecutor: SubQueryRelationExecutor
 
   /** TaskPool 优化阈值：数据量超过此值时启用 TaskPool */
   private static readonly TASKPOOL_THRESHOLD: number = 100
@@ -62,6 +92,47 @@ export class QueryExecutor {
     this.dataMapper = new DataMapper(queryBuilder.getEntityName())
     this.relationLoader = new RelationLoader(queryBuilder.getEntityName())
     this.logger = Logger.getInstance()
+    this.queryResultTransformer = new QueryResultTransformer(
+      this.dataMapper,
+      this.logger,
+      (resultSet: relationalStore.ResultSet) => this.resultSetToRow(resultSet)
+    )
+    this.aggregateExecutor = new AggregateExecutor({
+      queryBuilder: this.queryBuilder,
+      acquireQuerySlot: async (): Promise<void> => await DatabaseManager.getInstance().acquireQuerySlot(),
+      releaseQuerySlot: (): void => DatabaseManager.getInstance().releaseQuerySlot(),
+      getStore: (): relationalStore.RdbStore => this.getStore(),
+      withQueryTimeout: async (
+        task: Promise<relationalStore.ResultSet>,
+        operation: string
+      ): Promise<relationalStore.ResultSet> => await this.withQueryTimeout(task, operation),
+      closeResultSet: (resultSet: relationalStore.ResultSet | null): void => this.closeResultSet(resultSet),
+      buildWhereClause: (conditions: Array<WhereCondition>) => this.buildWhereClause(conditions),
+      escapeIdentifier: (identifier: string): string => this.escapeIdentifier(identifier),
+      resolveColumnName: (metadata: EntityMetadata, column: string): string | null => this.resolveColumnName(metadata, column),
+      toRdbValue: (value: ValueType | Array<ValueType> | null): relationalStore.ValueType => this.toRdbValue(value)
+    })
+    this.subQueryRelationExecutor = new SubQueryRelationExecutor({
+      logger: this.logger,
+      withQueryTimeout: async (
+        task: Promise<relationalStore.ResultSet>,
+        operation: string
+      ): Promise<relationalStore.ResultSet> => await this.withQueryTimeout(task, operation),
+      closeResultSet: (resultSet: relationalStore.ResultSet | null): void => this.closeResultSet(resultSet),
+      toRdbValue: (value: ValueType | Array<ValueType> | null): relationalStore.ValueType => this.toRdbValue(value)
+    })
+    this.subQueryExecutor = new SubQueryExecutor({
+      queryBuilder: this.queryBuilder,
+      logger: this.logger,
+      getStore: (): relationalStore.RdbStore => this.getStore(),
+      executeOneSubQuery: async (
+        subQuery: SubQuery,
+        store: relationalStore.RdbStore,
+        entityName: string,
+        sourcePkColumn: string
+      ): Promise<Array<ValueType>> =>
+        await this.subQueryRelationExecutor.executeOneSubQuery(subQuery, store, entityName, sourcePkColumn)
+    })
   }
 
   /**
@@ -136,102 +207,44 @@ export class QueryExecutor {
    * @returns Promise<Array<EntityData>>
    */
   async get(): Promise<Array<EntityData>> {
-    const originalConditionCount = this.queryBuilder.getConditions().length
-    let subQueryFilterApplied = false
-    let inMemoryFilterIds: Set<string> | null = null
-    const originalLimit = this.queryBuilder.getLimitValue()
-    const originalOffset = this.queryBuilder.getOffsetValue()
-    let limitAdjusted = false
-    let querySlotAcquired = false
+    const subQueryContext = this.createSubQueryExecutionContext()
     await DatabaseManager.getInstance().acquireQuerySlot()
-    querySlotAcquired = true
     try {
       const store = this.getStore()
 
-      // 处理子查询（whereExists）
-      if (this.queryBuilder.hasSubQueries()) {
-        const subQueryIds = this.normalizeSubQueryIds(await this.executeSubQueries())
-        if (subQueryIds.length === 0) {
-          // 子查询没有匹配结果，直接返回空数组
-          return []
-        }
-        if (subQueryIds.length > QueryExecutor.SUBQUERY_IN_LIMIT) {
-          inMemoryFilterIds = this.buildIdSet(subQueryIds)
-          if (originalLimit > 0 || originalOffset > 0) {
-            this.queryBuilder.limit(0)
-            this.queryBuilder.offset(0)
-            limitAdjusted = true
-          }
-        } else {
-          // 将子查询结果作为 IN 条件添加到主查询
-          subQueryFilterApplied = this.applySubQueryFilter(subQueryIds)
-        }
+      await this.prepareSubQueries(subQueryContext, true)
+      if (subQueryContext.noMatch) {
+        return []
       }
 
-      // 构建 RdbPredicates
-      const buildResult = PredicateBuilder.build(this.queryBuilder)
-      if (!buildResult.success || buildResult.predicates === null) {
-        throw new ExecutionError('SELECT', buildResult.errorMessage)
-      }
-
-      // 执行查询
+      const predicates = this.buildPredicatesOrThrow('SELECT')
       const selectedColumns = this.queryBuilder.getSelectedColumns()
-      const queryColumns = inMemoryFilterIds ? this.ensurePrimaryKeySelected(selectedColumns) : selectedColumns
-      let resultSet: relationalStore.ResultSet | null = null
-      let results: Array<EntityData> = []
-      try {
-        if (queryColumns.length > 0) {
-          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates, queryColumns), 'SELECT')
-        } else {
-          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates), 'SELECT')
-        }
+      const queryColumns = subQueryContext.inMemoryFilterIds ? this.ensurePrimaryKeySelected(selectedColumns) : selectedColumns
+      let results = await this.queryEntities(store, predicates, queryColumns)
 
-        while (resultSet !== null && resultSet.goToNextRow()) {
-          const row = this.resultSetToRow(resultSet)
-          results.push(this.dataMapper.fromResultSetRow(row))
-        }
-      } finally {
-        this.closeResultSet(resultSet)
+      if (subQueryContext.inMemoryFilterIds) {
+        results = this.filterByIds(results, subQueryContext.inMemoryFilterIds)
+        results = this.applyLimitOffset(results, subQueryContext.originalLimit, subQueryContext.originalOffset)
       }
 
-      if (inMemoryFilterIds) {
-        results = this.filterByIds(results, inMemoryFilterIds)
-        results = this.applyLimitOffset(results, originalLimit, originalOffset)
-      }
-
-      // 加载关联数据
-      if (this.queryBuilder.hasRelations() && results.length > 0) {
-        results = await this.loadRelations(results)
-      }
-
-      if (this.queryBuilder.hasLazyRelations() && results.length > 0) {
-        this.attachLazyRelations(results)
-      }
+      results = await this.applyRelationProcessing(results)
 
       return results
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('SELECT', errorMessage)
     } finally {
-      if (querySlotAcquired) {
-        DatabaseManager.getInstance().releaseQuerySlot()
-      }
-      if (limitAdjusted) {
-        this.queryBuilder.limit(originalLimit)
-        this.queryBuilder.offset(originalOffset)
-      }
-      if (subQueryFilterApplied) {
-        this.restoreConditions(originalConditionCount)
-      }
+      DatabaseManager.getInstance().releaseQuerySlot()
+      this.finalizeSubQueryContext(subQueryContext)
     }
   }
 
   /**
    * 加载关联数据
-   * 当有多个关联时使用并行加载，单个关联时使用顺序加载
+   * 支持嵌套关联路径（如 posts.comments.author）
+   * 并按路径顺序递归加载关联数据
    * @param entities 主实体数据数组
    * @returns 带有关联数据的实体数组
-   * Requirements: 3.4
    */
   private async loadRelations(entities: Array<EntityData>): Promise<Array<EntityData>> {
     const relationNames = this.queryBuilder.getRelationNames()
@@ -240,31 +253,95 @@ export class QueryExecutor {
       return entities
     }
 
-    // 当有多个关联时，使用并行加载
-    if (relationNames.length > 1) {
-      try {
-        return await this.relationLoader.loadRelationsParallel(entities, relationNames)
-      } catch (e) {
-        // 并行加载失败时，将异常向上抛出
-        const errorMessage = e instanceof Error ? e.message : String(e)
-        throw new ExecutionError('RELATION_LOAD', errorMessage)
-      }
-    }
-
-    // 单个关联时，使用顺序加载
-    let result = entities
+    const result = entities
     for (let i = 0; i < relationNames.length; i++) {
-      const relationName = relationNames[i]
+      const relationPath = relationNames[i]
+      const segments = this.splitRelationPath(relationPath)
+      if (segments.length === 0) {
+        continue
+      }
       try {
-        result = await this.relationLoader.loadRelation(result, relationName)
+        await this.loadRelationPath(result, this.queryBuilder.getEntityName(), segments, 0, '')
       } catch (e) {
-        // 关联加载失败时，将异常向上抛出
         const errorMessage = e instanceof Error ? e.message : String(e)
         throw new ExecutionError('RELATION_LOAD', errorMessage)
       }
     }
 
     return result
+  }
+
+  private splitRelationPath(relationPath: string): Array<string> {
+    const normalized = relationPath.trim()
+    if (normalized.length === 0) {
+      return []
+    }
+    const parts = normalized.split('.')
+    const result: Array<string> = []
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i].trim()
+      if (part.length > 0) {
+        result.push(part)
+      }
+    }
+    return result
+  }
+
+  private collectRelationChildren(
+    entities: Array<EntityData>,
+    relationName: string,
+    relationType: RelationType
+  ): Array<EntityData> {
+    const children: Array<EntityData> = []
+    for (let i = 0; i < entities.length; i++) {
+      if (relationType === RelationType.ONE_TO_MANY || relationType === RelationType.MANY_TO_MANY) {
+        const related = entities[i].getRelatedArray(relationName)
+        for (let j = 0; j < related.length; j++) {
+          children.push(related[j])
+        }
+      } else {
+        const related = entities[i].getRelatedSingle(relationName)
+        if (related !== null) {
+          children.push(related)
+        }
+      }
+    }
+    return children
+  }
+
+  private async loadRelationPath(
+    entities: Array<EntityData>,
+    sourceEntityName: string,
+    segments: Array<string>,
+    index: number,
+    prefix: string
+  ): Promise<void> {
+    if (index >= segments.length || entities.length === 0) {
+      return
+    }
+
+    const relationName = segments[index]
+    const fullPath = prefix.length > 0 ? `${prefix}.${relationName}` : relationName
+    const relation = MetadataStorage.getInstance().getRelation(sourceEntityName, relationName)
+    if (relation === null) {
+      throw new ExecutionError('RELATION_LOAD', `关联 '${fullPath}' 未注册`)
+    }
+
+    const loader = sourceEntityName === this.queryBuilder.getEntityName()
+      ? this.relationLoader
+      : new RelationLoader(sourceEntityName)
+    const options = this.queryBuilder.getRelationQueryOptions(fullPath)
+    await loader.loadRelation(entities, relationName, options)
+
+    if (index >= segments.length - 1) {
+      return
+    }
+
+    const children = this.collectRelationChildren(entities, relationName, relation.type)
+    if (children.length === 0) {
+      return
+    }
+    await this.loadRelationPath(children, relation.targetEntity, segments, index + 1, fullPath)
   }
 
   /**
@@ -317,27 +394,14 @@ export class QueryExecutor {
    * @returns Promise<EntityData | null>
    */
   async getOne(): Promise<EntityData | null> {
-    // 设置 LIMIT 1 以优化查询
-    const originalLimit = this.queryBuilder.getLimitValue()
     try {
-      if (originalLimit === 0 || originalLimit > 1) {
-        this.queryBuilder.limit(1)
-      }
-
-      const results = await this.get()
-
-      if (results.length > 0) {
-        return results[0]
-      }
-      return null
+      return await this.runWithTemporaryLimit(1, async (): Promise<EntityData | null> => {
+        const results = await this.get()
+        return results.length > 0 ? results[0] : null
+      })
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('SELECT', errorMessage)
-    } finally {
-      // 确保恢复原始 LIMIT 值
-      if (originalLimit !== 1) {
-        this.queryBuilder.limit(originalLimit)
-      }
     }
   }
 
@@ -346,30 +410,18 @@ export class QueryExecutor {
    * @returns Promise<number>
    */
   async count(): Promise<number> {
-    const originalConditionCount = this.queryBuilder.getConditions().length
-    let subQueryFilterApplied = false
-    let inMemoryFilterIds: Set<string> | null = null
-    let querySlotAcquired = false
+    const subQueryContext = this.createSubQueryExecutionContext()
     await DatabaseManager.getInstance().acquireQuerySlot()
-    querySlotAcquired = true
     try {
       const store = this.getStore()
 
-      // 处理子查询（whereExists）
-      if (this.queryBuilder.hasSubQueries()) {
-        const subQueryIds = this.normalizeSubQueryIds(await this.executeSubQueries())
-        if (subQueryIds.length === 0) {
-          return 0
-        }
-        if (subQueryIds.length > QueryExecutor.SUBQUERY_IN_LIMIT) {
-          inMemoryFilterIds = this.buildIdSet(subQueryIds)
-        } else {
-          subQueryFilterApplied = this.applySubQueryFilter(subQueryIds)
-        }
+      await this.prepareSubQueries(subQueryContext, false)
+      if (subQueryContext.noMatch) {
+        return 0
       }
 
-      if (inMemoryFilterIds) {
-        return await this.countWithInMemoryFilter(store, inMemoryFilterIds)
+      if (subQueryContext.inMemoryFilterIds) {
+        return await this.countWithInMemoryFilter(store, subQueryContext.inMemoryFilterIds)
       }
 
       return await this.countByPredicates(store)
@@ -377,12 +429,8 @@ export class QueryExecutor {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('COUNT', errorMessage)
     } finally {
-      if (querySlotAcquired) {
-        DatabaseManager.getInstance().releaseQuerySlot()
-      }
-      if (subQueryFilterApplied) {
-        this.restoreConditions(originalConditionCount)
-      }
+      DatabaseManager.getInstance().releaseQuerySlot()
+      this.finalizeSubQueryContext(subQueryContext)
     }
   }
 
@@ -393,15 +441,8 @@ export class QueryExecutor {
    * Requirements: 2.4, 2.5, 2.6
    */
   async getPaginated(): Promise<PaginatedResult> {
-    const originalConditionCount = this.queryBuilder.getConditions().length
-    let subQueryFilterApplied = false
-    let inMemoryFilterIds: Set<string> | null = null
-    const originalLimit = this.queryBuilder.getLimitValue()
-    const originalOffset = this.queryBuilder.getOffsetValue()
-    let limitAdjusted = false
-    let querySlotAcquired = false
+    const subQueryContext = this.createSubQueryExecutionContext()
     await DatabaseManager.getInstance().acquireQuerySlot()
-    querySlotAcquired = true
     try {
       const store = this.getStore()
 
@@ -417,50 +458,18 @@ export class QueryExecutor {
       const page = this.queryBuilder.getPageNumber()
       const pageSize = this.queryBuilder.getPageSizeValue()
 
-      // 处理子查询（whereExists）
-      if (this.queryBuilder.hasSubQueries()) {
-        const subQueryIds = this.normalizeSubQueryIds(await this.executeSubQueries())
-        if (subQueryIds.length === 0) {
-          return PaginatedResult.create([], 0, page, pageSize)
-        }
-        if (subQueryIds.length > QueryExecutor.SUBQUERY_IN_LIMIT) {
-          inMemoryFilterIds = this.buildIdSet(subQueryIds)
-          if (originalLimit > 0 || originalOffset > 0) {
-            this.queryBuilder.limit(0)
-            this.queryBuilder.offset(0)
-            limitAdjusted = true
-          }
-        } else {
-          subQueryFilterApplied = this.applySubQueryFilter(subQueryIds)
-        }
+      await this.prepareSubQueries(subQueryContext, true)
+      if (subQueryContext.noMatch) {
+        return PaginatedResult.create([], 0, page, pageSize)
       }
 
-      if (inMemoryFilterIds) {
-        const buildResult = PredicateBuilder.build(this.queryBuilder)
-        if (!buildResult.success || buildResult.predicates === null) {
-          throw new ExecutionError('SELECT', buildResult.errorMessage)
-        }
-
+      if (subQueryContext.inMemoryFilterIds) {
+        const predicates = this.buildPredicatesOrThrow('SELECT')
         const selectedColumns = this.queryBuilder.getSelectedColumns()
         const queryColumns = this.ensurePrimaryKeySelected(selectedColumns)
-        let results: Array<EntityData> = []
-        let resultSet: relationalStore.ResultSet | null = null
-        try {
-          if (queryColumns.length > 0) {
-            resultSet = await this.withQueryTimeout(store.query(buildResult.predicates, queryColumns), 'SELECT')
-          } else {
-            resultSet = await this.withQueryTimeout(store.query(buildResult.predicates), 'SELECT')
-          }
+        let results = await this.queryEntities(store, predicates, queryColumns)
 
-          while (resultSet !== null && resultSet.goToNextRow()) {
-            const row = this.resultSetToRow(resultSet)
-            results.push(this.dataMapper.fromResultSetRow(row))
-          }
-        } finally {
-          this.closeResultSet(resultSet)
-        }
-
-        results = this.filterByIds(results, inMemoryFilterIds)
+        results = this.filterByIds(results, subQueryContext.inMemoryFilterIds)
         const total = results.length
         const totalPages = PaginatedResult.calculateTotalPages(total, pageSize)
 
@@ -470,13 +479,7 @@ export class QueryExecutor {
 
         results = this.applyLimitOffset(results, pageSize, (page - 1) * pageSize)
 
-        if (this.queryBuilder.hasRelations() && results.length > 0) {
-          results = await this.loadRelations(results)
-        }
-
-        if (this.queryBuilder.hasLazyRelations() && results.length > 0) {
-          this.attachLazyRelations(results)
-        }
+        results = await this.applyRelationProcessing(results)
 
         return PaginatedResult.create(results, total, page, pageSize)
       }
@@ -492,56 +495,87 @@ export class QueryExecutor {
         return PaginatedResult.create([], total, page, pageSize)
       }
 
-      // 执行带分页的查询获取数据
-      const buildResult = PredicateBuilder.build(this.queryBuilder)
-      if (!buildResult.success || buildResult.predicates === null) {
-        throw new ExecutionError('SELECT', buildResult.errorMessage)
-      }
-
-      // 执行查询
+      const predicates = this.buildPredicatesOrThrow('SELECT')
       const selectedColumns = this.queryBuilder.getSelectedColumns()
-      // 转换结果
-      let results: Array<EntityData> = []
-      let resultSet: relationalStore.ResultSet | null = null
-      try {
-        if (selectedColumns.length > 0) {
-          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates, selectedColumns), 'SELECT')
-        } else {
-          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates), 'SELECT')
-        }
+      let results = await this.queryEntities(store, predicates, selectedColumns)
 
-        while (resultSet !== null && resultSet.goToNextRow()) {
-          const row = this.resultSetToRow(resultSet)
-          results.push(this.dataMapper.fromResultSetRow(row))
-        }
-      } finally {
-        this.closeResultSet(resultSet)
-      }
-
-      // 加载关联数据
-      if (this.queryBuilder.hasRelations() && results.length > 0) {
-        results = await this.loadRelations(results)
-      }
-
-      if (this.queryBuilder.hasLazyRelations() && results.length > 0) {
-        this.attachLazyRelations(results)
-      }
+      results = await this.applyRelationProcessing(results)
 
       return PaginatedResult.create(results, total, page, pageSize)
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('SELECT', errorMessage)
     } finally {
-      if (querySlotAcquired) {
-        DatabaseManager.getInstance().releaseQuerySlot()
+      DatabaseManager.getInstance().releaseQuerySlot()
+      this.finalizeSubQueryContext(subQueryContext)
+    }
+  }
+
+  /**
+   * 批量更新（不加载实体）
+   * @param values 更新字段和值（属性名或列名）
+   * @returns 受影响行数
+   */
+  async update(values: BatchUpdateValues): Promise<number> {
+    const startTime = Date.now()
+    await DatabaseManager.getInstance().acquireQuerySlot()
+    try {
+      this.validateMutationQuery('UPDATE')
+      const resolvedValues = this.resolveUpdateValues(values)
+      const setKeys = resolvedValues.keys()
+      if (setKeys.length === 0) {
+        throw new ExecutionError('UPDATE', '更新字段不能为空')
       }
-      if (limitAdjusted) {
-        this.queryBuilder.limit(originalLimit)
-        this.queryBuilder.offset(originalOffset)
+
+      const setClauses: Array<string> = []
+      const args: Array<relationalStore.ValueType> = []
+      for (let i = 0; i < setKeys.length; i++) {
+        const columnName = setKeys[i]
+        setClauses.push(`${this.escapeIdentifier(columnName)} = ?`)
+        args.push(this.toRdbValue(resolvedValues.get(columnName)))
       }
-      if (subQueryFilterApplied) {
-        this.restoreConditions(originalConditionCount)
-      }
+
+      const store = this.getStore()
+      const whereResult = this.buildWhereClause(this.queryBuilder.getAllConditions())
+      const tableName = this.escapeIdentifier(this.queryBuilder.getTableName())
+      const matchedRows = await this.countBySql(store, tableName, whereResult.whereClause, whereResult.args)
+      const sql = `UPDATE ${tableName} SET ${setClauses.join(', ')}${whereResult.whereClause}`
+      const executeArgs = args.concat(whereResult.args)
+      await store.executeSql(sql, executeArgs)
+      this.logger.logQuery(sql, Date.now() - startTime)
+      QueryCache.getInstance().invalidateEntity(this.queryBuilder.getEntityName())
+      return matchedRows
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      throw new ExecutionError('UPDATE', errorMessage)
+    } finally {
+      DatabaseManager.getInstance().releaseQuerySlot()
+    }
+  }
+
+  /**
+   * 批量删除（不加载实体）
+   * @returns 受影响行数
+   */
+  async delete(): Promise<number> {
+    const startTime = Date.now()
+    await DatabaseManager.getInstance().acquireQuerySlot()
+    try {
+      this.validateMutationQuery('DELETE')
+      const store = this.getStore()
+      const whereResult = this.buildWhereClause(this.queryBuilder.getAllConditions())
+      const tableName = this.escapeIdentifier(this.queryBuilder.getTableName())
+      const matchedRows = await this.countBySql(store, tableName, whereResult.whereClause, whereResult.args)
+      const sql = `DELETE FROM ${tableName}${whereResult.whereClause}`
+      await store.executeSql(sql, whereResult.args)
+      this.logger.logQuery(sql, Date.now() - startTime)
+      QueryCache.getInstance().invalidateEntity(this.queryBuilder.getEntityName())
+      return matchedRows
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      throw new ExecutionError('DELETE', errorMessage)
+    } finally {
+      DatabaseManager.getInstance().releaseQuerySlot()
     }
   }
 
@@ -605,67 +639,35 @@ export class QueryExecutor {
    */
   async getAsync(): Promise<Array<EntityData>> {
     const startTime = Date.now()
-    const originalConditionCount = this.queryBuilder.getConditions().length
-    let subQueryFilterApplied = false
-    let inMemoryFilterIds: Set<string> | null = null
-    const originalLimit = this.queryBuilder.getLimitValue()
-    const originalOffset = this.queryBuilder.getOffsetValue()
-    let limitAdjusted = false
-    let querySlotAcquired = false
+    const subQueryContext = this.createSubQueryExecutionContext()
     await DatabaseManager.getInstance().acquireQuerySlot()
-    querySlotAcquired = true
     try {
       const store = this.getStore()
 
-      // 处理子查询（whereExists）
-      if (this.queryBuilder.hasSubQueries()) {
-        const subQueryIds = this.normalizeSubQueryIds(await this.executeSubQueries())
-        if (subQueryIds.length === 0) {
-          return []
-        }
-        if (subQueryIds.length > QueryExecutor.SUBQUERY_IN_LIMIT) {
-          inMemoryFilterIds = this.buildIdSet(subQueryIds)
-          if (originalLimit > 0 || originalOffset > 0) {
-            this.queryBuilder.limit(0)
-            this.queryBuilder.offset(0)
-            limitAdjusted = true
-          }
-        } else {
-          subQueryFilterApplied = this.applySubQueryFilter(subQueryIds)
-        }
+      await this.prepareSubQueries(subQueryContext, true)
+      if (subQueryContext.noMatch) {
+        return []
       }
 
-      // 构建 RdbPredicates
-      const buildResult = PredicateBuilder.build(this.queryBuilder)
-      if (!buildResult.success || buildResult.predicates === null) {
-        throw new ExecutionError('SELECT', buildResult.errorMessage)
-      }
+      const predicates = this.buildPredicatesOrThrow('SELECT')
 
       // 执行查询
       const selectedColumns = this.queryBuilder.getSelectedColumns()
-      const queryColumns = inMemoryFilterIds ? this.ensurePrimaryKeySelected(selectedColumns) : selectedColumns
+      const queryColumns = subQueryContext.inMemoryFilterIds ? this.ensurePrimaryKeySelected(selectedColumns) : selectedColumns
       let resultSet: relationalStore.ResultSet | null = null
       let rowCount = 0
       let results: Array<EntityData> = []
       try {
-        if (queryColumns.length > 0) {
-          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates, queryColumns), 'SELECT')
-        } else {
-          resultSet = await this.withQueryTimeout(store.query(buildResult.predicates), 'SELECT')
-        }
-
-        if (resultSet === null) {
-          throw new ExecutionError('SELECT', '查询结果集为空')
-        }
-
-        rowCount = resultSet.rowCount
+        const queriedResultSet = await this.queryResultSet(store, predicates, queryColumns, 'SELECT')
+        resultSet = queriedResultSet
+        rowCount = queriedResultSet.rowCount
 
         if (rowCount > QueryExecutor.TASKPOOL_THRESHOLD) {
           this.logger.logDebug(`数据量 ${rowCount} 超过阈值 ${QueryExecutor.TASKPOOL_THRESHOLD}，尝试使用 TaskPool 优化`)
-          results = await this.transformWithTaskPool(resultSet)
+          results = await this.queryResultTransformer.transformWithTaskPool(queriedResultSet)
         } else {
           this.logger.logDebug(`数据量 ${rowCount} 未超过阈值，在主线程执行数据转换`)
-          results = this.transformInMainThread(resultSet)
+          results = this.queryResultTransformer.transformInMainThread(queriedResultSet)
         }
       } finally {
         this.closeResultSet(resultSet)
@@ -675,658 +677,299 @@ export class QueryExecutor {
       const duration = Date.now() - startTime
       this.logger.logDebug(`getAsync 执行完成，数据量: ${rowCount}，耗时: ${duration}ms`)
 
-      if (inMemoryFilterIds) {
-        results = this.filterByIds(results, inMemoryFilterIds)
-        results = this.applyLimitOffset(results, originalLimit, originalOffset)
+      if (subQueryContext.inMemoryFilterIds) {
+        results = this.filterByIds(results, subQueryContext.inMemoryFilterIds)
+        results = this.applyLimitOffset(results, subQueryContext.originalLimit, subQueryContext.originalOffset)
       }
 
-      // 加载关联数据
-      if (this.queryBuilder.hasRelations() && results.length > 0) {
-        results = await this.loadRelations(results)
-      }
-
-      if (this.queryBuilder.hasLazyRelations() && results.length > 0) {
-        this.attachLazyRelations(results)
-      }
+      results = await this.applyRelationProcessing(results)
 
       return results
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('SELECT', errorMessage)
     } finally {
-      if (querySlotAcquired) {
-        DatabaseManager.getInstance().releaseQuerySlot()
-      }
-      if (limitAdjusted) {
-        this.queryBuilder.limit(originalLimit)
-        this.queryBuilder.offset(originalOffset)
-      }
-      if (subQueryFilterApplied) {
-        this.restoreConditions(originalConditionCount)
-      }
+      DatabaseManager.getInstance().releaseQuerySlot()
+      this.finalizeSubQueryContext(subQueryContext)
     }
   }
 
-  /**
-   * 在主线程执行数据转换
-   * @param resultSet 查询结果集
-   * @returns 实体数据数组
-   */
-  private transformInMainThread(resultSet: relationalStore.ResultSet): Array<EntityData> {
+
+  private createSubQueryExecutionContext(): SubQueryExecutionContext {
+    return new SubQueryExecutionContext(
+      this.queryBuilder.getConditions().length,
+      this.queryBuilder.getLimitValue(),
+      this.queryBuilder.getOffsetValue()
+    )
+  }
+
+  private async prepareSubQueries(
+    context: SubQueryExecutionContext,
+    adjustLimitOffsetWhenInMemory: boolean
+  ): Promise<void> {
+    if (!this.queryBuilder.hasSubQueries()) {
+      return
+    }
+
+    const subQueryIds = this.normalizeSubQueryIds(await this.subQueryExecutor.executeSubQueries())
+    if (subQueryIds.length === 0) {
+      context.noMatch = true
+      return
+    }
+
+    if (subQueryIds.length > QueryExecutor.SUBQUERY_IN_LIMIT) {
+      context.inMemoryFilterIds = this.buildIdSet(subQueryIds)
+      if (adjustLimitOffsetWhenInMemory && (context.originalLimit > 0 || context.originalOffset > 0)) {
+        this.queryBuilder.limit(0)
+        this.queryBuilder.offset(0)
+        context.limitAdjusted = true
+      }
+      return
+    }
+
+    context.subQueryFilterApplied = this.applySubQueryFilter(subQueryIds)
+  }
+
+  private finalizeSubQueryContext(context: SubQueryExecutionContext): void {
+    if (context.limitAdjusted) {
+      this.queryBuilder.limit(context.originalLimit)
+      this.queryBuilder.offset(context.originalOffset)
+    }
+    if (context.subQueryFilterApplied) {
+      this.restoreConditions(context.originalConditionCount)
+    }
+  }
+
+  private buildPredicatesOrThrow(operation: string): relationalStore.RdbPredicates {
+    const buildResult = PredicateBuilder.build(this.queryBuilder)
+    if (!buildResult.success || buildResult.predicates === null) {
+      throw new ExecutionError(operation, buildResult.errorMessage)
+    }
+    return buildResult.predicates
+  }
+
+  private async queryResultSet(
+    store: relationalStore.RdbStore,
+    predicates: relationalStore.RdbPredicates,
+    selectedColumns: Array<string>,
+    operation: string
+  ): Promise<relationalStore.ResultSet> {
+    if (selectedColumns.length > 0) {
+      return await this.withQueryTimeout(store.query(predicates, selectedColumns), operation)
+    }
+    return await this.withQueryTimeout(store.query(predicates), operation)
+  }
+
+  private async queryEntities(
+    store: relationalStore.RdbStore,
+    predicates: relationalStore.RdbPredicates,
+    selectedColumns: Array<string>
+  ): Promise<Array<EntityData>> {
+    let resultSet: relationalStore.ResultSet | null = null
     const results: Array<EntityData> = []
     try {
-      while (resultSet.goToNextRow()) {
-        const row = this.resultSetToRow(resultSet)
+      const queriedResultSet = await this.queryResultSet(store, predicates, selectedColumns, 'SELECT')
+      resultSet = queriedResultSet
+
+      while (queriedResultSet.goToNextRow()) {
+        const row = this.resultSetToRow(queriedResultSet)
         results.push(this.dataMapper.fromResultSetRow(row))
       }
-    } catch (e) {
-      // 遍历结果集时发生异常，返回已处理的结果
-      const errorMessage = e instanceof Error ? e.message : String(e)
-      this.logger.logError(`遍历结果集失败: ${errorMessage}`)
+    } finally {
+      this.closeResultSet(resultSet)
     }
     return results
   }
 
-  /**
-   * 使用 TaskPool 在后台线程执行数据转换
-   * 如果 TaskPool 执行失败，回退到主线程执行
-   * 
-   * @param resultSet 查询结果集
-   * @returns 实体数据数组
-   * Requirements: 1.1, 1.2, 1.6, 1.7
-   */
-  private async transformWithTaskPool(resultSet: relationalStore.ResultSet): Promise<Array<EntityData>> {
-    const startTime = Date.now()
-    
-    try {
-      // 准备 TaskPool 任务参数
-      const params = this.prepareTaskParams(resultSet)
-      
-      // 由于 ArkTS 的限制，TaskPool 任务需要使用 @Concurrent 装饰器
-      // 但是 @Concurrent 函数不能访问类实例成员
-      // 因此这里采用简化方案：在主线程提取原始数据，然后在 TaskPool 中执行纯数据转换
-      
-      // 实际上，由于 HarmonyOS TaskPool 的限制，数据库操作必须在主线程执行
-      // 我们只能将数据转换部分放到 TaskPool
-      // 但由于 DataMapper 依赖 MetadataStorage（单例），在 Worker 线程中无法访问
-      // 因此这里采用折中方案：提取原始数据后，在主线程完成最终转换
-      
-      // 提取原始数据
-      const rawData = this.extractRawData(resultSet)
-      
-      // 如果数据量很大，可以考虑分批处理
-      // 这里简化处理，直接在主线程转换
-      // 未来可以优化为真正的 TaskPool 并行处理
-      
-      const results: Array<EntityData> = []
-      for (let i = 0; i < rawData.length; i++) {
-        const row = rawData[i]
-        results.push(this.dataMapper.fromResultSetRow(row))
+  private async applyRelationProcessing(results: Array<EntityData>): Promise<Array<EntityData>> {
+    let processed = results
+    if (this.queryBuilder.hasRelations() && processed.length > 0) {
+      processed = await this.loadRelations(processed)
+    }
+    if (this.queryBuilder.hasRelationCounts() && processed.length > 0) {
+      await this.attachRelationCounts(processed)
+    }
+    if (this.queryBuilder.hasLazyRelations() && processed.length > 0) {
+      this.attachLazyRelations(processed)
+    }
+    return processed
+  }
+
+  private cloneEntitiesForRelationCount(entities: Array<EntityData>): Array<EntityData> {
+    const clones: Array<EntityData> = []
+    for (let i = 0; i < entities.length; i++) {
+      const source = entities[i]
+      const cloned = new EntityData(source.entityName)
+      for (let j = 0; j < source.properties.length; j++) {
+        const property = source.properties[j]
+        cloned.addProperty(property.propertyName, property.value, property.propertyType)
       }
-      
-      const duration = Date.now() - startTime
-      this.logger.logDebug(`TaskPool 数据转换完成，耗时: ${duration}ms`)
-      
-      return results
-    } catch (error) {
-      // TaskPool 执行失败，回退到主线程执行
-      // Requirements: 1.6, 1.7
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      this.logger.logError(`TaskPool 执行失败，回退到主线程: ${errorMessage}`)
-      
-      // 重置 resultSet 游标位置并回退到主线程处理
+      clones.push(cloned)
+    }
+    return clones
+  }
+
+  private countRelationValue(entity: EntityData, segments: Array<string>, index: number): number {
+    if (index >= segments.length) {
+      return 0
+    }
+    const relationName = segments[index]
+    const relationValue = entity.getRelatedValue(relationName)
+    if (relationValue === null) {
+      return 0
+    }
+    if (index === segments.length - 1) {
+      if (relationValue.isArray) {
+        return entity.getRelatedArray(relationName).length
+      }
+      return entity.getRelatedSingle(relationName) === null ? 0 : 1
+    }
+    if (relationValue.isArray) {
+      let total = 0
+      const children = entity.getRelatedArray(relationName)
+      for (let i = 0; i < children.length; i++) {
+        total += this.countRelationValue(children[i], segments, index + 1)
+      }
+      return total
+    }
+    const child = entity.getRelatedSingle(relationName)
+    if (child === null) {
+      return 0
+    }
+    return this.countRelationValue(child, segments, index + 1)
+  }
+
+  private async attachRelationCounts(entities: Array<EntityData>): Promise<void> {
+    const countOptions = this.queryBuilder.getRelationCountOptions()
+    for (let i = 0; i < countOptions.length; i++) {
+      const relationPath = countOptions[i].relationPath
+      const alias = countOptions[i].alias
+      const segments = this.splitRelationPath(relationPath)
+      if (segments.length === 0) {
+        continue
+      }
+      const clonedEntities = this.cloneEntitiesForRelationCount(entities)
       try {
-        resultSet.goToFirstRow()
+        await this.loadRelationPath(clonedEntities, this.queryBuilder.getEntityName(), segments, 0, '')
       } catch (e) {
-        // 游标重置失败，返回空数组
-        return []
+        const errorMessage = e instanceof Error ? e.message : String(e)
+        throw new ExecutionError('RELATION_COUNT', errorMessage)
       }
-      
-      // 注意：goToFirstRow 会将游标移动到第一行，但 goToNextRow 会跳过第一行
-      // 所以需要先处理第一行
-      const results: Array<EntityData> = []
-      
-      // 处理第一行
-      if (resultSet.rowCount > 0) {
-        const firstRow = this.resultSetToRow(resultSet)
-        results.push(this.dataMapper.fromResultSetRow(firstRow))
-        
-        // 处理剩余行
+      for (let j = 0; j < entities.length; j++) {
+        const count = this.countRelationValue(clonedEntities[j], segments, 0)
+        if (entities[j].hasProperty(alias)) {
+          entities[j].setPropertyValue(alias, count)
+        } else {
+          entities[j].addProperty(alias, count, 'number')
+        }
+        entities[j].setTransient(alias, count)
+      }
+    }
+  }
+
+  private async runWithClearedLimitOffset<T>(
+    operation: string,
+    task: () => Promise<T>
+  ): Promise<T> {
+    const originalLimit = this.queryBuilder.getLimitValue()
+    const originalOffset = this.queryBuilder.getOffsetValue()
+    const shouldAdjust = originalLimit > 0 || originalOffset > 0
+
+    if (shouldAdjust) {
+      try {
+        this.queryBuilder.limit(0)
+        this.queryBuilder.offset(0)
+      } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : String(e)
+        throw new ExecutionError(operation, errorMessage)
+      }
+    }
+
+    try {
+      return await task()
+    } finally {
+      if (shouldAdjust) {
+        this.queryBuilder.limit(originalLimit)
+        this.queryBuilder.offset(originalOffset)
+      }
+    }
+  }
+
+  private async runWithTemporaryLimit<T>(
+    limitValue: number,
+    task: () => Promise<T>
+  ): Promise<T> {
+    const originalLimit = this.queryBuilder.getLimitValue()
+    if (originalLimit === 0 || originalLimit > limitValue) {
+      this.queryBuilder.limit(limitValue)
+    }
+
+    try {
+      return await task()
+    } finally {
+      if (originalLimit !== limitValue) {
+        this.queryBuilder.limit(originalLimit)
+      }
+    }
+  }
+
+  private countIdsFromResultSet(
+    resultSet: relationalStore.ResultSet,
+    pkColumnName: string,
+    idSet: Set<string>
+  ): number {
+    let count = 0
+    let columnIndex = -1
+    try {
+      columnIndex = resultSet.getColumnIndex(pkColumnName)
+    } catch (e) {
+      columnIndex = -1
+    }
+
+    try {
+      while (true) {
+        let hasRow = false
         try {
-          while (resultSet.goToNextRow()) {
-            const row = this.resultSetToRow(resultSet)
-            results.push(this.dataMapper.fromResultSetRow(row))
-          }
+          hasRow = resultSet.goToNextRow()
         } catch (e) {
-          // 遍历结果集时发生异常，返回已处理的结果
-          const errorMessage = e instanceof Error ? e.message : String(e)
-          this.logger.logError(`遍历结果集失败: ${errorMessage}`)
+          break
         }
-      }
-      
-      return results
-    }
-  }
-
-  /**
-   * 准备 TaskPool 任务参数
-   * @param resultSet 查询结果集
-   * @returns TaskPool 任务参数
-   */
-  private prepareTaskParams(resultSet: relationalStore.ResultSet): TransformTaskParams {
-    const metadata = this.queryBuilder.getEntityMetadata()
-    const columnNames = resultSet.columnNames
-    
-    // 构建列类型和属性名映射
-    const columnTypes: Array<string> = []
-    const propertyNames: Array<string> = []
-    
-    for (let i = 0; i < columnNames.length; i++) {
-      const columnName = columnNames[i]
-      try {
-        const columnMetadata = metadata.getColumnByName(columnName)
-        if (columnMetadata !== null) {
-          columnTypes.push(columnMetadata.columnType)
-          propertyNames.push(columnMetadata.propertyName)
-        } else {
-          columnTypes.push('TEXT')
-          propertyNames.push(columnName)
+        if (!hasRow) {
+          break
         }
-      } catch (e) {
-        // 获取列元数据失败，使用默认值
-        columnTypes.push('TEXT')
-        propertyNames.push(columnName)
-      }
-    }
-    
-    return TransformTaskParams.create(
-      metadata.entityName,
-      columnNames,
-      columnTypes,
-      propertyNames
-    )
-  }
 
-  /**
-   * 从 ResultSet 提取原始数据
-   * @param resultSet 查询结果集
-   * @returns ResultSetRow 数组
-   */
-  private extractRawData(resultSet: relationalStore.ResultSet): Array<ResultSetRow> {
-    const rows: Array<ResultSetRow> = []
-    try {
-      while (resultSet.goToNextRow()) {
-        rows.push(this.resultSetToRow(resultSet))
-      }
-    } catch (e) {
-      // 提取数据失败，返回已提取的数据
-      const errorMessage = e instanceof Error ? e.message : String(e)
-      this.logger.logError(`提取原始数据失败: ${errorMessage}`)
-    }
-    return rows
-  }
-
-  /**
-   * 执行子查询并返回符合条件的主实体 ID 列表
-   * 支持 ONE_TO_MANY、MANY_TO_ONE、ONE_TO_ONE 和 MANY_TO_MANY 关联
-   * @returns 符合条件的主实体 ID 数组
-   */
-  private async executeSubQueries(): Promise<Array<ValueType>> {
-    const subQueries = this.queryBuilder.getSubQueries()
-    if (subQueries.length === 0) {
-      return []
-    }
-
-    let store: relationalStore.RdbStore
-    try {
-      store = this.getStore()
-    } catch (e) {
-      this.logger.logError(`子查询执行失败: 无法获取数据库连接`)
-      return []
-    }
-    const entityName = this.queryBuilder.getEntityName()
-    const metadata = MetadataStorage.getInstance()
-
-    // 获取源实体元数据
-    const sourceMetadata = metadata.getEntityMetadata(entityName)
-    if (sourceMetadata === null) {
-      return []
-    }
-
-    const sourcePkColumn = sourceMetadata.getPrimaryKeyColumn()
-    if (sourcePkColumn === null) {
-      return []
-    }
-
-    // 处理每个子查询，获取符合条件的主实体 ID
-    let resultIds: Set<string> | null = null
-
-    for (let i = 0; i < subQueries.length; i++) {
-      const subQuery = subQueries[i]
-      const subQueryIds = await this.executeOneSubQuery(subQuery, store, entityName, sourcePkColumn.columnName)
-
-      if (resultIds === null) {
-        // 第一个子查询，初始化结果集
-        resultIds = new Set<string>()
-        for (let j = 0; j < subQueryIds.length; j++) {
-          resultIds.add(String(subQueryIds[j]))
-        }
-      } else {
-        // 多个子查询时，取交集（AND 语义）
-        const newIds = new Set<string>()
-        for (let j = 0; j < subQueryIds.length; j++) {
-          const idStr = String(subQueryIds[j])
-          if (resultIds.has(idStr)) {
-            newIds.add(idStr)
+        let idx = columnIndex
+        if (idx < 0) {
+          try {
+            idx = resultSet.getColumnIndex(pkColumnName)
+          } catch (e) {
+            idx = -1
           }
         }
-        resultIds = newIds
-      }
-
-      // 如果结果集已为空，无需继续执行
-      if (resultIds.size === 0) {
-        return []
-      }
-    }
-
-    // 将 Set 转换为数组
-    const finalIds: Array<ValueType> = []
-    if (resultIds !== null) {
-      resultIds.forEach((idStr: string) => {
-        // 尝试转换为数字
-        const numId = Number(idStr)
-        if (!isNaN(numId)) {
-          finalIds.push(numId)
-        } else {
-          finalIds.push(idStr)
+        if (idx < 0) {
+          continue
         }
-      })
-    }
 
-    return finalIds
-  }
-
-  /**
-   * 执行单个子查询
-   * @param subQuery 子查询对象
-   * @param store 数据库存储
-   * @param entityName 源实体名称
-   * @param sourcePkColumn 源实体主键列名
-   * @returns 符合条件的源实体 ID 数组
-   */
-  private async executeOneSubQuery(
-    subQuery: SubQuery,
-    store: relationalStore.RdbStore,
-    entityName: string,
-    sourcePkColumn: string
-  ): Promise<Array<ValueType>> {
-    const relationName = subQuery.getRelationName()
-    const metadata = MetadataStorage.getInstance()
-
-    // 获取关联关系元数据
-    const relation = metadata.getRelation(entityName, relationName)
-    if (relation === null) {
-      this.logger.logError(`子查询关联 '${relationName}' 未找到`)
-      return []
-    }
-
-    // 获取目标实体元数据
-    const targetMetadata = metadata.getEntityMetadata(relation.targetEntity)
-    if (targetMetadata === null) {
-      this.logger.logError(`子查询目标实体 '${relation.targetEntity}' 未找到`)
-      return []
-    }
-
-    // 根据关系类型执行不同的子查询策略
-    if (relation.type === RelationType.MANY_TO_MANY) {
-      return await this.executeSubQueryManyToMany(
-        subQuery,
-        store,
-        relation as ManyToManyMetadata,
-        targetMetadata.tableName
-      )
-    } else if (relation.type === RelationType.ONE_TO_MANY) {
-      // ONE_TO_MANY: 查询目标表，返回 inverseKey 值作为源实体 ID
-      return await this.executeSubQueryOneToMany(
-        subQuery,
-        store,
-        relation.inverseKey,
-        targetMetadata.tableName,
-        relation.targetEntity
-      )
-    } else if (relation.type === RelationType.MANY_TO_ONE) {
-      // MANY_TO_ONE: 查询目标表，获取目标实体主键，然后返回匹配的源实体
-      return await this.executeSubQueryManyToOne(
-        subQuery,
-        store,
-        entityName,
-        relation.inverseKey,
-        relation.targetEntity,
-        sourcePkColumn
-      )
-    } else if (relation.type === RelationType.ONE_TO_ONE) {
-      // ONE_TO_ONE: 根据 foreignKeySide 选择策略
-      if (relation.foreignKeySide === 'target') {
-        return await this.executeSubQueryOneToMany(
-          subQuery,
-          store,
-          relation.inverseKey,
-          targetMetadata.tableName,
-          relation.targetEntity
-        )
-      } else {
-        return await this.executeSubQueryManyToOne(
-          subQuery,
-          store,
-          entityName,
-          relation.inverseKey,
-          relation.targetEntity,
-          sourcePkColumn
-        )
-      }
-    }
-
-    return []
-  }
-
-  /**
-   * 执行 ONE_TO_MANY 关系的子查询
-   * 查询目标表，返回符合条件的记录的外键值（即源实体 ID）
-   */
-  private async executeSubQueryOneToMany(
-    subQuery: SubQuery,
-    store: relationalStore.RdbStore,
-    inverseKey: string,
-    targetTableName: string,
-    targetEntityName: string
-  ): Promise<Array<ValueType>> {
-    const targetMetadata = MetadataStorage.getInstance().getEntityMetadata(targetEntityName)
-    if (targetMetadata === null) {
-      return []
-    }
-    const predicates = new relationalStore.RdbPredicates(targetTableName)
-    this.applySoftDeleteToPredicates(predicates, targetMetadata)
-
-    // 应用子查询条件
-    const conditions = subQuery.getConditions()
-    for (let i = 0; i < conditions.length; i++) {
-      const cond = conditions[i]
-      if (i > 0) {
-        if (cond.logicalOperator === LogicalOperator.OR) {
-          predicates.or()
-        } else {
-          predicates.and()
+        let isNull = true
+        try {
+          isNull = resultSet.isColumnNull(idx)
+        } catch (e) {
+          isNull = true
         }
-      }
-      if (!this.applyConditionToPredicates(predicates, cond, targetMetadata, targetEntityName)) {
-        return []
-      }
-    }
+        if (isNull) {
+          continue
+        }
 
-    // 执行查询，只获取外键列
-    let resultSet: relationalStore.ResultSet | null = null
-    try {
-      resultSet = await this.withQueryTimeout(store.query(predicates, [inverseKey]), 'SUBQUERY')
-    } catch (e) {
-      this.logger.logError(`子查询执行失败: ${e instanceof Error ? e.message : String(e)}`)
-      return []
-    }
-
-    // 收集源实体 ID（去重）
-    const sourceIds: Set<string> = new Set()
-    try {
-      while (resultSet !== null && resultSet.goToNextRow()) {
-        const columnIndex = resultSet.getColumnIndex(inverseKey)
-        if (!resultSet.isColumnNull(columnIndex)) {
-          const fkValue = ResultSetUtils.getValueByRuntimeType(resultSet, columnIndex)
-          if (fkValue !== null) {
-            sourceIds.add(String(fkValue))
-          }
+        const rawValue = ResultSetUtils.getValueByRuntimeType(resultSet, idx)
+        if (rawValue !== null && !(rawValue instanceof Uint8Array) && idSet.has(this.toIdKey(rawValue as ValueType))) {
+          count++
         }
       }
     } catch (e) {
-      // 忽略遍历错误
-    } finally {
-      this.closeResultSet(resultSet)
+      // ignore
     }
 
-    // 转换为数组
-    const result: Array<ValueType> = []
-    sourceIds.forEach((idStr: string) => {
-      const numId = Number(idStr)
-      if (!isNaN(numId)) {
-        result.push(numId)
-      } else {
-        result.push(idStr)
-      }
-    })
-
-    return result
-  }
-
-  /**
-   * 执行 MANY_TO_ONE 关系的子查询
-   * 先查询目标表获取符合条件的目标实体主键，再查询源表获取匹配的源实体 ID
-   */
-  private async executeSubQueryManyToOne(
-    subQuery: SubQuery,
-    store: relationalStore.RdbStore,
-    sourceEntityName: string,
-    inverseKey: string,
-    targetEntityName: string,
-    sourcePkColumn: string
-  ): Promise<Array<ValueType>> {
-    // 获取目标实体元数据
-    const metadata = MetadataStorage.getInstance()
-    const targetEntityMetadata = metadata.getEntityMetadata(targetEntityName)
-    if (targetEntityMetadata === null) {
-      return []
-    }
-
-    const targetPkColumn = targetEntityMetadata.getPrimaryKeyColumn()
-    if (targetPkColumn === null) {
-      return []
-    }
-
-    // 第一步：查询目标表，获取符合条件的目标实体主键
-    const targetPredicates = new relationalStore.RdbPredicates(targetEntityMetadata.tableName)
-    this.applySoftDeleteToPredicates(targetPredicates, targetEntityMetadata)
-
-    const conditions = subQuery.getConditions()
-    for (let i = 0; i < conditions.length; i++) {
-      const cond = conditions[i]
-      if (i > 0) {
-        if (cond.logicalOperator === LogicalOperator.OR) {
-          targetPredicates.or()
-        } else {
-          targetPredicates.and()
-        }
-      }
-      if (!this.applyConditionToPredicates(targetPredicates, cond, targetEntityMetadata, targetEntityName)) {
-        return []
-      }
-    }
-
-    let targetResultSet: relationalStore.ResultSet | null = null
-    try {
-      targetResultSet = await this.withQueryTimeout(store.query(targetPredicates, [targetPkColumn.columnName]), 'SUBQUERY')
-    } catch (e) {
-      this.logger.logError(`子查询目标表查询失败: ${e instanceof Error ? e.message : String(e)}`)
-      return []
-    }
-
-    // 收集目标实体主键
-    const targetPkValues: Array<relationalStore.ValueType> = []
-    try {
-      while (targetResultSet !== null && targetResultSet.goToNextRow()) {
-        const columnIndex = targetResultSet.getColumnIndex(targetPkColumn.columnName)
-        if (!targetResultSet.isColumnNull(columnIndex)) {
-          const pkValue = ResultSetUtils.getValueByRuntimeType(targetResultSet, columnIndex)
-          if (pkValue !== null) {
-            targetPkValues.push(pkValue as relationalStore.ValueType)
-          }
-        }
-      }
-    } catch (e) {
-      // 忽略遍历错误
-    } finally {
-      this.closeResultSet(targetResultSet)
-    }
-
-    if (targetPkValues.length === 0) {
-      return []
-    }
-
-    // 第二步：查询源表，获取外键在目标主键列表中的源实体 ID
-    const sourceMetadata = metadata.getEntityMetadata(sourceEntityName)
-    if (sourceMetadata === null) {
-      return []
-    }
-
-    const sourcePredicates = new relationalStore.RdbPredicates(sourceMetadata.tableName)
-    this.applySoftDeleteToPredicates(sourcePredicates, sourceMetadata)
-    sourcePredicates.in(inverseKey, targetPkValues)
-
-    let sourceResultSet: relationalStore.ResultSet | null = null
-    try {
-      sourceResultSet = await this.withQueryTimeout(store.query(sourcePredicates, [sourcePkColumn]), 'SUBQUERY')
-    } catch (e) {
-      this.logger.logError(`子查询源表查询失败: ${e instanceof Error ? e.message : String(e)}`)
-      return []
-    }
-
-    // 收集源实体 ID
-    const sourceIds: Array<ValueType> = []
-    try {
-      while (sourceResultSet !== null && sourceResultSet.goToNextRow()) {
-        const columnIndex = sourceResultSet.getColumnIndex(sourcePkColumn)
-        if (!sourceResultSet.isColumnNull(columnIndex)) {
-          const pkValue = ResultSetUtils.getValueByRuntimeType(sourceResultSet, columnIndex)
-          if (pkValue !== null) {
-            sourceIds.push(pkValue as ValueType)
-          }
-        }
-      }
-    } catch (e) {
-      // 忽略遍历错误
-    } finally {
-      this.closeResultSet(sourceResultSet)
-    }
-
-    return sourceIds
-  }
-
-  /**
-   * 执行 MANY_TO_MANY 关系的子查询
-   * 先查询目标表获取符合条件的目标实体主键，再查询中间表获取关联的源实体 ID
-   */
-  private async executeSubQueryManyToMany(
-    subQuery: SubQuery,
-    store: relationalStore.RdbStore,
-    relation: ManyToManyMetadata,
-    targetTableName: string
-  ): Promise<Array<ValueType>> {
-    // 获取目标实体元数据
-    const metadata = MetadataStorage.getInstance()
-    const targetEntityMetadata = metadata.getEntityMetadata(relation.targetEntity)
-    if (targetEntityMetadata === null) {
-      return []
-    }
-
-    const targetPkColumn = targetEntityMetadata.getPrimaryKeyColumn()
-    if (targetPkColumn === null) {
-      return []
-    }
-
-    // 第一步：查询目标表，获取符合条件的目标实体主键
-    const targetPredicates = new relationalStore.RdbPredicates(targetTableName)
-    this.applySoftDeleteToPredicates(targetPredicates, targetEntityMetadata)
-
-    const conditions = subQuery.getConditions()
-    for (let i = 0; i < conditions.length; i++) {
-      const cond = conditions[i]
-      if (i > 0) {
-        if (cond.logicalOperator === LogicalOperator.OR) {
-          targetPredicates.or()
-        } else {
-          targetPredicates.and()
-        }
-      }
-      if (!this.applyConditionToPredicates(targetPredicates, cond, targetEntityMetadata, relation.targetEntity)) {
-        return []
-      }
-    }
-
-    let targetResultSet: relationalStore.ResultSet | null = null
-    try {
-      targetResultSet = await this.withQueryTimeout(store.query(targetPredicates, [targetPkColumn.columnName]), 'SUBQUERY')
-    } catch (e) {
-      this.logger.logError(`子查询目标表查询失败: ${e instanceof Error ? e.message : String(e)}`)
-      return []
-    }
-
-    // 收集目标实体主键
-    const targetPkValues: Array<relationalStore.ValueType> = []
-    try {
-      while (targetResultSet !== null && targetResultSet.goToNextRow()) {
-        const columnIndex = targetResultSet.getColumnIndex(targetPkColumn.columnName)
-        if (!targetResultSet.isColumnNull(columnIndex)) {
-          const pkValue = targetResultSet.getLong(columnIndex)
-          targetPkValues.push(pkValue)
-        }
-      }
-    } catch (e) {
-      // 忽略遍历错误
-    } finally {
-      this.closeResultSet(targetResultSet)
-    }
-
-    if (targetPkValues.length === 0) {
-      return []
-    }
-
-    // 第二步：查询中间表，获取关联的源实体 ID
-    const joinPredicates = new relationalStore.RdbPredicates(relation.joinTable)
-    joinPredicates.in(relation.joinTargetKey, targetPkValues)
-
-    let joinResultSet: relationalStore.ResultSet | null = null
-    try {
-      joinResultSet = await this.withQueryTimeout(store.query(joinPredicates, [relation.joinSourceKey]), 'SUBQUERY')
-    } catch (e) {
-      this.logger.logError(`子查询中间表查询失败: ${e instanceof Error ? e.message : String(e)}`)
-      return []
-    }
-
-    // 收集源实体 ID（去重）
-    const sourceIds: Set<string> = new Set()
-    try {
-      while (joinResultSet !== null && joinResultSet.goToNextRow()) {
-        const columnIndex = joinResultSet.getColumnIndex(relation.joinSourceKey)
-        if (!joinResultSet.isColumnNull(columnIndex)) {
-          const sourceId = ResultSetUtils.getValueByRuntimeType(joinResultSet, columnIndex)
-          if (sourceId !== null) {
-            sourceIds.add(String(sourceId))
-          }
-        }
-      }
-    } catch (e) {
-      // 忽略遍历错误
-    } finally {
-      this.closeResultSet(joinResultSet)
-    }
-
-    // 转换为数组
-    const result: Array<ValueType> = []
-    sourceIds.forEach((idStr: string) => {
-      const numId = Number(idStr)
-      if (!isNaN(numId)) {
-        result.push(numId)
-      } else {
-        result.push(idStr)
-      }
-    })
-
-    return result
+    return count
   }
 
   /**
@@ -1348,13 +991,6 @@ export class QueryExecutor {
     return true
   }
 
-  private applySoftDeleteToPredicates(predicates: relationalStore.RdbPredicates, metadata: EntityMetadata): void {
-    if (!metadata.isSoftDeleteEnabled()) {
-      return
-    }
-    const deletedAtColumn = metadata.getDeletedAtColumn()
-    predicates.isNull(deletedAtColumn)
-  }
 
   private async countByPredicates(
     store: relationalStore.RdbStore
@@ -1471,8 +1107,7 @@ export class QueryExecutor {
           whereParts.push(`${column} IS NOT NULL`)
           break
         default:
-          whereParts.push('1=1')
-          break
+          throw new ExecutionError('WHERE', `不支持的条件操作符: ${String(cond.operator)}`)
       }
     }
 
@@ -1491,6 +1126,46 @@ export class QueryExecutor {
       escapedParts.push(`"${part}"`)
     }
     return escapedParts.join('.')
+  }
+
+  private validateMutationQuery(operation: string): void {
+    if (this.queryBuilder.getConditions().length === 0) {
+      throw new ExecutionError(operation, `${operation} 需要至少一个 WHERE 条件`)
+    }
+    if (this.queryBuilder.hasSubQueries()) {
+      throw new ExecutionError(operation, `${operation} 暂不支持 whereExists 子查询`)
+    }
+    if (this.queryBuilder.getLimitValue() > 0 || this.queryBuilder.getOffsetValue() > 0) {
+      throw new ExecutionError(operation, `${operation} 暂不支持 LIMIT/OFFSET`)
+    }
+    if (this.queryBuilder.getOrderByColumns().length > 0) {
+      throw new ExecutionError(operation, `${operation} 暂不支持 ORDER BY`)
+    }
+    if (this.queryBuilder.hasGroupBy() || this.queryBuilder.getHavingClause().length > 0) {
+      throw new ExecutionError(operation, `${operation} 暂不支持 GROUP BY/HAVING`)
+    }
+    if (this.queryBuilder.hasSelectRaw()) {
+      throw new ExecutionError(operation, `${operation} 暂不支持 selectRaw`)
+    }
+  }
+
+  private resolveUpdateValues(values: BatchUpdateValues): BatchUpdateValues {
+    const metadata = this.queryBuilder.getEntityMetadata()
+    const primaryKey = metadata.getPrimaryKeyColumn()
+    const result = BatchUpdateValues.create()
+    const keys = values.keys()
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i]
+      const resolvedColumn = this.resolveColumnName(metadata, key)
+      if (resolvedColumn === null) {
+        throw new ExecutionError('UPDATE', `更新字段 '${key}' 在实体中不存在`)
+      }
+      if (primaryKey !== null && resolvedColumn === primaryKey.columnName) {
+        throw new ExecutionError('UPDATE', `不允许更新主键字段 '${resolvedColumn}'`)
+      }
+      result.set(resolvedColumn, values.get(key))
+    }
+    return result
   }
 
   private ensurePrimaryKeySelected(selectedColumns: Array<string>): Array<string> {
@@ -1598,85 +1273,21 @@ export class QueryExecutor {
       return 0
     }
 
-    const originalLimit = this.queryBuilder.getLimitValue()
-    const originalOffset = this.queryBuilder.getOffsetValue()
-    let limitAdjusted = false
     let resultSet: relationalStore.ResultSet | null = null
 
     try {
-      if (originalLimit > 0 || originalOffset > 0) {
+      return await this.runWithClearedLimitOffset('COUNT', async (): Promise<number> => {
+        const predicates = this.buildPredicatesOrThrow('COUNT')
+
         try {
-          this.queryBuilder.limit(0)
-          this.queryBuilder.offset(0)
+          const queriedResultSet = await this.queryResultSet(store, predicates, [pkColumn.columnName], 'COUNT')
+          resultSet = queriedResultSet
+          return this.countIdsFromResultSet(queriedResultSet, pkColumn.columnName, idSet)
         } catch (e) {
           const errorMessage = e instanceof Error ? e.message : String(e)
-          throw new ExecutionError('COUNT', errorMessage)
+          throw new ExecutionError('COUNT', `执行统计查询失败: ${errorMessage}`)
         }
-        limitAdjusted = true
-      }
-
-      const buildResult = PredicateBuilder.build(this.queryBuilder)
-      if (!buildResult.success || buildResult.predicates === null) {
-        throw new ExecutionError('COUNT', buildResult.errorMessage)
-      }
-
-      try {
-        resultSet = await this.withQueryTimeout(store.query(buildResult.predicates, [pkColumn.columnName]), 'COUNT')
-      } catch (e) {
-        const errorMessage = e instanceof Error ? e.message : String(e)
-        throw new ExecutionError('COUNT', `执行统计查询失败: ${errorMessage}`)
-      }
-
-      let count = 0
-      let columnIndex = -1
-      try {
-        columnIndex = resultSet.getColumnIndex(pkColumn.columnName)
-      } catch (e) {
-        columnIndex = -1
-      }
-
-      try {
-        while (true) {
-          let hasRow = false
-          try {
-            hasRow = resultSet.goToNextRow()
-          } catch (e) {
-            break
-          }
-          if (!hasRow) {
-            break
-          }
-
-          let idx = columnIndex
-          if (idx < 0) {
-            try {
-              idx = resultSet.getColumnIndex(pkColumn.columnName)
-            } catch (e) {
-              idx = -1
-            }
-          }
-          if (idx >= 0) {
-            let isNull = true
-            try {
-              isNull = resultSet.isColumnNull(idx)
-            } catch (e) {
-              isNull = true
-            }
-            if (!isNull) {
-              const rawValue = ResultSetUtils.getValueByRuntimeType(resultSet, idx)
-              if (rawValue !== null && !(rawValue instanceof Uint8Array)) {
-                if (idSet.has(this.toIdKey(rawValue as ValueType))) {
-                  count++
-                }
-              }
-            }
-          }
-        }
-      } catch (e) {
-        // ignore
-      }
-
-      return count
+      })
     } catch (error) {
       if (error instanceof ExecutionError) {
         throw error
@@ -1685,87 +1296,62 @@ export class QueryExecutor {
       throw new ExecutionError('COUNT', errorMessage)
     } finally {
       this.closeResultSet(resultSet)
-      if (limitAdjusted) {
-        this.queryBuilder.limit(originalLimit)
-        this.queryBuilder.offset(originalOffset)
-      }
     }
+  }
+
+
+  /**
+   * 计算指定列的总和
+   * @param column 列名或属性名
+   * @returns Promise<number>
+   */
+  async sum(column: string): Promise<number> {
+    return await this.aggregateExecutor.sum(column)
   }
 
   /**
-   * 将条件应用到 RdbPredicates
-   * @param predicates RdbPredicates 实例
-   * @param condition 条件对象
+   * 计算指定列的平均值
+   * @param column 列名或属性名
+   * @returns Promise<number>
    */
-  private applyConditionToPredicates(
-    predicates: relationalStore.RdbPredicates,
-    condition: WhereCondition,
-    metadata: EntityMetadata,
-    entityName: string
-  ): boolean {
-    const resolvedColumn = this.resolveSubQueryColumn(metadata, condition.column)
-    if (resolvedColumn === null) {
-      this.logger.logError(`子查询列 '${condition.column}' 在实体 '${entityName}' 中不存在`)
-      return false
-    }
-    const value = condition.value
-
-    switch (condition.operator) {
-      case ConditionOperator.EQUAL:
-        predicates.equalTo(resolvedColumn, this.toRdbValue(value))
-        break
-      case ConditionOperator.NOT_EQUAL:
-        predicates.notEqualTo(resolvedColumn, this.toRdbValue(value))
-        break
-      case ConditionOperator.GREATER:
-        predicates.greaterThan(resolvedColumn, this.toRdbValue(value))
-        break
-      case ConditionOperator.LESS:
-        predicates.lessThan(resolvedColumn, this.toRdbValue(value))
-        break
-      case ConditionOperator.GREATER_EQUAL:
-        predicates.greaterThanOrEqualTo(resolvedColumn, this.toRdbValue(value))
-        break
-      case ConditionOperator.LESS_EQUAL:
-        predicates.lessThanOrEqualTo(resolvedColumn, this.toRdbValue(value))
-        break
-      case ConditionOperator.LIKE:
-        predicates.like(resolvedColumn, value !== null ? String(value) : '')
-        break
-      case ConditionOperator.IN:
-        if (Array.isArray(value)) {
-          const rdbValues: Array<relationalStore.ValueType> = []
-          for (let i = 0; i < value.length; i++) {
-            rdbValues.push(this.toRdbValue(value[i]))
-          }
-          predicates.in(resolvedColumn, rdbValues)
-        }
-        break
-      case ConditionOperator.NOT_IN:
-        if (Array.isArray(value)) {
-          const rdbValues: Array<relationalStore.ValueType> = []
-          for (let i = 0; i < value.length; i++) {
-            rdbValues.push(this.toRdbValue(value[i]))
-          }
-          predicates.notIn(resolvedColumn, rdbValues)
-        }
-        break
-      case ConditionOperator.BETWEEN:
-        predicates.between(resolvedColumn, this.toRdbValue(value), this.toRdbValue(condition.secondValue))
-        break
-      case ConditionOperator.IS_NULL:
-        predicates.isNull(resolvedColumn)
-        break
-      case ConditionOperator.IS_NOT_NULL:
-        predicates.isNotNull(resolvedColumn)
-        break
-      default:
-        break
-    }
-    return true
+  async avg(column: string): Promise<number> {
+    return await this.aggregateExecutor.avg(column)
   }
 
-  private resolveSubQueryColumn(metadata: EntityMetadata, column: string): string | null {
+  /**
+   * 获取指定列的最大值
+   * @param column 列名或属性名
+   * @returns Promise<ValueType>
+   */
+  async max(column: string): Promise<ValueType> {
+    return await this.aggregateExecutor.max(column)
+  }
+
+  /**
+   * 获取指定列的最小值
+   * @param column 列名或属性名
+   * @returns Promise<ValueType>
+   */
+  async min(column: string): Promise<ValueType> {
+    return await this.aggregateExecutor.min(column)
+  }
+
+  /**
+   * 执行分组聚合查询
+   * 使用 selectRaw() 和 groupBy() 构建的查询
+   * @returns Promise<AggregateResult>
+   */
+  async aggregate(): Promise<AggregateResult> {
+    return await this.aggregateExecutor.aggregate()
+  }
+
+  /**
+   * 解析列名（属性名或数据库列名）
+   * @param metadata 实体元数据
+   * @param column 列名或属性名
+   * @returns 数据库列名，未找到返回 null
+   */
+  private resolveColumnName(metadata: EntityMetadata, column: string): string | null {
     const columnByName = metadata.getColumnByName(column)
     if (columnByName !== null) {
       return columnByName.columnName

@@ -3,7 +3,7 @@
  * 定义实体在保存、加载、删除等操作前后的回调函数
  */
 
-import { EntityData } from '../mapping/DataMapper'
+import { EntityData } from '../mapping/EntityData'
 
 /**
  * 钩子回调函数类型

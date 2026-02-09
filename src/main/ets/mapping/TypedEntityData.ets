@@ -8,7 +8,7 @@
  */
 
 import { ValueType } from '../types/ValueTypes'
-import { EntityData, RelatedDataValue } from './DataMapper'
+import { EntityData, RelatedDataValue } from './EntityData'
 
 /**
  * 泛型实体数据类

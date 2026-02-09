@@ -5,14 +5,48 @@
 
 import { EntityMetadata } from '../core/EntityMetadata'
 import { MetadataStorage } from '../core/MetadataStorage'
+import { ScopeRegistry } from '../core/ScopeRegistry'
 import { ConditionOperator } from '../types/ConditionOperator'
 import { ValueType, OrderByClause, SortDirection } from '../types/ValueTypes'
 import { WhereCondition, LogicalOperator } from './WhereCondition'
 import { EntityNotRegisteredError } from '../errors/MetadataError'
-import { InvalidConditionError, SubQueryError } from '../errors/QueryError'
+import { InvalidConditionError, SubQueryError, ScopeNotFoundError } from '../errors/QueryError'
 import { RelationNotFoundError } from '../errors/RelationError'
 import { PaginationParams } from './PaginationParams'
 import { SubQuery, SubQueryCallback } from './SubQuery'
+import { QueryExecutor } from './QueryExecutor'
+import { RelationQueryOptions, RelationCountOption } from './RelationQueryOptions'
+
+export class BatchUpdateValues {
+  private values: Map<string, ValueType> = new Map()
+
+  set(columnOrProperty: string, value: ValueType): BatchUpdateValues {
+    this.values.set(columnOrProperty, value)
+    return this
+  }
+
+  get(columnOrProperty: string): ValueType {
+    const value = this.values.get(columnOrProperty)
+    if (value === undefined) {
+      return null
+    }
+    return value
+  }
+
+  keys(): Array<string> {
+    const keys: Array<string> = []
+    this.values.forEach((_, key) => keys.push(key))
+    return keys
+  }
+
+  size(): number {
+    return this.values.size
+  }
+
+  static create(): BatchUpdateValues {
+    return new BatchUpdateValues()
+  }
+}
 
 /**
  * 泛型查询构建器
@@ -62,6 +96,19 @@ export class QueryBuilder {
   private subQueries: Array<SubQuery> = []
   /** 查询超时（毫秒），0 表示禁用 */
   private queryTimeoutMs: number = 0
+
+  /** GROUP BY 列列表 */
+  private groupByColumns: Array<string> = []
+  /** HAVING 子句 */
+  private havingClause: string = ''
+  /** HAVING 参数 */
+  private havingArgs: Array<ValueType> = []
+  /** 原生 SELECT 表达式（用于聚合查询） */
+  private selectRawExpressions: Array<string> = []
+  /** 关联过滤配置（key: 关联路径） */
+  private relationQueryOptions: Map<string, RelationQueryOptions> = new Map()
+  /** 关联计数配置 */
+  private relationCountOptions: Array<RelationCountOption> = []
 
   /**
    * 构造函数
@@ -153,6 +200,7 @@ export class QueryBuilder {
     if (resolvedColumn === null) {
       throw new InvalidConditionError(column, `列 '${column}' 在实体 '${this.entityName}' 中不存在`)
     }
+    this.ensureValidOperator(operator)
     const condition = new WhereCondition()
     condition.column = resolvedColumn
     condition.operator = operator
@@ -174,6 +222,7 @@ export class QueryBuilder {
     if (resolvedColumn === null) {
       throw new InvalidConditionError(column, `列 '${column}' 在实体 '${this.entityName}' 中不存在`)
     }
+    this.ensureValidOperator(operator)
     const condition = new WhereCondition()
     condition.column = resolvedColumn
     condition.operator = operator
@@ -195,6 +244,7 @@ export class QueryBuilder {
     if (resolvedColumn === null) {
       throw new InvalidConditionError(column, `列 '${column}' 在实体 '${this.entityName}' 中不存在`)
     }
+    this.ensureValidOperator(operator)
     const condition = new WhereCondition()
     condition.column = resolvedColumn
     condition.operator = operator
@@ -383,6 +433,147 @@ export class QueryBuilder {
     return null
   }
 
+  private ensureValidOperator(operator: ConditionOperator): void {
+    if (!this.isSupportedConditionOperator(operator)) {
+      throw new InvalidConditionError(String(operator), `不支持的操作符: ${String(operator)}`)
+    }
+  }
+
+  private isSupportedConditionOperator(operator: ConditionOperator): boolean {
+    switch (operator) {
+      case ConditionOperator.EQUAL:
+      case ConditionOperator.NOT_EQUAL:
+      case ConditionOperator.GREATER:
+      case ConditionOperator.LESS:
+      case ConditionOperator.GREATER_EQUAL:
+      case ConditionOperator.LESS_EQUAL:
+      case ConditionOperator.LIKE:
+      case ConditionOperator.IN:
+      case ConditionOperator.NOT_IN:
+      case ConditionOperator.BETWEEN:
+      case ConditionOperator.IS_NULL:
+      case ConditionOperator.IS_NOT_NULL:
+        return true
+      default:
+        return false
+    }
+  }
+
+  private validateAndNormalizeHavingClause(clause: string, args: Array<ValueType>): string {
+    const normalized = clause.trim()
+    if (normalized.length === 0) {
+      throw new InvalidConditionError('HAVING', 'HAVING 条件不能为空')
+    }
+    this.ensureNoDangerousSqlTokens(normalized, 'HAVING')
+    if (!/^[A-Za-z0-9_(),.*+\-/%<>=!\s?]+$/.test(normalized)) {
+      throw new InvalidConditionError('HAVING', 'HAVING 子句包含非法字符')
+    }
+    if (args.length === 0) {
+      throw new InvalidConditionError('HAVING', 'HAVING 必须使用参数占位符')
+    }
+    if (this.countPlaceholders(normalized) !== args.length) {
+      throw new InvalidConditionError('HAVING', 'HAVING 占位符数量与参数数量不一致')
+    }
+    return normalized
+  }
+
+  private validateAndNormalizeSelectRawExpressions(expressions: Array<string>): Array<string> {
+    if (expressions.length === 0) {
+      throw new InvalidConditionError('selectRaw', 'selectRaw 表达式不能为空')
+    }
+    const normalized: Array<string> = []
+    for (let i = 0; i < expressions.length; i++) {
+      const expression = expressions[i].trim()
+      if (expression.length === 0) {
+        throw new InvalidConditionError('selectRaw', 'selectRaw 表达式不能为空字符串')
+      }
+      this.ensureNoDangerousSqlTokens(expression, 'selectRaw')
+      if (!this.isSafeSelectRawExpression(expression)) {
+        throw new InvalidConditionError('selectRaw', `不支持的 selectRaw 表达式: ${expression}`)
+      }
+      normalized.push(expression)
+    }
+    return normalized
+  }
+
+  private countPlaceholders(clause: string): number {
+    return clause.split('?').length - 1
+  }
+
+  private ensureNoDangerousSqlTokens(value: string, fieldName: string): void {
+    const hasDangerousToken = value.includes(';') ||
+      value.includes('--') ||
+      value.includes('/*') ||
+      value.includes('*/') ||
+      value.includes("'") ||
+      value.includes('"') ||
+      value.includes('`')
+    if (hasDangerousToken) {
+      throw new InvalidConditionError(fieldName, `${fieldName} 包含危险 SQL 片段`)
+    }
+  }
+
+  private isSafeSelectRawExpression(expression: string): boolean {
+    const identifierPattern = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/
+    if (identifierPattern.test(expression)) {
+      return true
+    }
+    const aggregatePattern =
+      /^(COUNT|SUM|AVG|MIN|MAX)\(\s*(\*|[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\)(\s+AS\s+[A-Za-z_][A-Za-z0-9_]*)?$/i
+    return aggregatePattern.test(expression)
+  }
+
+  private normalizeRelationPath(relationPath: string): string {
+    return relationPath.trim()
+  }
+
+  private splitRelationPathOrThrow(relationPath: string): Array<string> {
+    const normalizedPath = this.normalizeRelationPath(relationPath)
+    if (normalizedPath.length === 0) {
+      throw new RelationNotFoundError(this.entityName, relationPath)
+    }
+    const segments = normalizedPath.split('.')
+    for (let i = 0; i < segments.length; i++) {
+      if (segments[i].trim().length === 0) {
+        throw new RelationNotFoundError(this.entityName, relationPath)
+      }
+      segments[i] = segments[i].trim()
+    }
+    return segments
+  }
+
+  private resolveRelationPathTargetEntity(relationPath: string): string {
+    const segments = this.splitRelationPathOrThrow(relationPath)
+    let currentEntityName = this.entityName
+    const metadataStorage = MetadataStorage.getInstance()
+    for (let i = 0; i < segments.length; i++) {
+      const relation = metadataStorage.getRelation(currentEntityName, segments[i])
+      if (relation === null) {
+        throw new RelationNotFoundError(currentEntityName, segments[i])
+      }
+      currentEntityName = relation.targetEntity
+    }
+    return currentEntityName
+  }
+
+  private createRelationQueryOptions(builder: QueryBuilder): RelationQueryOptions {
+    const options = new RelationQueryOptions()
+    const conditions = builder.getConditions()
+    for (let i = 0; i < conditions.length; i++) {
+      options.conditions.push(this.cloneCondition(conditions[i]))
+    }
+    const orderByColumns = builder.getOrderByColumns()
+    for (let i = 0; i < orderByColumns.length; i++) {
+      const item = orderByColumns[i]
+      options.orderByColumns.push(new OrderByClause(item.column, item.direction))
+    }
+    options.limitValue = builder.getLimitValue()
+    options.offsetValue = builder.getOffsetValue()
+    options.includeDeleted = builder.isIncludeDeleted()
+    options.onlyDeleted = builder.isOnlyDeleted()
+    return options
+  }
+
   /**
    * 指定需要加载的关联关系
    * @param relationName 关联属性名
@@ -390,19 +581,16 @@ export class QueryBuilder {
    * @throws RelationNotFoundError 如果关联关系未注册
    */
   with(relationName: string): QueryBuilder {
-    // 验证关联关系是否存在
-    const relation = MetadataStorage.getInstance().getRelation(this.entityName, relationName)
-    if (relation === null) {
-      throw new RelationNotFoundError(this.entityName, relationName)
-    }
+    const normalizedRelationPath = this.normalizeRelationPath(relationName)
+    this.resolveRelationPathTargetEntity(normalizedRelationPath)
 
     // 避免重复添加
-    if (!this.relationNames.includes(relationName)) {
-      this.relationNames.push(relationName)
+    if (!this.relationNames.includes(normalizedRelationPath)) {
+      this.relationNames.push(normalizedRelationPath)
     }
 
     // 如果之前设置了延迟加载，移除以避免重复
-    const lazyIndex = this.lazyRelationNames.indexOf(relationName)
+    const lazyIndex = this.lazyRelationNames.indexOf(normalizedRelationPath)
     if (lazyIndex >= 0) {
       this.lazyRelationNames.splice(lazyIndex, 1)
     }
@@ -417,16 +605,37 @@ export class QueryBuilder {
    * @throws RelationNotFoundError 如果关联关系未注册
    */
   withLazy(relationName: string): QueryBuilder {
-    const relation = MetadataStorage.getInstance().getRelation(this.entityName, relationName)
+    const normalizedRelationPath = this.normalizeRelationPath(relationName)
+    const relation = MetadataStorage.getInstance().getRelation(this.entityName, normalizedRelationPath)
     if (relation === null) {
-      throw new RelationNotFoundError(this.entityName, relationName)
+      throw new RelationNotFoundError(this.entityName, normalizedRelationPath)
     }
 
-    if (!this.lazyRelationNames.includes(relationName) && !this.relationNames.includes(relationName)) {
-      this.lazyRelationNames.push(relationName)
+    if (!this.lazyRelationNames.includes(normalizedRelationPath) && !this.relationNames.includes(normalizedRelationPath)) {
+      this.lazyRelationNames.push(normalizedRelationPath)
     }
 
     return this
+  }
+
+  /**
+   * 关联条件过滤（预加载时应用条件）
+   * @param relationName 关联路径，支持嵌套（如 posts.comments）
+   * @param callback 过滤条件回调
+   * @returns 当前实例（支持链式调用）
+   */
+  withWhere(relationName: string, callback: (qb: QueryBuilder) => void): QueryBuilder {
+    const normalizedRelationPath = this.normalizeRelationPath(relationName)
+    const targetEntityName = this.resolveRelationPathTargetEntity(normalizedRelationPath)
+    const relationQueryBuilder = new QueryBuilder(targetEntityName)
+    try {
+      callback(relationQueryBuilder)
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : String(e)
+      throw new InvalidConditionError('withWhere', `关联过滤回调执行失败: ${errorMessage}`)
+    }
+    this.relationQueryOptions.set(normalizedRelationPath, this.createRelationQueryOptions(relationQueryBuilder))
+    return this.with(normalizedRelationPath)
   }
 
   /**
@@ -435,6 +644,19 @@ export class QueryBuilder {
    */
   getRelationNames(): Array<string> {
     return this.relationNames
+  }
+
+  /**
+   * 获取关联过滤配置
+   * @param relationPath 关联路径
+   * @returns 过滤配置，不存在时返回 null
+   */
+  getRelationQueryOptions(relationPath: string): RelationQueryOptions | null {
+    const options = this.relationQueryOptions.get(this.normalizeRelationPath(relationPath))
+    if (options === undefined) {
+      return null
+    }
+    return options.clone()
   }
 
   /**
@@ -457,6 +679,41 @@ export class QueryBuilder {
    */
   hasLazyRelations(): boolean {
     return this.lazyRelationNames.length > 0
+  }
+
+  hasRelationQueryOptions(): boolean {
+    return this.relationQueryOptions.size > 0
+  }
+
+  /**
+   * 关联计数
+   * @param relationPath 关联路径
+   * @param alias 结果别名，默认 `${relationPath}_count`
+   * @returns 当前实例（支持链式调用）
+   */
+  withCount(relationPath: string, alias: string = ''): QueryBuilder {
+    const normalizedRelationPath = this.normalizeRelationPath(relationPath)
+    this.resolveRelationPathTargetEntity(normalizedRelationPath)
+    const resolvedAlias = alias.trim().length > 0 ? alias.trim() : `${normalizedRelationPath.replace(/\./g, '_')}_count`
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(resolvedAlias)) {
+      throw new InvalidConditionError('withCount', `非法别名: ${resolvedAlias}`)
+    }
+    for (let i = 0; i < this.relationCountOptions.length; i++) {
+      if (this.relationCountOptions[i].relationPath === normalizedRelationPath) {
+        this.relationCountOptions[i].alias = resolvedAlias
+        return this
+      }
+    }
+    this.relationCountOptions.push(new RelationCountOption(normalizedRelationPath, resolvedAlias))
+    return this
+  }
+
+  getRelationCountOptions(): Array<RelationCountOption> {
+    return this.relationCountOptions.slice()
+  }
+
+  hasRelationCounts(): boolean {
+    return this.relationCountOptions.length > 0
   }
 
   /**
@@ -650,6 +907,25 @@ export class QueryBuilder {
   }
 
   /**
+   * 批量更新（不加载实体）
+   * @param values 需要更新的字段和值
+   * @returns 受影响行数
+   */
+  async update(values: BatchUpdateValues): Promise<number> {
+    const executor = new QueryExecutor(this)
+    return await executor.update(values)
+  }
+
+  /**
+   * 批量删除（不加载实体）
+   * @returns 受影响行数
+   */
+  async delete(): Promise<number> {
+    const executor = new QueryExecutor(this)
+    return await executor.delete()
+  }
+
+  /**
    * 获取当前页码
    * @returns 页码（从 1 开始），未设置分页时返回 0
    */
@@ -683,6 +959,12 @@ export class QueryBuilder {
     this.pageSizeValue = 0
     this.subQueries = []
     this.queryTimeoutMs = 0
+    this.groupByColumns = []
+    this.havingClause = ''
+    this.havingArgs = []
+    this.selectRawExpressions = []
+    this.relationQueryOptions.clear()
+    this.relationCountOptions = []
     return this
   }
 
@@ -741,6 +1023,137 @@ export class QueryBuilder {
    */
   hasSubQueries(): boolean {
     return this.subQueries.length > 0
+  }
+
+  // ==================== GROUP BY 支持 ====================
+
+  /**
+   * 添加 GROUP BY 列
+   * @param column 列名或属性名
+   * @returns 当前实例（支持链式调用）
+   */
+  groupBy(column: string): QueryBuilder {
+    const resolvedColumn = this.getResolvedColumnName(column)
+    if (resolvedColumn === null) {
+      throw new InvalidConditionError(column, `列 '${column}' 在实体 '${this.entityName}' 中不存在`)
+    }
+    if (!this.groupByColumns.includes(resolvedColumn)) {
+      this.groupByColumns.push(resolvedColumn)
+    }
+    return this
+  }
+
+  /**
+   * 添加多个 GROUP BY 列
+   * @param columns 列名或属性名数组
+   * @returns 当前实例（支持链式调用）
+   */
+  groupByMultiple(columns: Array<string>): QueryBuilder {
+    for (let i = 0; i < columns.length; i++) {
+      this.groupBy(columns[i])
+    }
+    return this
+  }
+
+  /**
+   * 设置 HAVING 子句
+   * @param clause HAVING 条件（使用 ? 作为占位符）
+   * @param args 参数数组
+   * @returns 当前实例（支持链式调用）
+   */
+  having(clause: string, args: Array<ValueType> = []): QueryBuilder {
+    const normalizedClause = this.validateAndNormalizeHavingClause(clause, args)
+    this.havingClause = normalizedClause
+    this.havingArgs = args.slice()
+    return this
+  }
+
+  /**
+   * 设置原生 SELECT 表达式（用于聚合查询）
+   * @param expressions 表达式数组，如 ['category', 'COUNT(*) as count', 'SUM(price) as total']
+   * @returns 当前实例（支持链式调用）
+   */
+  selectRaw(expressions: Array<string>): QueryBuilder {
+    this.selectRawExpressions = this.validateAndNormalizeSelectRawExpressions(expressions)
+    return this
+  }
+
+  /**
+   * 获取 GROUP BY 列
+   * @returns GROUP BY 列数组
+   */
+  getGroupByColumns(): Array<string> {
+    return this.groupByColumns
+  }
+
+  /**
+   * 获取 HAVING 子句
+   * @returns HAVING 子句
+   */
+  getHavingClause(): string {
+    return this.havingClause
+  }
+
+  /**
+   * 获取 HAVING 参数
+   * @returns HAVING 参数数组
+   */
+  getHavingArgs(): Array<ValueType> {
+    return this.havingArgs
+  }
+
+  /**
+   * 获取原生 SELECT 表达式
+   * @returns 表达式数组
+   */
+  getSelectRawExpressions(): Array<string> {
+    return this.selectRawExpressions
+  }
+
+  /**
+   * 检查是否有 GROUP BY
+   * @returns 是否有 GROUP BY
+   */
+  hasGroupBy(): boolean {
+    return this.groupByColumns.length > 0
+  }
+
+  /**
+   * 检查是否有原生 SELECT 表达式
+   * @returns 是否有原生 SELECT 表达式
+   */
+  hasSelectRaw(): boolean {
+    return this.selectRawExpressions.length > 0
+  }
+
+  // ==================== 查询作用域 ====================
+
+  /**
+   * 应用查询作用域
+   * @param scopeName 作用域名称
+   * @returns 当前实例（支持链式调用）
+   * @throws ScopeNotFoundError 如果作用域未注册
+   */
+  scope(scopeName: string): QueryBuilder {
+    const scopeRegistry = ScopeRegistry.getInstance()
+    if (!scopeRegistry.hasScope(this.entityName, scopeName)) {
+      throw new ScopeNotFoundError(this.entityName, scopeName)
+    }
+    return scopeRegistry.applyScope(this.entityName, scopeName, this)
+  }
+
+  /**
+   * 应用多个查询作用域
+   * @param scopeNames 作用域名称数组
+   * @returns 当前实例（支持链式调用）
+   * @throws ScopeNotFoundError 如果任一作用域未注册
+   */
+  scopes(scopeNames: Array<string>): QueryBuilder {
+    let result: QueryBuilder = this
+    for (let i = 0; i < scopeNames.length; i++) {
+      result = result.scope(scopeNames[i])
+    }
+    return result
   }
 
   /**
@@ -803,6 +1216,20 @@ export class QueryBuilder {
     // WITH 部分（关联关系）
     if (this.relationNames.length > 0) {
       parts.push('WITH: ' + this.relationNames.join(', '))
+    }
+    if (this.relationQueryOptions.size > 0) {
+      const relationFilters: Array<string> = []
+      this.relationQueryOptions.forEach((_, relationPath) => {
+        relationFilters.push(relationPath)
+      })
+      parts.push('WITH_WHERE: ' + relationFilters.join(', '))
+    }
+    if (this.relationCountOptions.length > 0) {
+      const relationCounts: Array<string> = []
+      for (let i = 0; i < this.relationCountOptions.length; i++) {
+        relationCounts.push(`${this.relationCountOptions[i].relationPath} AS ${this.relationCountOptions[i].alias}`)
+      }
+      parts.push('WITH_COUNT: ' + relationCounts.join(', '))
     }
 
     // 软删除状态

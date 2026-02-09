@@ -3,12 +3,13 @@ import { MetadataStorage } from '../../main/ets/core/MetadataStorage';
 import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
 import { RelationMetadata } from '../../main/ets/core/RelationMetadata';
 import { RelationType } from '../../main/ets/types/RelationType';
-import { QueryBuilder } from '../../main/ets/query/QueryBuilder';
+import { QueryBuilder, BatchUpdateValues } from '../../main/ets/query/QueryBuilder';
 import { ConditionOperator } from '../../main/ets/types/ConditionOperator';
 import { LogicalOperator } from '../../main/ets/query/WhereCondition';
 import { EntityNotRegisteredError } from '../../main/ets/errors/MetadataError';
 import { InvalidConditionError, SubQueryError } from '../../main/ets/errors/QueryError';
 import { RelationNotFoundError } from '../../main/ets/errors/RelationError';
+import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 
 const setupTestEntity = (): void => {
   const storage = MetadataStorage.getInstance();
@@ -45,6 +46,27 @@ const setupRelations = (): void => {
   storage.registerColumn('Post', new ColumnMetadata('title', 'post_title'));
   const relation = new RelationMetadata(RelationType.ONE_TO_MANY, 'User', 'Post', 'posts', 'user_id');
   storage.registerRelation('User', relation);
+};
+
+const setupNestedRelations = (): void => {
+  const storage = MetadataStorage.getInstance();
+  if (storage.getEntityMetadata('Post') === null) {
+    storage.registerEntity('Post', 'posts');
+    const postId = new ColumnMetadata('id', 'id');
+    postId.isPrimaryKey = true;
+    storage.registerColumn('Post', postId);
+    storage.registerColumn('Post', new ColumnMetadata('userId', 'user_id'));
+  }
+  if (storage.getEntityMetadata('Comment') === null) {
+    storage.registerEntity('Comment', 'comments');
+    const commentId = new ColumnMetadata('id', 'id');
+    commentId.isPrimaryKey = true;
+    storage.registerColumn('Comment', commentId);
+    storage.registerColumn('Comment', new ColumnMetadata('postId', 'post_id'));
+    storage.registerColumn('Comment', new ColumnMetadata('status', 'status'));
+  }
+  storage.registerRelation('User', new RelationMetadata(RelationType.ONE_TO_MANY, 'User', 'Post', 'posts', 'user_id'));
+  storage.registerRelation('Post', new RelationMetadata(RelationType.ONE_TO_MANY, 'Post', 'Comment', 'comments', 'post_id'));
 };
 
 export default function queryBuilderTest() {
@@ -198,6 +220,15 @@ export default function queryBuilderTest() {
       expect(builder.getRelationNames()[0]).assertEqual('posts');
     });
 
+    it('with should support nested relation path', 0, () => {
+      setupTestEntity();
+      setupNestedRelations();
+      const builder = new QueryBuilder('User');
+      builder.with('posts.comments');
+      expect(builder.hasRelations()).assertEqual(true);
+      expect(builder.getRelationNames()[0]).assertEqual('posts.comments');
+    });
+
     it('with should throw RelationNotFoundError for non-existent relation', 0, () => {
       setupTestEntity();
       const builder = new QueryBuilder('User');
@@ -216,6 +247,36 @@ export default function queryBuilderTest() {
       const builder = new QueryBuilder('User');
       builder.withLazy('posts');
       expect(builder.hasLazyRelations()).assertEqual(true);
+    });
+
+    it('withWhere should register relation query options', 0, () => {
+      setupTestEntity();
+      setupRelations();
+      const builder = new QueryBuilder('User');
+      builder.withWhere('posts', (relationQb) => {
+        relationQb.where('title', ConditionOperator.LIKE, '%ark%')
+          .orderBy('title', 'DESC')
+          .limit(5);
+      });
+      const options = builder.getRelationQueryOptions('posts');
+      expect(options !== null).assertEqual(true);
+      if (options !== null) {
+        expect(options.conditions.length).assertEqual(1);
+        expect(options.orderByColumns.length).assertEqual(1);
+        expect(options.limitValue).assertEqual(5);
+      }
+      expect(builder.getRelationNames().includes('posts')).assertEqual(true);
+    });
+
+    it('withCount should register relation count option', 0, () => {
+      setupTestEntity();
+      setupRelations();
+      const builder = new QueryBuilder('User');
+      builder.withCount('posts');
+      const countOptions = builder.getRelationCountOptions();
+      expect(countOptions.length).assertEqual(1);
+      expect(countOptions[0].relationPath).assertEqual('posts');
+      expect(countOptions[0].alias).assertEqual('posts_count');
     });
 
     it('withDeleted should set includeDeleted flag', 0, () => {
@@ -275,6 +336,33 @@ export default function queryBuilderTest() {
       builder.reset();
       expect(builder.getConditions().length).assertEqual(0);
       expect(builder.getLimitValue()).assertEqual(0);
+    });
+
+    it('update should delegate to QueryExecutor and throw when db is unavailable', 0, async () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+      const values = BatchUpdateValues.create().set('name', 'Alice');
+
+      let caught = false;
+      try {
+        await builder.update(values);
+      } catch (error) {
+        caught = error instanceof ExecutionError;
+      }
+      expect(caught).assertEqual(true);
+    });
+
+    it('delete should delegate to QueryExecutor and throw when db is unavailable', 0, async () => {
+      setupTestEntity();
+      const builder = new QueryBuilder('User');
+
+      let caught = false;
+      try {
+        await builder.delete();
+      } catch (error) {
+        caught = error instanceof ExecutionError;
+      }
+      expect(caught).assertEqual(true);
     });
 
     it('whereExists should add sub query', 0, () => {

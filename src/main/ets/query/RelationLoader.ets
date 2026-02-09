@@ -9,7 +9,9 @@ import { RelationMetadata } from '../core/RelationMetadata'
 import { ManyToManyMetadata } from '../core/ManyToManyMetadata'
 import { EntityMetadata } from '../core/EntityMetadata'
 import { RelationType } from '../types/RelationType'
-import { DataMapper, EntityData, ResultSetRow } from '../mapping/DataMapper'
+import { DataMapper } from '../mapping/DataMapper'
+import { EntityData } from '../mapping/EntityData'
+import { ResultSetRow } from '../mapping/ResultSetRow'
 import { DatabaseManager } from '../database/DatabaseManager'
 import { ValueType } from '../types/ValueTypes'
 import { RelationNotFoundError } from '../errors/RelationError'
@@ -18,6 +20,14 @@ import { ColumnType } from '../types/ColumnType'
 import { RelationLoadResult, ParallelRelationLoadResult } from './RelationLoadResult'
 import { Logger } from '../logging/Logger'
 import { ResultSetUtils } from '../mapping/ResultSetUtils'
+import { RelationLoadStrategy } from './RelationLoadStrategy'
+import { OneToOneRelationLoadStrategy } from './OneToOneRelationLoadStrategy'
+import { OneToManyRelationLoadStrategy } from './OneToManyRelationLoadStrategy'
+import { ManyToOneRelationLoadStrategy } from './ManyToOneRelationLoadStrategy'
+import { ManyToManyRelationLoadStrategy } from './ManyToManyRelationLoadStrategy'
+import { ConditionOperator } from '../types/ConditionOperator'
+import { LogicalOperator, WhereCondition } from './WhereCondition'
+import { RelationQueryOptions } from './RelationQueryOptions'
 
 /**
  * 关联数据加载器类
@@ -26,6 +36,8 @@ import { ResultSetUtils } from '../mapping/ResultSetUtils'
 export class RelationLoader {
   /** 源实体名称 */
   private sourceEntityName: string
+  /** 关系加载策略映射 */
+  private relationStrategies: Map<RelationType, RelationLoadStrategy>
 
   /** IN 条件参数数量限制默认值 */
   private static readonly DEFAULT_IN_CLAUSE_LIMIT: number = 500
@@ -38,6 +50,35 @@ export class RelationLoader {
    */
   constructor(sourceEntityName: string) {
     this.sourceEntityName = sourceEntityName
+    this.relationStrategies = new Map<RelationType, RelationLoadStrategy>()
+    this.relationStrategies.set(
+      RelationType.ONE_TO_ONE,
+      new OneToOneRelationLoadStrategy(async (
+        entities: Array<EntityData>,
+        relation: RelationMetadata
+      ): Promise<Array<EntityData>> => await this.loadOneToOne(entities, relation))
+    )
+    this.relationStrategies.set(
+      RelationType.ONE_TO_MANY,
+      new OneToManyRelationLoadStrategy(async (
+        entities: Array<EntityData>,
+        relation: RelationMetadata
+      ): Promise<Array<EntityData>> => await this.loadOneToMany(entities, relation))
+    )
+    this.relationStrategies.set(
+      RelationType.MANY_TO_ONE,
+      new ManyToOneRelationLoadStrategy(async (
+        entities: Array<EntityData>,
+        relation: RelationMetadata
+      ): Promise<Array<EntityData>> => await this.loadManyToOne(entities, relation))
+    )
+    this.relationStrategies.set(
+      RelationType.MANY_TO_MANY,
+      new ManyToManyRelationLoadStrategy(async (
+        entities: Array<EntityData>,
+        relation: ManyToManyMetadata
+      ): Promise<Array<EntityData>> => await this.loadManyToMany(entities, relation))
+    )
   }
 
   static setInClauseLimit(limit: number): void {
@@ -110,6 +151,14 @@ export class RelationLoader {
     }
   }
 
+  private getRelationStrategy(relationType: RelationType): RelationLoadStrategy | null {
+    const strategy = this.relationStrategies.get(relationType)
+    if (strategy === undefined) {
+      return null
+    }
+    return strategy
+  }
+
   /**
    * 加载关联数据
    * @param entities 主实体数据数组
@@ -119,7 +168,8 @@ export class RelationLoader {
    */
   async loadRelation(
     entities: Array<EntityData>,
-    relationName: string
+    relationName: string,
+    options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
     if (entities.length === 0) {
       return entities
@@ -131,15 +181,22 @@ export class RelationLoader {
       throw new RelationNotFoundError(this.sourceEntityName, relationName)
     }
 
-    // 根据关系类型执行不同的加载策略
+    const strategy = this.getRelationStrategy(relation.type)
+    if (strategy !== null && options === null) {
+      return await strategy.load(entities, relation)
+    }
+
     if (relation.type === RelationType.ONE_TO_ONE) {
-      return await this.loadOneToOne(entities, relation)
-    } else if (relation.type === RelationType.ONE_TO_MANY) {
-      return await this.loadOneToMany(entities, relation)
-    } else if (relation.type === RelationType.MANY_TO_ONE) {
-      return await this.loadManyToOne(entities, relation)
-    } else if (relation.type === RelationType.MANY_TO_MANY) {
-      return await this.loadManyToMany(entities, relation as ManyToManyMetadata)
+      return await this.loadOneToOne(entities, relation, options)
+    }
+    if (relation.type === RelationType.ONE_TO_MANY) {
+      return await this.loadOneToMany(entities, relation, options)
+    }
+    if (relation.type === RelationType.MANY_TO_ONE) {
+      return await this.loadManyToOne(entities, relation, options)
+    }
+    if (relation.type === RelationType.MANY_TO_MANY) {
+      return await this.loadManyToMany(entities, relation as ManyToManyMetadata, options)
     }
 
     return entities
@@ -234,42 +291,26 @@ export class RelationLoader {
         return RelationLoadResult.createFailure(relationName, `关联 '${relationName}' 未注册`, duration)
       }
 
-      // 根据关系类型执行不同的加载策略
+      const strategy = this.getRelationStrategy(relation.type)
+      if (strategy === null) {
+        const duration = Date.now() - startTime
+        return RelationLoadResult.createSuccess(relationName, 0, duration)
+      }
+      await strategy.load(entities, relation)
+
       let loadedCount = 0
-      if (relation.type === RelationType.ONE_TO_ONE) {
-        await this.loadOneToOne(entities, relation)
-        // 统计加载的关联数据数量
-        for (let i = 0; i < entities.length; i++) {
-          const relatedData = entities[i].getRelatedSingle(relationName)
-          if (relatedData !== null) {
-            loadedCount++
-          }
-        }
-      } else if (relation.type === RelationType.ONE_TO_MANY) {
-        await this.loadOneToMany(entities, relation)
-        // 统计加载的关联数据数量
+      if (relation.type === RelationType.ONE_TO_MANY || relation.type === RelationType.MANY_TO_MANY) {
         for (let i = 0; i < entities.length; i++) {
           const relatedData = entities[i].getRelatedArray(relationName)
           if (relatedData !== null) {
             loadedCount += relatedData.length
           }
         }
-      } else if (relation.type === RelationType.MANY_TO_ONE) {
-        await this.loadManyToOne(entities, relation)
-        // 统计加载的关联数据数量
+      } else {
         for (let i = 0; i < entities.length; i++) {
           const relatedData = entities[i].getRelatedSingle(relationName)
           if (relatedData !== null) {
             loadedCount++
-          }
-        }
-      } else if (relation.type === RelationType.MANY_TO_MANY) {
-        await this.loadManyToMany(entities, relation as ManyToManyMetadata)
-        // 统计加载的关联数据数量
-        for (let i = 0; i < entities.length; i++) {
-          const relatedData = entities[i].getRelatedArray(relationName)
-          if (relatedData !== null) {
-            loadedCount += relatedData.length
           }
         }
       }
@@ -292,7 +333,8 @@ export class RelationLoader {
    */
   private async loadOneToMany(
     entities: Array<EntityData>,
-    relation: RelationMetadata
+    relation: RelationMetadata,
+    options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
     // 获取源实体的主键列
     const sourceMetadata = MetadataStorage.getInstance().getEntityMetadata(this.sourceEntityName)
@@ -352,11 +394,15 @@ export class RelationLoader {
 
     // 分批处理 IN 条件，避免超出 SQLite 参数限制
     const batches = this.splitIntoBatches(pkValues, this.resolveInClauseLimit())
+    const inverseKeyColumn = targetMetadata.getColumnByProperty(relation.inverseKey)
+    const inverseColumnName = inverseKeyColumn !== null
+      ? inverseKeyColumn.columnName
+      : relation.inverseKey
 
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex]
       const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-      this.applySoftDeleteToPredicates(predicates, targetMetadata)
+      this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
 
       // 构建 IN 条件
       const rdbValues: Array<relationalStore.ValueType> = []
@@ -364,7 +410,7 @@ export class RelationLoader {
         rdbValues.push(this.toRdbValue(batch[i]))
       }
       try {
-        predicates.in(relation.inverseKey, rdbValues)
+        predicates.in(inverseColumnName, rdbValues)
       } catch (e) {
         // 构建条件失败，继续下一批
         continue
@@ -425,7 +471,7 @@ export class RelationLoader {
         const pkKey = String(pkProp.value)
         const relatedEntities = relatedByFk.get(pkKey)
         if (relatedEntities) {
-          entity.setRelatedArray(relation.propertyName, relatedEntities)
+          entity.setRelatedArray(relation.propertyName, this.applyCollectionQueryOptions(relatedEntities, options))
         } else {
           entity.setRelatedArray(relation.propertyName, [])
         }
@@ -444,7 +490,8 @@ export class RelationLoader {
    */
   private async loadManyToOne(
     entities: Array<EntityData>,
-    relation: RelationMetadata
+    relation: RelationMetadata,
+    options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
     // 获取目标实体元数据
     const targetMetadata = MetadataStorage.getInstance().getEntityMetadata(relation.targetEntity)
@@ -519,7 +566,7 @@ export class RelationLoader {
     for (let batchIndex = 0; batchIndex < fkBatches.length; batchIndex++) {
       const batch = fkBatches[batchIndex]
       const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-      this.applySoftDeleteToPredicates(predicates, targetMetadata)
+      this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
 
       // 构建 IN 条件
       const rdbValues: Array<relationalStore.ValueType> = []
@@ -600,14 +647,15 @@ export class RelationLoader {
    */
   private async loadOneToOne(
     entities: Array<EntityData>,
-    relation: RelationMetadata
+    relation: RelationMetadata,
+    options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
     // 根据 foreignKeySide 选择加载策略
     if (relation.foreignKeySide === 'target') {
-      return await this.loadOneToOneTargetSide(entities, relation)
+      return await this.loadOneToOneTargetSide(entities, relation, options)
     } else {
       // 默认 'source'：外键在源实体
-      return await this.loadOneToOneSourceSide(entities, relation)
+      return await this.loadOneToOneSourceSide(entities, relation, options)
     }
   }
 
@@ -620,7 +668,8 @@ export class RelationLoader {
    */
   private async loadOneToOneSourceSide(
     entities: Array<EntityData>,
-    relation: RelationMetadata
+    relation: RelationMetadata,
+    options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
     // 获取目标实体元数据
     const targetMetadata = MetadataStorage.getInstance().getEntityMetadata(relation.targetEntity)
@@ -685,7 +734,7 @@ export class RelationLoader {
     }
 
     const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-    this.applySoftDeleteToPredicates(predicates, targetMetadata)
+    this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
 
     // 构建 IN 条件
     const rdbValues: Array<relationalStore.ValueType> = []
@@ -774,7 +823,8 @@ export class RelationLoader {
    */
   private async loadOneToOneTargetSide(
     entities: Array<EntityData>,
-    relation: RelationMetadata
+    relation: RelationMetadata,
+    options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
     // 获取源实体元数据
     const sourceMetadata = MetadataStorage.getInstance().getEntityMetadata(this.sourceEntityName)
@@ -830,7 +880,11 @@ export class RelationLoader {
     }
 
     const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-    this.applySoftDeleteToPredicates(predicates, targetMetadata)
+    this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
+    const inverseKeyColumn = targetMetadata.getColumnByProperty(relation.inverseKey)
+    const inverseColumnName = inverseKeyColumn !== null
+      ? inverseKeyColumn.columnName
+      : relation.inverseKey
 
     // 构建 IN 条件：目标表的外键列 IN 源实体的主键值
     const rdbValues: Array<relationalStore.ValueType> = []
@@ -838,7 +892,7 @@ export class RelationLoader {
       rdbValues.push(this.toRdbValue(pkValues[i]))
     }
     try {
-      predicates.in(relation.inverseKey, rdbValues)
+      predicates.in(inverseColumnName, rdbValues)
     } catch (e) {
       // 构建条件失败，设置所有关联为 null
       for (let i = 0; i < entities.length; i++) {
@@ -927,7 +981,8 @@ export class RelationLoader {
    */
   private async loadManyToMany(
     entities: Array<EntityData>,
-    relation: ManyToManyMetadata
+    relation: ManyToManyMetadata,
+    options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
     // 获取源实体元数据
     const sourceMetadata = MetadataStorage.getInstance().getEntityMetadata(this.sourceEntityName)
@@ -1094,7 +1149,7 @@ export class RelationLoader {
     for (let batchIndex = 0; batchIndex < targetIdBatches.length; batchIndex++) {
       const batch = targetIdBatches[batchIndex]
       const targetPredicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-      this.applySoftDeleteToPredicates(targetPredicates, targetMetadata)
+      this.applyRelationQueryToPredicates(targetPredicates, targetMetadata, options)
 
       const rdbTargetIds: Array<relationalStore.ValueType> = []
       for (let i = 0; i < batch.length; i++) {
@@ -1153,7 +1208,7 @@ export class RelationLoader {
               relatedEntities.push(targetEntity)
             }
           }
-          entity.setRelatedArray(relation.propertyName, relatedEntities)
+          entity.setRelatedArray(relation.propertyName, this.applyCollectionQueryOptions(relatedEntities, options))
         } else {
           entity.setRelatedArray(relation.propertyName, [])
         }
@@ -1165,19 +1220,166 @@ export class RelationLoader {
     return entities
   }
 
-  private applySoftDeleteToPredicates(predicates: relationalStore.RdbPredicates, metadata: EntityMetadata): void {
+  private applyCollectionQueryOptions(
+    entities: Array<EntityData>,
+    options: RelationQueryOptions | null
+  ): Array<EntityData> {
+    if (options === null) {
+      return entities
+    }
+    const safeOffset = options.offsetValue > 0 ? options.offsetValue : 0
+    if (safeOffset >= entities.length) {
+      return []
+    }
+    if (options.limitValue > 0) {
+      return entities.slice(safeOffset, safeOffset + options.limitValue)
+    }
+    if (safeOffset > 0) {
+      return entities.slice(safeOffset)
+    }
+    return entities
+  }
+
+  private applyRelationQueryToPredicates(
+    predicates: relationalStore.RdbPredicates,
+    metadata: EntityMetadata,
+    options: RelationQueryOptions | null
+  ): void {
+    this.applySoftDeleteToPredicates(predicates, metadata, options)
+    if (options === null) {
+      return
+    }
+    this.applyWhereConditionsToPredicates(predicates, options.conditions)
+    this.applyOrderByToPredicates(predicates, options)
+  }
+
+  private applyOrderByToPredicates(
+    predicates: relationalStore.RdbPredicates,
+    options: RelationQueryOptions
+  ): void {
+    for (let i = 0; i < options.orderByColumns.length; i++) {
+      const orderBy = options.orderByColumns[i]
+      if (orderBy.direction === 'ASC') {
+        predicates.orderByAsc(orderBy.column)
+      } else {
+        predicates.orderByDesc(orderBy.column)
+      }
+    }
+  }
+
+  private applyWhereConditionsToPredicates(
+    predicates: relationalStore.RdbPredicates,
+    conditions: Array<WhereCondition>
+  ): void {
+    for (let i = 0; i < conditions.length; i++) {
+      const condition = conditions[i]
+      if (i > 0) {
+        if (condition.logicalOperator === LogicalOperator.OR) {
+          predicates.or()
+        } else {
+          predicates.and()
+        }
+      }
+      this.applyOneWhereCondition(predicates, condition)
+    }
+  }
+
+  private applyOneWhereCondition(
+    predicates: relationalStore.RdbPredicates,
+    condition: WhereCondition
+  ): void {
+    if (this.applySimpleValueCondition(predicates, condition)) {
+      return
+    }
+    if (condition.operator === ConditionOperator.IN || condition.operator === ConditionOperator.NOT_IN) {
+      const values: Array<ValueType> = condition.value instanceof Array ? condition.value : []
+      const rdbValues: Array<relationalStore.ValueType> = []
+      for (let i = 0; i < values.length; i++) {
+        rdbValues.push(this.toRdbValue(values[i]))
+      }
+      if (condition.operator === ConditionOperator.IN) {
+        predicates.in(condition.column, rdbValues)
+      } else {
+        predicates.notIn(condition.column, rdbValues)
+      }
+      return
+    }
+    if (condition.operator === ConditionOperator.BETWEEN) {
+      predicates.between(condition.column, this.toRdbValue(condition.value), this.toRdbValue(condition.secondValue))
+      return
+    }
+    if (condition.operator === ConditionOperator.IS_NULL) {
+      predicates.isNull(condition.column)
+      return
+    }
+    if (condition.operator === ConditionOperator.IS_NOT_NULL) {
+      predicates.isNotNull(condition.column)
+    }
+  }
+
+  private applySimpleValueCondition(
+    predicates: relationalStore.RdbPredicates,
+    condition: WhereCondition
+  ): boolean {
+    const value = this.toRdbValue(condition.value)
+    if (condition.operator === ConditionOperator.EQUAL) {
+      predicates.equalTo(condition.column, value)
+      return true
+    }
+    if (condition.operator === ConditionOperator.NOT_EQUAL) {
+      predicates.notEqualTo(condition.column, value)
+      return true
+    }
+    if (condition.operator === ConditionOperator.GREATER) {
+      predicates.greaterThan(condition.column, value)
+      return true
+    }
+    if (condition.operator === ConditionOperator.LESS) {
+      predicates.lessThan(condition.column, value)
+      return true
+    }
+    if (condition.operator === ConditionOperator.GREATER_EQUAL) {
+      predicates.greaterThanOrEqualTo(condition.column, value)
+      return true
+    }
+    if (condition.operator === ConditionOperator.LESS_EQUAL) {
+      predicates.lessThanOrEqualTo(condition.column, value)
+      return true
+    }
+    if (condition.operator === ConditionOperator.LIKE) {
+      predicates.like(condition.column, condition.value !== null ? String(condition.value) : '')
+      return true
+    }
+    return false
+  }
+
+  private applySoftDeleteToPredicates(
+    predicates: relationalStore.RdbPredicates,
+    metadata: EntityMetadata,
+    options: RelationQueryOptions | null = null
+  ): void {
     if (!metadata.isSoftDeleteEnabled()) {
       return
     }
+    if (options !== null && options.includeDeleted) {
+      return
+    }
     const deletedAtColumn = metadata.getDeletedAtColumn()
+    if (options !== null && options.onlyDeleted) {
+      predicates.isNotNull(deletedAtColumn)
+      return
+    }
     predicates.isNull(deletedAtColumn)
   }
 
   /**
    * 将 ValueType 转换为 RdbPredicates 支持的值类型
    */
-  private toRdbValue(value: ValueType): relationalStore.ValueType {
+  private toRdbValue(value: ValueType | Array<ValueType> | null): relationalStore.ValueType {
     if (value === null) {
+      return null
+    }
+    if (Array.isArray(value)) {
       return null
     }
     if (typeof value === 'boolean') {

@@ -6,11 +6,37 @@ import {
   RequiredValidationError,
   LengthValidationError,
   EmailValidationError,
+  MinValidationError,
+  MaxValidationError,
+  RangeValidationError,
+  PatternValidationError,
+  UrlValidationError,
+  PhoneValidationError,
+  DateValidationError,
+  EnumValidationError,
+  CustomValidationError,
+  UniqueValidationError,
   EntityValidationError
 } from '../../main/ets/errors/ValidationError';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 import { EntityValidator } from '../../main/ets/validation/EntityValidator';
-import { Required, Length, Email } from '../../main/ets/validation/ValidationDecorators';
+import {
+  Required,
+  Length,
+  Email,
+  Min,
+  Max,
+  Range,
+  Pattern,
+  URL,
+  Phone,
+  Date as DateRule,
+  Enum,
+  Custom,
+  Unique,
+  RequiredIf,
+  RequiredUnless
+} from '../../main/ets/validation/ValidationDecorators';
 import {
   ValidationMetadataStorage,
   ValidationRule,
@@ -119,6 +145,36 @@ export default function validationTest() {
 
         expect(emailRules.length).assertEqual(1);
         expect(emailRules[0].type).assertEqual('email');
+      });
+
+      it('new decorators should register extended rules and groups', 0, () => {
+        class UserEntity {}
+        const userInstance = new UserEntity();
+        registerEntity(userInstance.constructor.name);
+
+        Min(1, { groups: ['create'] })(userInstance, 'age');
+        Max(99)(userInstance, 'age');
+        Pattern(/^\d+$/)(userInstance, 'code');
+        Enum(['A', 'B'])(userInstance, 'level');
+        URL()(userInstance, 'site');
+        Phone()(userInstance, 'mobile');
+        DateRule()(userInstance, 'birth');
+        RequiredIf('type', 'vip')(userInstance, 'cardNo');
+        RequiredUnless('role', 'admin')(userInstance, 'managerName');
+        Custom((value) => value === 'ok' || 'bad custom')(userInstance, 'flag');
+        Unique()(userInstance, 'email');
+
+        const storage = ValidationMetadataStorage.getInstance();
+        const ageRules = storage.getRulesForProperty(userInstance.constructor.name, 'age');
+        expect(ageRules.length).assertEqual(2);
+        expect(ageRules[0].type).assertEqual('min');
+        expect(ageRules[0].groups?.[0]).assertEqual('create');
+        expect(ageRules[1].type).assertEqual('max');
+
+        const cardRules = storage.getRulesForProperty(userInstance.constructor.name, 'cardNo');
+        expect(cardRules[0].type).assertEqual('requiredIf');
+        const uniqueRules = storage.getRulesForProperty(userInstance.constructor.name, 'email');
+        expect(uniqueRules[0].type).assertEqual('unique');
       });
 
       it('decorators should throw EntityNotRegisteredError when entity missing', 0, () => {
@@ -276,6 +332,88 @@ export default function validationTest() {
           createEntityData('UserEntity', [new ValueEntry('email', null)])
         );
         expect(nullValue.errors.length).assertEqual(0);
+      });
+
+      it('min/max/range/pattern should validate correctly', 0, () => {
+        registerEntity('UserEntity');
+        const storage = ValidationMetadataStorage.getInstance();
+        storage.registerRule('UserEntity', 'age', { type: 'min', min: 18 });
+        storage.registerRule('UserEntity', 'age', { type: 'max', max: 60 });
+        storage.registerRule('UserEntity', 'score', { type: 'range', min: 0, max: 100 });
+        storage.registerRule('UserEntity', 'code', { type: 'pattern', pattern: /^\d+$/ });
+
+        const invalid = EntityValidator.validate(
+          'UserEntity',
+          createEntityData('UserEntity', [
+            new ValueEntry('age', 17),
+            new ValueEntry('score', 120),
+            new ValueEntry('code', 'A1')
+          ])
+        );
+        expect(invalid.errors.some((e) => e instanceof MinValidationError)).assertEqual(true);
+        expect(invalid.errors.some((e) => e instanceof RangeValidationError)).assertEqual(true);
+        expect(invalid.errors.some((e) => e instanceof PatternValidationError)).assertEqual(true);
+
+        const overMax = EntityValidator.validate(
+          'UserEntity',
+          createEntityData('UserEntity', [new ValueEntry('age', 70)])
+        );
+        expect(overMax.errors[0] instanceof MaxValidationError).assertEqual(true);
+      });
+
+      it('url/phone/date/enum should validate correctly', 0, () => {
+        registerEntity('UserEntity');
+        const storage = ValidationMetadataStorage.getInstance();
+        storage.registerRule('UserEntity', 'url', { type: 'url' });
+        storage.registerRule('UserEntity', 'phone', { type: 'phone' });
+        storage.registerRule('UserEntity', 'birth', { type: 'date' });
+        storage.registerRule('UserEntity', 'level', { type: 'enum', enumValues: ['A', 'B'] });
+        const invalid = EntityValidator.validate(
+          'UserEntity',
+          createEntityData('UserEntity', [
+            new ValueEntry('url', 'ftp://x'),
+            new ValueEntry('phone', 'abc'),
+            new ValueEntry('birth', 'not-date'),
+            new ValueEntry('level', 'C')
+          ])
+        );
+        expect(invalid.errors.some((e) => e instanceof UrlValidationError)).assertEqual(true);
+        expect(invalid.errors.some((e) => e instanceof PhoneValidationError)).assertEqual(true);
+        expect(invalid.errors.some((e) => e instanceof DateValidationError)).assertEqual(true);
+        expect(invalid.errors.some((e) => e instanceof EnumValidationError)).assertEqual(true);
+      });
+
+      it('requiredIf/requiredUnless/groups/custom/unique should work', 0, () => {
+        registerEntity('UserEntity');
+        const storage = ValidationMetadataStorage.getInstance();
+        storage.registerRule('UserEntity', 'cardNo', { type: 'requiredIf', dependentProperty: 'type', expectedValue: 'vip' });
+        storage.registerRule('UserEntity', 'manager', { type: 'requiredUnless', dependentProperty: 'role', expectedValue: 'admin' });
+        storage.registerRule('UserEntity', 'nickname', { type: 'required', groups: ['create'] });
+        storage.registerRule('UserEntity', 'flag', { type: 'custom', customValidator: () => 'custom failed' });
+        storage.registerRule('UserEntity', 'email', { type: 'unique' });
+
+        const data = createEntityData('UserEntity', [
+          new ValueEntry('type', 'vip'),
+          new ValueEntry('role', 'user'),
+          new ValueEntry('flag', 'bad'),
+          new ValueEntry('email', 'x@example.com')
+        ]);
+        const withGroup = EntityValidator.validate('UserEntity', data, { groups: ['create'], uniqueChecker: () => false });
+        expect(withGroup.errors.some((e) => e instanceof RequiredValidationError)).assertEqual(true);
+        expect(withGroup.errors.some((e) => e instanceof CustomValidationError)).assertEqual(true);
+        expect(withGroup.errors.some((e) => e instanceof UniqueValidationError)).assertEqual(true);
+      });
+
+      it('groups should skip unmatched grouped rule', 0, () => {
+        registerEntity('UserEntity');
+        const storage = ValidationMetadataStorage.getInstance();
+        storage.registerRule('UserEntity', 'nickname', { type: 'required', groups: ['create'] });
+        const result = EntityValidator.validate(
+          'UserEntity',
+          createEntityData('UserEntity'),
+          { groups: ['update'] }
+        );
+        expect(result.errors.length).assertEqual(0);
       });
 
       it('validateOrThrow should throw single error and aggregate multiple errors', 0, () => {

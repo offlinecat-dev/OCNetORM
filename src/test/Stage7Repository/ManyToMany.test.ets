@@ -5,7 +5,7 @@ import { RelationMetadata } from '../../main/ets/core/RelationMetadata';
 import { ManyToManyMetadata } from '../../main/ets/core/ManyToManyMetadata';
 import { ColumnType } from '../../main/ets/types/ColumnType';
 import { RelationType } from '../../main/ets/types/RelationType';
-import { Repository } from '../../main/ets/repository/Repository';
+import { Repository } from '../../main/ets/repository/index';
 import { RelationNotFoundError } from '../../main/ets/errors/RelationError';
 import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';

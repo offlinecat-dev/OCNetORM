@@ -23,4 +23,26 @@ export {
 } from './ColumnDecorator'
 
 // 验证装饰器
-export { Required, Length, Email, LengthOptions } from '../validation/ValidationDecorators'
+export {
+  Required,
+  Length,
+  Email,
+  Min,
+  Max,
+  Range,
+  Pattern,
+  Unique,
+  Phone,
+  URL,
+  Date,
+  Custom,
+  Enum,
+  RequiredIf,
+  RequiredUnless,
+  LengthOptions,
+  MinMaxOptions,
+  EnumOptions,
+  PatternOptions,
+  ValidationGroupsOptions,
+  ConditionalRequiredOptions
+} from '../validation/ValidationDecorators'

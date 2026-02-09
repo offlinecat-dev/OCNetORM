@@ -211,6 +211,16 @@ function createZhMessages(): ErrorLocaleMessages {
   messages.add('ORM802', '字段 {columnName} 为必填项')
   messages.add('ORM803', '字段 {columnName} 长度需在 {min} 到 {max} 之间')
   messages.add('ORM804', '字段 {columnName} 不是有效的邮箱地址')
+  messages.add('ORM805', '字段 {columnName} 的值不能小于 {min}')
+  messages.add('ORM806', '字段 {columnName} 的值不能大于 {max}')
+  messages.add('ORM807', '字段 {columnName} 的值需在 {min} 到 {max} 之间')
+  messages.add('ORM808', '字段 {columnName} 不符合预期格式')
+  messages.add('ORM809', '字段 {columnName} 不是有效的 URL')
+  messages.add('ORM810', '字段 {columnName} 不是有效的手机号')
+  messages.add('ORM811', '字段 {columnName} 不是有效的日期')
+  messages.add('ORM812', '字段 {columnName} 的值不在允许范围内')
+  messages.add('ORM813', '字段 {columnName} 未通过自定义校验')
+  messages.add('ORM814', '字段 {columnName} 的值必须唯一')
   return messages
 }
 
@@ -245,5 +255,15 @@ function createEnMessages(): ErrorLocaleMessages {
   messages.add('ORM802', 'Field {columnName} is required')
   messages.add('ORM803', 'Field {columnName} length must be between {min} and {max}')
   messages.add('ORM804', 'Field {columnName} is not a valid email address')
+  messages.add('ORM805', 'Field {columnName} must not be less than {min}')
+  messages.add('ORM806', 'Field {columnName} must not be greater than {max}')
+  messages.add('ORM807', 'Field {columnName} must be between {min} and {max}')
+  messages.add('ORM808', 'Field {columnName} does not match the required pattern')
+  messages.add('ORM809', 'Field {columnName} is not a valid URL')
+  messages.add('ORM810', 'Field {columnName} is not a valid phone number')
+  messages.add('ORM811', 'Field {columnName} is not a valid date')
+  messages.add('ORM812', 'Field {columnName} is not in the allowed values')
+  messages.add('ORM813', 'Field {columnName} failed custom validation')
+  messages.add('ORM814', 'Field {columnName} must be unique')
   return messages
 }

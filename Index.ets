@@ -134,6 +134,14 @@ export {
   // 统一初始化入口
   OCORMInit,
   OCORMInitOptions,
+  // 查询作用域注册表
+  ScopeRegistry,
+  ScopeFunction,
+  ScopeDefinitions,
+  registerScope,
+  registerScopes,
+  registerEntityScope,
+  registerEntityScopes,
   // 快速实体注册工具
   defineEntity,
   EntitySchema,
@@ -224,6 +232,7 @@ export {
   LogicalOperator,
   // 查询构建器
   QueryBuilder,
+  BatchUpdateValues,
   // 子查询构建器
   SubQuery,
   SubQueryCallback,
@@ -296,10 +305,29 @@ export {
   ValidationMetadataStorage,
   ValidationRuleType,
   ValidationRule,
+  CustomValidator,
   Required,
   Length,
   Email,
+  Min,
+  Max,
+  Range,
+  Pattern,
+  Unique,
+  Phone,
+  URL,
+  Date,
+  Custom,
+  Enum,
+  RequiredIf,
+  RequiredUnless,
   LengthOptions,
+  MinMaxOptions,
+  EnumOptions,
+  PatternOptions,
+  ValidationGroupsOptions,
+  ConditionalRequiredOptions,
   EntityValidator,
-  ValidationResult
+  ValidationResult,
+  ValidationOptions
 } from './src/main/ets/validation/index'

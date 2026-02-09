@@ -6,12 +6,11 @@ import { ManyToManyMetadata } from '../../main/ets/core/ManyToManyMetadata';
 import { ColumnType } from '../../main/ets/types/ColumnType';
 import { RelationType } from '../../main/ets/types/RelationType';
 import { RelationLoader } from '../../main/ets/query/RelationLoader';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 import { RelationNotFoundError } from '../../main/ets/errors/RelationError';
-import { CascadeHandler, CascadeRepository, CascadeResultLike } from '../../main/ets/repository/CascadeHandler';
+import { CascadeHandler, CascadeRepository, CascadeResultLike, Repository } from '../../main/ets/repository/index';
 import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { ValueType } from '../../main/ets/types/ValueTypes';
-import { Repository } from '../../main/ets/repository/Repository';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
 
 const setupUserEntity = (): void => {

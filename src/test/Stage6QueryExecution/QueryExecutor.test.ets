@@ -5,7 +5,7 @@ import { RelationMetadata } from '../../main/ets/core/RelationMetadata';
 import { RelationType } from '../../main/ets/types/RelationType';
 import { ColumnType } from '../../main/ets/types/ColumnType';
 import { ConditionOperator } from '../../main/ets/types/ConditionOperator';
-import { QueryBuilder } from '../../main/ets/query/QueryBuilder';
+import { QueryBuilder, BatchUpdateValues } from '../../main/ets/query/QueryBuilder';
 import { QueryExecutor } from '../../main/ets/query/QueryExecutor';
 import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
@@ -143,6 +143,23 @@ const setupRelations = (): void => {
   storage.registerRelation('User', relation);
 };
 
+const setupNestedRelations = (): void => {
+  const storage = MetadataStorage.getInstance();
+  storage.registerEntity('Comment', 'comments');
+  const commentId = new ColumnMetadata('id', 'id')
+    .setType(ColumnType.INTEGER)
+    .setPrimaryKey(true);
+  storage.registerColumn('Comment', commentId);
+  storage.registerColumn('Comment', new ColumnMetadata('postId', 'post_id').setType(ColumnType.INTEGER));
+  storage.registerRelation('Post', new RelationMetadata(
+    RelationType.ONE_TO_MANY,
+    'Post',
+    'Comment',
+    'comments',
+    'post_id'
+  ));
+};
+
 export default function queryExecutorTest() {
   describe('queryExecutorTest', () => {
     beforeEach(() => {
@@ -217,6 +234,37 @@ export default function queryExecutorTest() {
       expect(errorType).assertEqual('ExecutionError');
     });
 
+    it('update should throw ExecutionError when database not initialized', 0, async () => {
+      setupUserEntity();
+      const builder = new QueryBuilder('User');
+      const executor = new QueryExecutor(builder);
+      const values = BatchUpdateValues.create().set('name', 'Alice');
+
+      let threw = false;
+      try {
+        await executor.update(values);
+      } catch (error) {
+        threw = error instanceof ExecutionError;
+      }
+
+      expect(threw).assertEqual(true);
+    });
+
+    it('delete should throw ExecutionError when database not initialized', 0, async () => {
+      setupUserEntity();
+      const builder = new QueryBuilder('User');
+      const executor = new QueryExecutor(builder);
+
+      let threw = false;
+      try {
+        await executor.delete();
+      } catch (error) {
+        threw = error instanceof ExecutionError;
+      }
+
+      expect(threw).assertEqual(true);
+    });
+
     it('getPaginated should throw ExecutionError when database not initialized', 0, async () => {
       setupUserEntity();
       const builder = new QueryBuilder('User');
@@ -270,6 +318,20 @@ export default function queryExecutorTest() {
       setupRelations();
       const builder = new QueryBuilder('User');
       builder.with('posts');
+      const executor = new QueryExecutor(builder);
+      expect(executor !== null).assertEqual(true);
+    });
+
+    it('should work with nested relation, withWhere and withCount configured', 0, () => {
+      setupUserEntity();
+      setupRelations();
+      setupNestedRelations();
+      const builder = new QueryBuilder('User');
+      builder.with('posts.comments');
+      builder.withWhere('posts', (relationQb) => {
+        relationQb.limit(5);
+      });
+      builder.withCount('posts');
       const executor = new QueryExecutor(builder);
       expect(executor !== null).assertEqual(true);
     });

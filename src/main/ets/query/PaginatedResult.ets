@@ -3,7 +3,7 @@
  * 用于封装分页查询的返回结果
  */
 
-import { EntityData } from '../mapping/DataMapper'
+import { EntityData } from '../mapping/EntityData'
 
 /**
  * 分页查询结果类

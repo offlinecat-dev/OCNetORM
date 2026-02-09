@@ -3,7 +3,7 @@
  * 负责在保存/删除时处理关联实体的级联行为
  */
 
-import { EntityData } from '../mapping/DataMapper'
+import { EntityData } from '../mapping/EntityData'
 import { MetadataStorage } from '../core/MetadataStorage'
 import { CascadeSetting } from '../core/RelationMetadata'
 import { RelationType } from '../types/RelationType'

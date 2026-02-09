@@ -5,15 +5,13 @@
 // 类型转换器
 export { TypeConverter, TypeConversionOptions } from './TypeConverter'
 
+// 数据结构
+export { ValuesBucket } from './ValuesBucket'
+export { EntityPropertyValue, RelatedDataValue, EntityData } from './EntityData'
+export { ResultSetRow } from './ResultSetRow'
+
 // 数据映射器
-export {
-  ValuesBucket,
-  EntityPropertyValue,
-  RelatedDataValue,
-  EntityData,
-  ResultSetRow,
-  DataMapper
-} from './DataMapper'
+export { DataMapper } from './DataMapper'
 
 // 实体数据输入
 export { EntityDataInput } from './EntityDataInput'

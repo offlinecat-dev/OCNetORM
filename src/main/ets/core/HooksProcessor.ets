@@ -3,7 +3,7 @@
  * 管理和执行实体生命周期钩子
  */
 
-import { EntityData } from '../mapping/DataMapper'
+import { EntityData } from '../mapping/EntityData'
 import { MetadataStorage } from './MetadataStorage'
 import { EntityHooks, HookCallback } from '../types/EntityHooks'
 import { HookExecutionError } from '../errors/HookError'

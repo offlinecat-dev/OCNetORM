@@ -4,7 +4,7 @@ import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
 import { ColumnType } from '../../main/ets/types/ColumnType';
 import { ConditionOperator } from '../../main/ets/types/ConditionOperator';
 import { QueryBuilder } from '../../main/ets/query/QueryBuilder';
-import { EntityData } from '../../main/ets/mapping/DataMapper';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 import { DataMapper } from '../../main/ets/mapping/DataMapper';
 import { TypeConverter } from '../../main/ets/mapping/TypeConverter';
 import { EntityNotRegisteredError } from '../../main/ets/errors/MetadataError';

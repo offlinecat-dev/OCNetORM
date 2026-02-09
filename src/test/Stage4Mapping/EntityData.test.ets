@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { EntityData, RelatedDataValue } from '../../main/ets/mapping/DataMapper';
+import { EntityData, RelatedDataValue } from '../../main/ets/mapping/EntityData';
 
 export default function entityDataTest() {
   describe('entityDataTest', () => {

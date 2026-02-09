@@ -8,7 +8,7 @@
  * Requirements: 7.1, 7.2, 7.3, 7.4, 7.5
  */
 
-import { EntityData, EntityPropertyValue } from './DataMapper'
+import { EntityData, EntityPropertyValue } from './EntityData'
 import { MetadataStorage } from '../core/MetadataStorage'
 import { EntityMappingError } from '../errors/MappingError'
 import { ValueType } from '../types/ValueTypes'
