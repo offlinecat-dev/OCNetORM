@@ -258,17 +258,12 @@ export default function queryBuilderTest() {
       expect(caught).assertEqual(true);
     });
 
-    it('with should throw RelationNotFoundError for nested path on morphTo relation', 0, () => {
+    it('with should allow nested path on morphTo relation', 0, () => {
       setupTestEntity();
       setupMorphRelations();
       const builder = new QueryBuilder('Comment');
-      let caught = false;
-      try {
-        builder.with('commentable.profile');
-      } catch (error) {
-        caught = error instanceof RelationNotFoundError;
-      }
-      expect(caught).assertEqual(true);
+      builder.with('commentable.profile');
+      expect(builder.getRelationNames()[0]).assertEqual('commentable.profile');
     });
 
     it('withLazy should add lazy relation', 0, () => {
@@ -337,19 +332,24 @@ export default function queryBuilderTest() {
       expect(countOptions[0].alias).assertEqual('commentable_count');
     });
 
-    it('withWhere should throw InvalidConditionError for morphTo relation', 0, () => {
+    it('withWhere should accept morphTo relation', 0, () => {
       setupTestEntity();
       setupMorphRelations();
       const builder = new QueryBuilder('Comment');
-      let caught = false;
-      try {
-        builder.withWhere('commentable', (relationQb) => {
-          relationQb.limit(1);
-        });
-      } catch (error) {
-        caught = error instanceof InvalidConditionError;
-      }
-      expect(caught).assertEqual(true);
+      builder.withWhere('commentable', (relationQb) => {
+        relationQb.limit(1);
+      });
+      expect(builder.getRelationNames().includes('commentable')).assertEqual(true);
+    });
+
+    it('withWhere should accept nested path on morphTo relation', 0, () => {
+      setupTestEntity();
+      setupMorphRelations();
+      const builder = new QueryBuilder('Comment');
+      builder.withWhere('commentable.profile', (relationQb) => {
+        relationQb.limit(1);
+      });
+      expect(builder.getRelationNames().includes('commentable.profile')).assertEqual(true);
     });
 
     it('withDeleted should set includeDeleted flag', 0, () => {

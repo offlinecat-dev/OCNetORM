@@ -27,8 +27,10 @@ import { OneToManyRelationLoadStrategy } from './OneToManyRelationLoadStrategy'
 import { ManyToOneRelationLoadStrategy } from './ManyToOneRelationLoadStrategy'
 import { ManyToManyRelationLoadStrategy } from './ManyToManyRelationLoadStrategy'
 import { ConditionOperator } from '../types/ConditionOperator'
+import { OrderByClause } from '../types/ValueTypes'
 import { LogicalOperator, WhereCondition } from './WhereCondition'
 import { RelationQueryOptions } from './RelationQueryOptions'
+import { QueryBuilder } from './QueryBuilder'
 
 /**
  * 关联数据加载器类
@@ -170,7 +172,8 @@ export class RelationLoader {
   async loadRelation(
     entities: Array<EntityData>,
     relationName: string,
-    options: RelationQueryOptions | null = null
+    options: RelationQueryOptions | null = null,
+    morphWithWhereCallback: ((qb: QueryBuilder) => void) | null = null
   ): Promise<Array<EntityData>> {
     if (entities.length === 0) {
       return entities
@@ -200,7 +203,7 @@ export class RelationLoader {
       return await this.loadManyToMany(entities, relation as ManyToManyMetadata, options)
     }
     if (relation.type === RelationType.MORPH_TO) {
-      return await this.loadMorphTo(entities, relation as MorphToMetadata, options)
+      return await this.loadMorphTo(entities, relation as MorphToMetadata, options, morphWithWhereCallback)
     }
 
     return entities
@@ -1262,10 +1265,41 @@ export class RelationLoader {
     }
   }
 
+  private buildMorphRelationOptions(
+    targetEntityName: string,
+    callback: (qb: QueryBuilder) => void
+  ): RelationQueryOptions {
+    const relationBuilder = new QueryBuilder(targetEntityName)
+    callback(relationBuilder)
+    const options = new RelationQueryOptions()
+    const conditions = relationBuilder.getConditions()
+    for (let i = 0; i < conditions.length; i++) {
+      const source = conditions[i]
+      const target = new WhereCondition()
+      target.column = source.column
+      target.operator = source.operator
+      target.value = source.value
+      target.secondValue = source.secondValue
+      target.logicalOperator = source.logicalOperator
+      options.conditions.push(target)
+    }
+    const orderByColumns = relationBuilder.getOrderByColumns()
+    for (let i = 0; i < orderByColumns.length; i++) {
+      const item = orderByColumns[i]
+      options.orderByColumns.push(new OrderByClause(item.column, item.direction))
+    }
+    options.limitValue = relationBuilder.getLimitValue()
+    options.offsetValue = relationBuilder.getOffsetValue()
+    options.includeDeleted = relationBuilder.isIncludeDeleted()
+    options.onlyDeleted = relationBuilder.isOnlyDeleted()
+    return options
+  }
+
   private async loadMorphTo(
     entities: Array<EntityData>,
     relation: MorphToMetadata,
-    options: RelationQueryOptions | null = null
+    options: RelationQueryOptions | null = null,
+    morphWithWhereCallback: ((qb: QueryBuilder) => void) | null = null
   ): Promise<Array<EntityData>> {
     const sourceMetadata = MetadataStorage.getInstance().getEntityMetadata(this.sourceEntityName)
     if (sourceMetadata === null) {
@@ -1329,11 +1363,15 @@ export class RelationLoader {
         continue
       }
       const targetMapper = new DataMapper(targetEntityName)
+      let effectiveOptions = options
+      if (morphWithWhereCallback !== null) {
+        effectiveOptions = this.buildMorphRelationOptions(targetEntityName, morphWithWhereCallback)
+      }
       const batches = this.splitIntoBatches(ids, this.resolveInClauseLimit())
       for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
         const batch = batches[batchIndex]
         const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-        this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
+        this.applyRelationQueryToPredicates(predicates, targetMetadata, effectiveOptions)
         const rdbValues: Array<relationalStore.ValueType> = []
         for (let j = 0; j < batch.length; j++) {
           rdbValues.push(this.toRdbValue(batch[j]))

@@ -107,6 +107,8 @@ export class QueryBuilder {
   private selectRawExpressions: Array<string> = []
   /** 关联过滤配置（key: 关联路径） */
   private relationQueryOptions: Map<string, RelationQueryOptions> = new Map()
+  /** MorphTo 关联过滤回调（key: 关联路径） */
+  private morphRelationQueryCallbacks: Map<string, (qb: QueryBuilder) => void> = new Map()
   /** 关联计数配置 */
   private relationCountOptions: Array<RelationCountOption> = []
 
@@ -552,9 +554,7 @@ export class QueryBuilder {
         throw new RelationNotFoundError(currentEntityName, segments[i])
       }
       if (relation.targetEntity.length === 0) {
-        if (i < segments.length - 1) {
-          throw new RelationNotFoundError(currentEntityName, relationPath)
-        }
+        // 动态目标实体（如 MorphTo）无法在构建阶段静态验证后续路径
         return ''
       }
       currentEntityName = relation.targetEntity
@@ -634,10 +634,9 @@ export class QueryBuilder {
     const normalizedRelationPath = this.normalizeRelationPath(relationName)
     const targetEntityName = this.resolveRelationPathTargetEntity(normalizedRelationPath)
     if (targetEntityName.length === 0) {
-      throw new InvalidConditionError(
-        'withWhere',
-        `关联路径 '${normalizedRelationPath}' 指向动态实体，MVP 阶段暂不支持 withWhere`
-      )
+      this.morphRelationQueryCallbacks.set(normalizedRelationPath, callback)
+      this.relationQueryOptions.delete(normalizedRelationPath)
+      return this.with(normalizedRelationPath)
     }
     const relationQueryBuilder = new QueryBuilder(targetEntityName)
     try {
@@ -646,6 +645,7 @@ export class QueryBuilder {
       const errorMessage = e instanceof Error ? e.message : String(e)
       throw new InvalidConditionError('withWhere', `关联过滤回调执行失败: ${errorMessage}`)
     }
+    this.morphRelationQueryCallbacks.delete(normalizedRelationPath)
     this.relationQueryOptions.set(normalizedRelationPath, this.createRelationQueryOptions(relationQueryBuilder))
     return this.with(normalizedRelationPath)
   }
@@ -669,6 +669,14 @@ export class QueryBuilder {
       return null
     }
     return options.clone()
+  }
+
+  getMorphRelationQueryCallback(relationPath: string): ((qb: QueryBuilder) => void) | null {
+    const callback = this.morphRelationQueryCallbacks.get(this.normalizeRelationPath(relationPath))
+    if (callback === undefined) {
+      return null
+    }
+    return callback
   }
 
   /**

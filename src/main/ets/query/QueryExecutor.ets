@@ -19,9 +19,10 @@ import { SubQuery } from './SubQuery'
 import { MetadataStorage } from '../core/MetadataStorage'
 import { EntityMetadata } from '../core/EntityMetadata'
 import { RelationType } from '../types/RelationType'
-import { ValueType } from '../types/ValueTypes'
+import { ValueType, OrderByClause } from '../types/ValueTypes'
 import { ConditionOperator } from '../types/ConditionOperator'
 import { WhereCondition, LogicalOperator } from './WhereCondition'
+import { RelationQueryOptions } from './RelationQueryOptions'
 import { ResultSetUtils } from '../mapping/ResultSetUtils'
 import { AggregateResult } from './AggregateResult'
 import { QueryResultTransformer } from './QueryResultTransformer'
@@ -309,6 +310,56 @@ export class QueryExecutor {
     return children
   }
 
+  private collectMorphChildrenByEntity(
+    entities: Array<EntityData>,
+    relationName: string
+  ): Map<string, Array<EntityData>> {
+    const groupedChildren: Map<string, Array<EntityData>> = new Map()
+    for (let i = 0; i < entities.length; i++) {
+      const child = entities[i].getRelatedSingle(relationName)
+      if (child === null) {
+        continue
+      }
+      let grouped = groupedChildren.get(child.entityName)
+      if (grouped === undefined) {
+        grouped = []
+        groupedChildren.set(child.entityName, grouped)
+      }
+      grouped.push(child)
+    }
+    return groupedChildren
+  }
+
+  private buildRelationQueryOptionsFromCallback(
+    targetEntityName: string,
+    callback: (qb: QueryBuilder) => void
+  ): RelationQueryOptions {
+    const relationBuilder = new QueryBuilder(targetEntityName)
+    callback(relationBuilder)
+    const options = new RelationQueryOptions()
+    const conditions = relationBuilder.getConditions()
+    for (let i = 0; i < conditions.length; i++) {
+      const source = conditions[i]
+      const target = new WhereCondition()
+      target.column = source.column
+      target.operator = source.operator
+      target.value = source.value
+      target.secondValue = source.secondValue
+      target.logicalOperator = source.logicalOperator
+      options.conditions.push(target)
+    }
+    const orderByColumns = relationBuilder.getOrderByColumns()
+    for (let i = 0; i < orderByColumns.length; i++) {
+      const item = orderByColumns[i]
+      options.orderByColumns.push(new OrderByClause(item.column, item.direction))
+    }
+    options.limitValue = relationBuilder.getLimitValue()
+    options.offsetValue = relationBuilder.getOffsetValue()
+    options.includeDeleted = relationBuilder.isIncludeDeleted()
+    options.onlyDeleted = relationBuilder.isOnlyDeleted()
+    return options
+  }
+
   private async loadRelationPath(
     entities: Array<EntityData>,
     sourceEntityName: string,
@@ -330,10 +381,38 @@ export class QueryExecutor {
     const loader = sourceEntityName === this.queryBuilder.getEntityName()
       ? this.relationLoader
       : new RelationLoader(sourceEntityName)
-    const options = this.queryBuilder.getRelationQueryOptions(fullPath)
-    await loader.loadRelation(entities, relationName, options)
+    let options = this.queryBuilder.getRelationQueryOptions(fullPath)
+    const morphCallback = this.queryBuilder.getMorphRelationQueryCallback(fullPath)
+    if (options === null && morphCallback !== null && relation.targetEntity.length > 0) {
+      options = this.buildRelationQueryOptionsFromCallback(relation.targetEntity, morphCallback)
+    }
+    await loader.loadRelation(entities, relationName, options, morphCallback)
 
     if (index >= segments.length - 1) {
+      return
+    }
+
+    if (relation.type === RelationType.MORPH_TO) {
+      const morphChildren = this.collectMorphChildrenByEntity(entities, relationName)
+      if (morphChildren.size === 0) {
+        return
+      }
+      const nextRelationName = segments[index + 1]
+      let hasSupportedTarget = false
+      const entries = Array.from(morphChildren.entries())
+      for (let i = 0; i < entries.length; i++) {
+        const targetEntityName = entries[i][0]
+        const targetChildren = entries[i][1]
+        const nextRelation = MetadataStorage.getInstance().getRelation(targetEntityName, nextRelationName)
+        if (nextRelation === null) {
+          continue
+        }
+        hasSupportedTarget = true
+        await this.loadRelationPath(targetChildren, targetEntityName, segments, index + 1, fullPath)
+      }
+      if (!hasSupportedTarget) {
+        throw new ExecutionError('RELATION_LOAD', `关联 '${fullPath}.${nextRelationName}' 未注册`)
+      }
       return
     }
 
