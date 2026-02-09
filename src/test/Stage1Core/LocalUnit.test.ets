@@ -1,9 +1,12 @@
 import { describe, beforeAll, beforeEach, afterEach, afterAll, it, expect } from '@ohos/hypium';
 import { MetadataStorage } from '../../main/ets/core/MetadataStorage';
 import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
+import { defineEntity } from '../../main/ets/core/EntitySchema';
 import { RelationMetadata } from '../../main/ets/core/RelationMetadata';
 import { ManyToManyMetadata } from '../../main/ets/core/ManyToManyMetadata';
+import { MorphToMetadata } from '../../main/ets/core/MorphToMetadata';
 import { RelationType } from '../../main/ets/types/RelationType';
+import { ColumnType } from '../../main/ets/types/ColumnType';
 import { DuplicateEntityError, EntityNotRegisteredError } from '../../main/ets/errors/MetadataError';
 
 const createStorage = (): MetadataStorage => {
@@ -135,6 +138,56 @@ export default function localUnitTest() {
           expect(relation.joinTargetKey).assertEqual('tag_id');
           expect(relation.type).assertEqual(RelationType.MANY_TO_MANY);
           expect(relation instanceof ManyToManyMetadata).assertEqual(true);
+        }
+      });
+
+      it('registerMorphTo should keep morph metadata', 0, () => {
+        const storage = createStorage();
+        storage.registerEntity('Comment');
+        storage.registerEntity('Post');
+        storage.registerEntity('User');
+
+        storage.registerMorphTo('Comment', 'commentable', 'commentableId', 'commentableType', {
+          post: 'Post',
+          user: 'User'
+        });
+
+        const relation = storage.getMorphToRelation('Comment', 'commentable');
+        expect(relation !== null).assertEqual(true);
+        if (relation) {
+          expect(relation.type).assertEqual(RelationType.MORPH_TO);
+          expect(relation.idColumn).assertEqual('commentableId');
+          expect(relation.typeColumn).assertEqual('commentableType');
+          expect(relation.resolveTargetEntity('post')).assertEqual('Post');
+          expect(relation instanceof MorphToMetadata).assertEqual(true);
+        }
+      });
+
+      it('defineEntity should register morphTo metadata', 0, () => {
+        const storage = createStorage();
+        defineEntity('Post', {
+          tableName: 'posts',
+          columns: [{ property: 'id', type: ColumnType.INTEGER, primaryKey: true }]
+        });
+        defineEntity('Comment', {
+          tableName: 'comments',
+          columns: [
+            { property: 'id', type: ColumnType.INTEGER, primaryKey: true },
+            { property: 'commentableId', type: ColumnType.INTEGER },
+            { property: 'commentableType', type: ColumnType.TEXT }
+          ],
+          morphTo: {
+            name: 'commentable',
+            idColumn: 'commentableId',
+            typeColumn: 'commentableType',
+            typeMap: { post: 'Post' }
+          }
+        });
+        const relation = storage.getMorphToRelation('Comment', 'commentable');
+        expect(relation !== null).assertEqual(true);
+        if (relation) {
+          expect(relation.idColumn).assertEqual('commentableId');
+          expect(relation.typeColumn).assertEqual('commentableType');
         }
       });
 

@@ -69,6 +69,23 @@ const setupNestedRelations = (): void => {
   storage.registerRelation('Post', new RelationMetadata(RelationType.ONE_TO_MANY, 'Post', 'Comment', 'comments', 'post_id'));
 };
 
+const setupMorphRelations = (): void => {
+  const storage = MetadataStorage.getInstance();
+  if (storage.getEntityMetadata('Comment') === null) {
+    storage.registerEntity('Comment', 'comments');
+    const commentId = new ColumnMetadata('id', 'id');
+    commentId.isPrimaryKey = true;
+    storage.registerColumn('Comment', commentId);
+    storage.registerColumn('Comment', new ColumnMetadata('commentableId', 'commentable_id'));
+    storage.registerColumn('Comment', new ColumnMetadata('commentableType', 'commentable_type'));
+  }
+  storage.registerEntity('Article', 'articles');
+  const articleId = new ColumnMetadata('id', 'id');
+  articleId.isPrimaryKey = true;
+  storage.registerColumn('Article', articleId);
+  storage.registerMorphTo('Comment', 'commentable', 'commentableId', 'commentableType', { article: 'Article', user: 'User' });
+};
+
 export default function queryBuilderTest() {
   describe('queryBuilderTest', () => {
     beforeAll(() => {
@@ -241,11 +258,32 @@ export default function queryBuilderTest() {
       expect(caught).assertEqual(true);
     });
 
+    it('with should throw RelationNotFoundError for nested path on morphTo relation', 0, () => {
+      setupTestEntity();
+      setupMorphRelations();
+      const builder = new QueryBuilder('Comment');
+      let caught = false;
+      try {
+        builder.with('commentable.profile');
+      } catch (error) {
+        caught = error instanceof RelationNotFoundError;
+      }
+      expect(caught).assertEqual(true);
+    });
+
     it('withLazy should add lazy relation', 0, () => {
       setupTestEntity();
       setupRelations();
       const builder = new QueryBuilder('User');
       builder.withLazy('posts');
+      expect(builder.hasLazyRelations()).assertEqual(true);
+    });
+
+    it('withLazy should accept morphTo relation', 0, () => {
+      setupTestEntity();
+      setupMorphRelations();
+      const builder = new QueryBuilder('Comment');
+      builder.withLazy('commentable');
       expect(builder.hasLazyRelations()).assertEqual(true);
     });
 
@@ -277,6 +315,41 @@ export default function queryBuilderTest() {
       expect(countOptions.length).assertEqual(1);
       expect(countOptions[0].relationPath).assertEqual('posts');
       expect(countOptions[0].alias).assertEqual('posts_count');
+    });
+
+    it('with should accept morphTo relation', 0, () => {
+      setupTestEntity();
+      setupMorphRelations();
+      const builder = new QueryBuilder('Comment');
+      builder.with('commentable');
+      expect(builder.hasRelations()).assertEqual(true);
+      expect(builder.getRelationNames()[0]).assertEqual('commentable');
+    });
+
+    it('withCount should accept morphTo relation', 0, () => {
+      setupTestEntity();
+      setupMorphRelations();
+      const builder = new QueryBuilder('Comment');
+      builder.withCount('commentable');
+      const countOptions = builder.getRelationCountOptions();
+      expect(countOptions.length).assertEqual(1);
+      expect(countOptions[0].relationPath).assertEqual('commentable');
+      expect(countOptions[0].alias).assertEqual('commentable_count');
+    });
+
+    it('withWhere should throw InvalidConditionError for morphTo relation', 0, () => {
+      setupTestEntity();
+      setupMorphRelations();
+      const builder = new QueryBuilder('Comment');
+      let caught = false;
+      try {
+        builder.withWhere('commentable', (relationQb) => {
+          relationQb.limit(1);
+        });
+      } catch (error) {
+        caught = error instanceof InvalidConditionError;
+      }
+      expect(caught).assertEqual(true);
     });
 
     it('withDeleted should set includeDeleted flag', 0, () => {

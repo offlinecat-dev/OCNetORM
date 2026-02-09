@@ -551,6 +551,12 @@ export class QueryBuilder {
       if (relation === null) {
         throw new RelationNotFoundError(currentEntityName, segments[i])
       }
+      if (relation.targetEntity.length === 0) {
+        if (i < segments.length - 1) {
+          throw new RelationNotFoundError(currentEntityName, relationPath)
+        }
+        return ''
+      }
       currentEntityName = relation.targetEntity
     }
     return currentEntityName
@@ -627,6 +633,12 @@ export class QueryBuilder {
   withWhere(relationName: string, callback: (qb: QueryBuilder) => void): QueryBuilder {
     const normalizedRelationPath = this.normalizeRelationPath(relationName)
     const targetEntityName = this.resolveRelationPathTargetEntity(normalizedRelationPath)
+    if (targetEntityName.length === 0) {
+      throw new InvalidConditionError(
+        'withWhere',
+        `关联路径 '${normalizedRelationPath}' 指向动态实体，MVP 阶段暂不支持 withWhere`
+      )
+    }
     const relationQueryBuilder = new QueryBuilder(targetEntityName)
     try {
       callback(relationQueryBuilder)

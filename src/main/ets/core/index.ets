@@ -17,6 +17,9 @@ export { RelationMetadata, CascadeOptions, CascadeSetting } from './RelationMeta
 // 多对多关系元数据
 export { ManyToManyMetadata } from './ManyToManyMetadata'
 
+// 多态单值关系元数据
+export { MorphToMetadata } from './MorphToMetadata'
+
 // 钩子处理器
 export { HooksProcessor } from './HooksProcessor'
 
@@ -27,7 +30,7 @@ export { OrmContext, OrmContextConfig } from './OrmContext'
 export { OCORMInit, OCORMInitOptions } from './OrmInit'
 
 // 快速实体注册工具
-export { defineEntity, EntitySchema, ColumnSchema, SoftDeleteSchema } from './EntitySchema'
+export { defineEntity, EntitySchema, ColumnSchema, SoftDeleteSchema, MorphToSchema } from './EntitySchema'
 
 // 查询作用域注册表
 export {

@@ -126,6 +126,8 @@ export {
   CascadeSetting,
   // 多对多关系元数据
   ManyToManyMetadata,
+  // 多态单值关系元数据
+  MorphToMetadata,
   // 钩子处理器
   HooksProcessor,
   // ORM 上下文（依赖注入）
@@ -146,7 +148,8 @@ export {
   defineEntity,
   EntitySchema,
   ColumnSchema,
-  SoftDeleteSchema
+  SoftDeleteSchema,
+  MorphToSchema
 } from './src/main/ets/core/index'
 
 // 导出装饰器模块

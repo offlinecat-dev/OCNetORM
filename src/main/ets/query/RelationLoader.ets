@@ -7,6 +7,7 @@ import { relationalStore } from '@kit.ArkData'
 import { MetadataStorage } from '../core/MetadataStorage'
 import { RelationMetadata } from '../core/RelationMetadata'
 import { ManyToManyMetadata } from '../core/ManyToManyMetadata'
+import { MorphToMetadata } from '../core/MorphToMetadata'
 import { EntityMetadata } from '../core/EntityMetadata'
 import { RelationType } from '../types/RelationType'
 import { DataMapper } from '../mapping/DataMapper'
@@ -198,6 +199,9 @@ export class RelationLoader {
     if (relation.type === RelationType.MANY_TO_MANY) {
       return await this.loadManyToMany(entities, relation as ManyToManyMetadata, options)
     }
+    if (relation.type === RelationType.MORPH_TO) {
+      return await this.loadMorphTo(entities, relation as MorphToMetadata, options)
+    }
 
     return entities
   }
@@ -291,12 +295,7 @@ export class RelationLoader {
         return RelationLoadResult.createFailure(relationName, `关联 '${relationName}' 未注册`, duration)
       }
 
-      const strategy = this.getRelationStrategy(relation.type)
-      if (strategy === null) {
-        const duration = Date.now() - startTime
-        return RelationLoadResult.createSuccess(relationName, 0, duration)
-      }
-      await strategy.load(entities, relation)
+      await this.loadRelation(entities, relationName)
 
       let loadedCount = 0
       if (relation.type === RelationType.ONE_TO_MANY || relation.type === RelationType.MANY_TO_MANY) {
@@ -1214,6 +1213,163 @@ export class RelationLoader {
         }
       } else {
         entity.setRelatedArray(relation.propertyName, [])
+      }
+    }
+
+    return entities
+  }
+
+  private resolveEntityValue(
+    entity: EntityData,
+    metadata: EntityMetadata,
+    propertyOrColumnName: string
+  ): ValueType {
+    let prop = entity.getProperty(propertyOrColumnName)
+    if (prop !== null) {
+      return prop.value
+    }
+    const column = metadata.getColumnByName(propertyOrColumnName)
+    if (column === null) {
+      return null
+    }
+    prop = entity.getProperty(column.propertyName)
+    if (prop === null) {
+      return null
+    }
+    return prop.value
+  }
+
+  private collectMorphId(
+    idsByType: Map<string, Array<ValueType>>,
+    seenIdByType: Map<string, Set<string>>,
+    typeValue: string,
+    idValue: ValueType
+  ): void {
+    let ids = idsByType.get(typeValue)
+    if (!ids) {
+      ids = []
+      idsByType.set(typeValue, ids)
+    }
+    let seen = seenIdByType.get(typeValue)
+    if (!seen) {
+      seen = new Set<string>()
+      seenIdByType.set(typeValue, seen)
+    }
+    const idKey = String(idValue)
+    if (!seen.has(idKey)) {
+      seen.add(idKey)
+      ids.push(idValue)
+    }
+  }
+
+  private async loadMorphTo(
+    entities: Array<EntityData>,
+    relation: MorphToMetadata,
+    options: RelationQueryOptions | null = null
+  ): Promise<Array<EntityData>> {
+    const sourceMetadata = MetadataStorage.getInstance().getEntityMetadata(this.sourceEntityName)
+    if (sourceMetadata === null) {
+      return entities
+    }
+
+    const entitiesByRef: Map<string, Array<EntityData>> = new Map()
+    const idsByType: Map<string, Array<ValueType>> = new Map()
+    const seenIdByType: Map<string, Set<string>> = new Map()
+
+    for (let i = 0; i < entities.length; i++) {
+      const entity = entities[i]
+      entity.setRelatedSingle(relation.propertyName, null)
+      const typeValue = this.resolveEntityValue(entity, sourceMetadata, relation.typeColumn)
+      const idValue = this.resolveEntityValue(entity, sourceMetadata, relation.idColumn)
+      if (typeValue === null || idValue === null) {
+        continue
+      }
+      const normalizedType = String(typeValue)
+      if (normalizedType.length === 0) {
+        continue
+      }
+      const refKey = `${normalizedType}::${String(idValue)}`
+      let owners = entitiesByRef.get(refKey)
+      if (!owners) {
+        owners = []
+        entitiesByRef.set(refKey, owners)
+      }
+      owners.push(entity)
+      this.collectMorphId(idsByType, seenIdByType, normalizedType, idValue)
+    }
+
+    if (entitiesByRef.size === 0) {
+      return entities
+    }
+
+    let store: relationalStore.RdbStore
+    try {
+      store = this.getStore()
+    } catch (e) {
+      return entities
+    }
+
+    const typeEntries = Array.from(idsByType.entries())
+    for (let i = 0; i < typeEntries.length; i++) {
+      const typeValue = typeEntries[i][0]
+      const ids = typeEntries[i][1]
+      if (ids.length === 0) {
+        continue
+      }
+      const targetEntityName = relation.resolveTargetEntity(typeValue)
+      if (targetEntityName.length === 0) {
+        continue
+      }
+      const targetMetadata = MetadataStorage.getInstance().getEntityMetadata(targetEntityName)
+      if (targetMetadata === null) {
+        continue
+      }
+      const targetPkColumn = targetMetadata.getPrimaryKeyColumn()
+      if (targetPkColumn === null) {
+        continue
+      }
+      const targetMapper = new DataMapper(targetEntityName)
+      const batches = this.splitIntoBatches(ids, this.resolveInClauseLimit())
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+        const batch = batches[batchIndex]
+        const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
+        this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
+        const rdbValues: Array<relationalStore.ValueType> = []
+        for (let j = 0; j < batch.length; j++) {
+          rdbValues.push(this.toRdbValue(batch[j]))
+        }
+        try {
+          predicates.in(targetPkColumn.columnName, rdbValues)
+        } catch (e) {
+          continue
+        }
+
+        let resultSet: relationalStore.ResultSet | null = null
+        try {
+          resultSet = await store.query(predicates)
+        } catch (e) {
+          continue
+        }
+        try {
+          while (resultSet !== null && resultSet.goToNextRow()) {
+            const row = this.resultSetToRow(resultSet, targetMetadata)
+            const relatedEntity = targetMapper.fromResultSetRow(row)
+            const pkProp = relatedEntity.getProperty(targetPkColumn.propertyName)
+            if (pkProp === null || pkProp.value === null) {
+              continue
+            }
+            const refKey = `${typeValue}::${String(pkProp.value)}`
+            const owners = entitiesByRef.get(refKey)
+            if (!owners) {
+              continue
+            }
+            for (let ownerIndex = 0; ownerIndex < owners.length; ownerIndex++) {
+              owners[ownerIndex].setRelatedSingle(relation.propertyName, relatedEntity)
+            }
+          }
+        } finally {
+          this.closeResultSet(resultSet)
+        }
       }
     }
 

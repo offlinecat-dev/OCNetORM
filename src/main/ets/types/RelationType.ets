@@ -11,5 +11,7 @@ export enum RelationType {
   /** 多对一关系 */
   MANY_TO_ONE = 'MANY_TO_ONE',
   /** 多对多关系 */
-  MANY_TO_MANY = 'MANY_TO_MANY'
+  MANY_TO_MANY = 'MANY_TO_MANY',
+  /** 多态单值关系 */
+  MORPH_TO = 'MORPH_TO'
 }

@@ -45,6 +45,20 @@ export interface SoftDeleteSchema {
 }
 
 /**
+ * 多态单值关系配置
+ */
+export interface MorphToSchema {
+  /** 关联属性名 */
+  name: string
+  /** ID 字段（源实体字段） */
+  idColumn: string
+  /** 类型字段（源实体字段） */
+  typeColumn: string
+  /** 类型值到实体名映射 */
+  typeMap?: Record<string, string>
+}
+
+/**
  * 实体定义
  */
 export interface EntitySchema {
@@ -54,6 +68,8 @@ export interface EntitySchema {
   columns: Array<ColumnSchema>
   /** 软删除配置 */
   softDelete?: boolean | SoftDeleteSchema
+  /** 多态单值关系配置 */
+  morphTo?: MorphToSchema | Array<MorphToSchema>
   /** 查询作用域定义 */
   scopes?: Record<string, ScopeFunction>
 }
@@ -124,6 +140,10 @@ export function defineEntity(entityName: string, schema: EntitySchema): EntityMe
     }
   }
 
+  if (schema.morphTo !== undefined) {
+    registerMorphToRelations(storage, entityName, schema.morphTo)
+  }
+
   // 注册查询作用域
   if (schema.scopes !== undefined) {
     const scopeRegistry = ScopeRegistry.getInstance()
@@ -169,5 +189,35 @@ function normalizeSoftDelete(config: boolean | SoftDeleteSchema): Required<SoftD
   return {
     propertyName: config.propertyName ? config.propertyName : 'deletedAt',
     columnName: config.columnName ? config.columnName : 'deleted_at'
+  }
+}
+
+function registerMorphToRelations(
+  storage: MetadataStorage,
+  entityName: string,
+  morphToConfig: MorphToSchema | Array<MorphToSchema>
+): void {
+  const configs = morphToConfig instanceof Array ? morphToConfig : [morphToConfig]
+  for (let i = 0; i < configs.length; i++) {
+    const item = configs[i]
+    if (item.name.trim().length === 0) {
+      throw new Error('morphTo.name 不能为空')
+    }
+    if (item.idColumn.trim().length === 0) {
+      throw new Error(`morphTo(${item.name}) idColumn 不能为空`)
+    }
+    if (item.typeColumn.trim().length === 0) {
+      throw new Error(`morphTo(${item.name}) typeColumn 不能为空`)
+    }
+    if (storage.getRelation(entityName, item.name.trim()) !== null) {
+      continue
+    }
+    storage.registerMorphTo(
+      entityName,
+      item.name.trim(),
+      item.idColumn.trim(),
+      item.typeColumn.trim(),
+      item.typeMap ? item.typeMap : {}
+    )
   }
 }

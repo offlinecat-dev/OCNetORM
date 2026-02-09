@@ -7,6 +7,7 @@ import { EntityMetadata } from './EntityMetadata'
 import { ColumnMetadata } from './ColumnMetadata'
 import { RelationMetadata } from './RelationMetadata'
 import { ManyToManyMetadata } from './ManyToManyMetadata'
+import { MorphToMetadata } from './MorphToMetadata'
 import { DuplicateEntityError, EntityNotRegisteredError } from '../errors/MetadataError'
 import { RelationNotFoundError } from '../errors/RelationError'
 import { RelationType } from '../types/RelationType'
@@ -260,6 +261,24 @@ export class MetadataStorage {
     this.registerRelation(sourceEntity, metadata)
   }
 
+  registerMorphTo(
+    sourceEntity: string,
+    propertyName: string,
+    idColumn: string,
+    typeColumn: string,
+    typeMap: Record<string, string> = {}
+  ): void {
+    this.getEntityOrThrow(sourceEntity)
+    const metadata = new MorphToMetadata(
+      sourceEntity,
+      propertyName,
+      idColumn,
+      typeColumn,
+      typeMap
+    )
+    this.registerRelation(sourceEntity, metadata)
+  }
+
   /**
    * 获取多对多关联关系
    * @param entityName 实体名称
@@ -270,6 +289,14 @@ export class MetadataStorage {
     const relation = this.getRelation(entityName, propertyName)
     if (relation && relation.type === RelationType.MANY_TO_MANY) {
       return relation as ManyToManyMetadata
+    }
+    return null
+  }
+
+  getMorphToRelation(entityName: string, propertyName: string): MorphToMetadata | null {
+    const relation = this.getRelation(entityName, propertyName)
+    if (relation && relation.type === RelationType.MORPH_TO) {
+      return relation as MorphToMetadata
     }
     return null
   }

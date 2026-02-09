@@ -131,6 +131,26 @@ const setupTagEntity = (): void => {
   storage.registerColumn('Tag', nameColumn);
 };
 
+const setupCommentEntity = (): void => {
+  const storage = MetadataStorage.getInstance();
+  storage.registerEntity('Comment', 'comments');
+
+  const idColumn = new ColumnMetadata('id', 'id')
+    .setType(ColumnType.INTEGER)
+    .setPrimaryKey(true);
+  storage.registerColumn('Comment', idColumn);
+  storage.registerColumn('Comment', new ColumnMetadata('commentableId', 'commentable_id').setType(ColumnType.INTEGER));
+  storage.registerColumn('Comment', new ColumnMetadata('commentableType', 'commentable_type').setType(ColumnType.TEXT));
+};
+
+const setupMorphToRelation = (): void => {
+  const storage = MetadataStorage.getInstance();
+  storage.registerMorphTo('Comment', 'commentable', 'commentableId', 'commentableType', {
+    post: 'Post',
+    user: 'User'
+  });
+};
+
 const setupOneToManyRelation = (): void => {
   const storage = MetadataStorage.getInstance();
   const relation = new RelationMetadata(
@@ -530,6 +550,36 @@ export default function relationLoaderTest() {
 
       const result = await loader.loadRelation([entity], 'tags');
       expect(result.length).assertEqual(1);
+    });
+
+    it('loadRelation with MORPH_TO should set null when db is unavailable', 0, async () => {
+      setupCommentEntity();
+      setupPostEntity();
+      setupUserEntity();
+      setupMorphToRelation();
+
+      const loader = new RelationLoader('Comment');
+      const entity = new EntityData('Comment');
+      entity.addProperty('id', 1, 'number');
+      entity.addProperty('commentableId', 2, 'number');
+      entity.addProperty('commentableType', 'post', 'string');
+      await loader.loadRelation([entity], 'commentable');
+      expect(entity.getRelatedSingle('commentable')).assertEqual(null);
+    });
+
+    it('loadRelation with MORPH_TO should keep null for empty id or type', 0, async () => {
+      setupCommentEntity();
+      setupPostEntity();
+      setupUserEntity();
+      setupMorphToRelation();
+
+      const loader = new RelationLoader('Comment');
+      const entity = new EntityData('Comment');
+      entity.addProperty('id', 1, 'number');
+      entity.addProperty('commentableId', null, 'number');
+      entity.addProperty('commentableType', '', 'string');
+      await loader.loadRelation([entity], 'commentable');
+      expect(entity.getRelatedSingle('commentable')).assertEqual(null);
     });
   });
 }

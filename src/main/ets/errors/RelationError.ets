@@ -42,7 +42,7 @@ export class InvalidRelationTypeError extends OrmError {
   constructor(relationType: string) {
     const context = new ErrorContext()
     context.details = `无效的关系类型: ${relationType}`
-    super(`无效的关系类型: '${relationType}'，仅支持 ONE_TO_ONE、ONE_TO_MANY、MANY_TO_ONE 和 MANY_TO_MANY`, ERROR_INVALID_RELATION_TYPE, context)
+    super(`无效的关系类型: '${relationType}'，仅支持 ONE_TO_ONE、ONE_TO_MANY、MANY_TO_ONE、MANY_TO_MANY 和 MORPH_TO`, ERROR_INVALID_RELATION_TYPE, context)
     this.name = 'InvalidRelationTypeError'
   }
 }
