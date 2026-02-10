@@ -4,4 +4,6 @@
 /build
 /.cxx
 /.test
-/docs/docs-legacy
+/docs/*
+!/docs/developer-guide/
+!/docs/developer-guide/**
