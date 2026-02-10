@@ -40,6 +40,7 @@ import softDeleteTest from './Stage14SoftDelete/SoftDelete.test';
 import relationsTest from './Stage13Relations/Relations.test';
 import performanceTest from './Stage15Performance/Performance.test';
 import compatibilityTest from './Stage16Compatibility/Compatibility.test';
+import toolsTest from './Stage17Tools/Tools.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -84,4 +85,5 @@ export default function testsuite() {
   // relationsTest();    // 需要数据库
   performanceTest();
   compatibilityTest();
+  toolsTest();
 }

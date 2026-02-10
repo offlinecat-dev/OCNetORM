@@ -107,6 +107,8 @@ export {
   RelationType,
   // 实体钩子
   HookCallback,
+  HookName,
+  GlobalHookCallback,
   EntityHooks,
   // 列定义基类
   ColumnDef
@@ -116,6 +118,8 @@ export {
 export {
   // 列元数据
   ColumnMetadata,
+  // 索引元数据
+  IndexMetadata,
   // 实体元数据
   EntityMetadata,
   // 元数据存储
@@ -133,6 +137,8 @@ export {
   // ORM 上下文（依赖注入）
   OrmContext,
   OrmContextConfig,
+  OrmEvent,
+  OrmEventListener,
   // 统一初始化入口
   OCORMInit,
   OCORMInitOptions,
@@ -149,7 +155,8 @@ export {
   EntitySchema,
   ColumnSchema,
   SoftDeleteSchema,
-  MorphToSchema
+  MorphToSchema,
+  IndexSchema
 } from './src/main/ets/core/index'
 
 // 导出装饰器模块
@@ -184,6 +191,7 @@ export {
   SchemaInspector,
   ColumnInfo,
   TableInfo,
+  IndexInfo,
   SchemaDiffer,
   SchemaDiffResult,
   SchemaChange,
@@ -201,6 +209,26 @@ export {
   AutoMigrationOptions,
   SchemaMigrationExecutionResult
 } from './src/main/ets/schema/index'
+
+// 导出工具模块
+export {
+  Seeder,
+  SeederClass,
+  SeederEntry,
+  SeederExecutionItem,
+  SeederExecutionResult,
+  SeederManager,
+  FactoryNumberOptions,
+  FactoryRecord,
+  FactoryBuilder,
+  FactoryOverridesBuilder,
+  FactoryFaker,
+  EntityFactory,
+  defineFactory,
+  MigrationGeneratorOptions,
+  GeneratedMigration,
+  MigrationGenerator
+} from './src/main/ets/tools/index'
 
 // 导出映射层模块
 export {
