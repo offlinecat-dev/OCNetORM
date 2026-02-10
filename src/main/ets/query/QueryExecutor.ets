@@ -30,6 +30,7 @@ import { AggregateExecutor } from './AggregateExecutor'
 import { SubQueryExecutor } from './SubQueryExecutor'
 import { SubQueryRelationExecutor } from './SubQueryRelationExecutor'
 import { QueryCache } from './QueryCache'
+import { OrmContext } from '../core/OrmContext'
 
 class WhereClauseResult {
   whereClause: string
@@ -37,6 +38,16 @@ class WhereClauseResult {
 
   constructor(whereClause: string, args: Array<relationalStore.ValueType>) {
     this.whereClause = whereClause
+    this.args = args
+  }
+}
+
+class QuerySqlResult {
+  sql: string
+  args: Array<relationalStore.ValueType>
+
+  constructor(sql: string, args: Array<relationalStore.ValueType>) {
+    this.sql = sql
     this.args = args
   }
 }
@@ -55,6 +66,10 @@ class SubQueryExecutionContext {
     this.originalLimit = originalLimit
     this.originalOffset = originalOffset
   }
+}
+
+interface CloseableLike {
+  close: () => void
 }
 
 /**
@@ -161,6 +176,21 @@ export class QueryExecutor {
     }
   }
 
+  private closeLateResultSet(value: object | null): void {
+    if (value === null) {
+      return
+    }
+    const closable = value as CloseableLike
+    if (typeof closable.close !== 'function') {
+      return
+    }
+    try {
+      closable.close()
+    } catch (e) {
+      // ignore
+    }
+  }
+
   private getEffectiveQueryTimeoutMs(): number {
     const queryLevelTimeout = this.queryBuilder.getQueryTimeoutMs()
     if (queryLevelTimeout > 0) {
@@ -187,6 +217,9 @@ export class QueryExecutor {
 
       task.then((value: T) => {
         if (settled) {
+          if (value !== null && typeof value === 'object') {
+            this.closeLateResultSet(value as object)
+          }
           return
         }
         settled = true
@@ -203,11 +236,76 @@ export class QueryExecutor {
     })
   }
 
+  toSQL(): string {
+    return this.buildSelectSql().sql
+  }
+
+  getSqlArgs(): Array<relationalStore.ValueType> {
+    return this.buildSelectSql().args
+  }
+
+  async explain(): Promise<Array<EntityData>> {
+    await DatabaseManager.getInstance().acquireQuerySlot()
+    try {
+      const store = this.getStore()
+      const sqlResult = this.buildSelectSql()
+      const queryPlanSql = `EXPLAIN QUERY PLAN ${sqlResult.sql}`
+      const queryPlanRows = await this.queryExplainRows(store, queryPlanSql, sqlResult.args)
+      if (queryPlanRows.length > 0) {
+        return queryPlanRows
+      }
+      const explainSql = `EXPLAIN ${sqlResult.sql}`
+      const explainRows = await this.queryExplainRows(store, explainSql, sqlResult.args)
+      if (explainRows.length > 0) {
+        return explainRows
+      }
+      const fallbackRow = this.createExplainFallbackRow(sqlResult.sql, 'UNAVAILABLE')
+      return [fallbackRow]
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      throw new ExecutionError('EXPLAIN', errorMessage)
+    } finally {
+      DatabaseManager.getInstance().releaseQuerySlot()
+    }
+  }
+
+  private async queryExplainRows(
+    store: relationalStore.RdbStore,
+    sql: string,
+    args: Array<relationalStore.ValueType>
+  ): Promise<Array<EntityData>> {
+    let resultSet: relationalStore.ResultSet | null = null
+    const plans: Array<EntityData> = []
+    try {
+      resultSet = await this.withQueryTimeout(store.querySql(sql, args), 'EXPLAIN')
+      while (resultSet.goToNextRow()) {
+        plans.push(this.resultSetToDynamicEntity(resultSet, 'QueryExplain'))
+      }
+    } catch (e) {
+      return []
+    } finally {
+      this.closeResultSet(resultSet)
+    }
+    return plans
+  }
+
+  private createExplainFallbackRow(sql: string, status: string): EntityData {
+    const row = new EntityData('QueryExplain')
+    row.addProperty('status', status, 'string')
+    row.addProperty('sql', sql, 'string')
+    return row
+  }
+
+  private async emitSlowQuery(operation: string, sql: string, duration: number): Promise<void> {
+    await OrmContext.emitSlowQuery(operation, sql, duration, this.queryBuilder.getEntityName())
+  }
+
   /**
    * 执行查询并返回所有结果
    * @returns Promise<Array<EntityData>>
    */
   async get(): Promise<Array<EntityData>> {
+    const startTime = Date.now()
     const subQueryContext = this.createSubQueryExecutionContext()
     await DatabaseManager.getInstance().acquireQuerySlot()
     try {
@@ -215,6 +313,7 @@ export class QueryExecutor {
 
       await this.prepareSubQueries(subQueryContext, true)
       if (subQueryContext.noMatch) {
+        await this.emitSlowQuery('SELECT', this.toSQL(), Date.now() - startTime)
         return []
       }
 
@@ -229,7 +328,7 @@ export class QueryExecutor {
       }
 
       results = await this.applyRelationProcessing(results)
-
+      await this.emitSlowQuery('SELECT', this.toSQL(), Date.now() - startTime)
       return results
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -485,10 +584,69 @@ export class QueryExecutor {
   }
 
   /**
+   * 分块查询（大数据量场景）
+   * 按指定批大小逐批加载数据并回调处理，避免一次性加载全部数据
+   * @param batchSize 每批数量，必须大于 0
+   * @param callback 每批处理回调
+   */
+  async chunk(
+    batchSize: number,
+    callback: (entities: Array<EntityData>, chunkIndex: number) => Promise<void> | void
+  ): Promise<void> {
+    const normalizedBatchSize = Math.floor(batchSize)
+    if (normalizedBatchSize <= 0) {
+      throw new ExecutionError('CHUNK', 'chunk 大小必须大于 0')
+    }
+
+    const originalLimit = this.queryBuilder.getLimitValue()
+    const originalOffset = this.queryBuilder.getOffsetValue()
+    const hasLimit = originalLimit > 0
+    const baseOffset = originalOffset > 0 ? originalOffset : 0
+    let processed = 0
+    let chunkIndex = 0
+
+    try {
+      while (true) {
+        if (hasLimit && processed >= originalLimit) {
+          break
+        }
+
+        let currentLimit = normalizedBatchSize
+        if (hasLimit) {
+          const remaining = originalLimit - processed
+          if (remaining < currentLimit) {
+            currentLimit = remaining
+          }
+        }
+
+        this.queryBuilder.limit(currentLimit)
+        this.queryBuilder.offset(baseOffset + processed)
+
+        const batch = await this.get()
+        if (batch.length === 0) {
+          break
+        }
+
+        await callback(batch, chunkIndex)
+        chunkIndex += 1
+        processed += batch.length
+
+        if (batch.length < currentLimit) {
+          break
+        }
+      }
+    } finally {
+      this.queryBuilder.limit(originalLimit)
+      this.queryBuilder.offset(originalOffset)
+    }
+  }
+
+  /**
    * 执行查询并返回结果数量
    * @returns Promise<number>
    */
   async count(): Promise<number> {
+    const startTime = Date.now()
     const subQueryContext = this.createSubQueryExecutionContext()
     await DatabaseManager.getInstance().acquireQuerySlot()
     try {
@@ -496,14 +654,19 @@ export class QueryExecutor {
 
       await this.prepareSubQueries(subQueryContext, false)
       if (subQueryContext.noMatch) {
+        await this.emitSlowQuery('COUNT', this.toSQL(), Date.now() - startTime)
         return 0
       }
 
       if (subQueryContext.inMemoryFilterIds) {
-        return await this.countWithInMemoryFilter(store, subQueryContext.inMemoryFilterIds)
+        const total = await this.countWithInMemoryFilter(store, subQueryContext.inMemoryFilterIds)
+        await this.emitSlowQuery('COUNT', this.toSQL(), Date.now() - startTime)
+        return total
       }
 
-      return await this.countByPredicates(store)
+      const total = await this.countByPredicates(store)
+      await this.emitSlowQuery('COUNT', this.toSQL(), Date.now() - startTime)
+      return total
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError('COUNT', errorMessage)
@@ -520,6 +683,7 @@ export class QueryExecutor {
    * Requirements: 2.4, 2.5, 2.6
    */
   async getPaginated(): Promise<PaginatedResult> {
+    const startTime = Date.now()
     const subQueryContext = this.createSubQueryExecutionContext()
     await DatabaseManager.getInstance().acquireQuerySlot()
     try {
@@ -539,6 +703,7 @@ export class QueryExecutor {
 
       await this.prepareSubQueries(subQueryContext, true)
       if (subQueryContext.noMatch) {
+        await this.emitSlowQuery('SELECT', this.toSQL(), Date.now() - startTime)
         return PaginatedResult.create([], 0, page, pageSize)
       }
 
@@ -553,13 +718,14 @@ export class QueryExecutor {
         const totalPages = PaginatedResult.calculateTotalPages(total, pageSize)
 
         if (page > totalPages && totalPages > 0) {
+          await this.emitSlowQuery('SELECT', this.toSQL(), Date.now() - startTime)
           return PaginatedResult.create([], total, page, pageSize)
         }
 
         results = this.applyLimitOffset(results, pageSize, (page - 1) * pageSize)
 
         results = await this.applyRelationProcessing(results)
-
+        await this.emitSlowQuery('SELECT', this.toSQL(), Date.now() - startTime)
         return PaginatedResult.create(results, total, page, pageSize)
       }
 
@@ -571,6 +737,7 @@ export class QueryExecutor {
 
       // 如果请求的页码超出范围，返回空数据数组
       if (page > totalPages && totalPages > 0) {
+        await this.emitSlowQuery('SELECT', this.toSQL(), Date.now() - startTime)
         return PaginatedResult.create([], total, page, pageSize)
       }
 
@@ -579,7 +746,7 @@ export class QueryExecutor {
       let results = await this.queryEntities(store, predicates, selectedColumns)
 
       results = await this.applyRelationProcessing(results)
-
+      await this.emitSlowQuery('SELECT', this.toSQL(), Date.now() - startTime)
       return PaginatedResult.create(results, total, page, pageSize)
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -621,7 +788,9 @@ export class QueryExecutor {
       const sql = `UPDATE ${tableName} SET ${setClauses.join(', ')}${whereResult.whereClause}`
       const executeArgs = args.concat(whereResult.args)
       await store.executeSql(sql, executeArgs)
-      this.logger.logQuery(sql, Date.now() - startTime)
+      const duration = Date.now() - startTime
+      this.logger.logQuery(sql, duration)
+      await this.emitSlowQuery('UPDATE', sql, duration)
       QueryCache.getInstance().invalidateEntity(this.queryBuilder.getEntityName())
       return matchedRows
     } catch (error) {
@@ -647,7 +816,9 @@ export class QueryExecutor {
       const matchedRows = await this.countBySql(store, tableName, whereResult.whereClause, whereResult.args)
       const sql = `DELETE FROM ${tableName}${whereResult.whereClause}`
       await store.executeSql(sql, whereResult.args)
-      this.logger.logQuery(sql, Date.now() - startTime)
+      const duration = Date.now() - startTime
+      this.logger.logQuery(sql, duration)
+      await this.emitSlowQuery('DELETE', sql, duration)
       QueryCache.getInstance().invalidateEntity(this.queryBuilder.getEntityName())
       return matchedRows
     } catch (error) {
@@ -708,6 +879,35 @@ export class QueryExecutor {
     return row
   }
 
+  private resolveValueTypeName(value: ValueType): string {
+    if (value === null) {
+      return 'null'
+    }
+    if (value instanceof Uint8Array) {
+      return 'blob'
+    }
+    return typeof value
+  }
+
+  private resultSetToDynamicEntity(resultSet: relationalStore.ResultSet, entityName: string): EntityData {
+    const entity = new EntityData(entityName)
+    const columnNames = resultSet.columnNames
+    for (let i = 0; i < columnNames.length; i++) {
+      const columnName = columnNames[i]
+      let value: ValueType = null
+      try {
+        const columnIndex = resultSet.getColumnIndex(columnName)
+        if (!resultSet.isColumnNull(columnIndex)) {
+          value = ResultSetUtils.getValueByRuntimeType(resultSet, columnIndex) as ValueType
+        }
+      } catch (e) {
+        value = null
+      }
+      entity.addProperty(columnName, value, this.resolveValueTypeName(value))
+    }
+    return entity
+  }
+
   /**
    * 异步执行查询（使用 TaskPool 优化大数据量场景）
    * 当数据量超过阈值时，使用 TaskPool 在后台线程执行数据转换
@@ -725,6 +925,7 @@ export class QueryExecutor {
 
       await this.prepareSubQueries(subQueryContext, true)
       if (subQueryContext.noMatch) {
+        await this.emitSlowQuery('SELECT', this.toSQL(), Date.now() - startTime)
         return []
       }
 
@@ -762,7 +963,7 @@ export class QueryExecutor {
       }
 
       results = await this.applyRelationProcessing(results)
-
+      await this.emitSlowQuery('SELECT', this.toSQL(), Date.now() - startTime)
       return results
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -796,7 +997,7 @@ export class QueryExecutor {
       return
     }
 
-    if (subQueryIds.length > QueryExecutor.SUBQUERY_IN_LIMIT) {
+    if (subQueryIds.length > QueryExecutor.SUBQUERY_IN_LIMIT || this.hasOrConditionsInQuery()) {
       context.inMemoryFilterIds = this.buildIdSet(subQueryIds)
       if (adjustLimitOffsetWhenInMemory && (context.originalLimit > 0 || context.originalOffset > 0)) {
         this.queryBuilder.limit(0)
@@ -817,6 +1018,16 @@ export class QueryExecutor {
     if (context.subQueryFilterApplied) {
       this.restoreConditions(context.originalConditionCount)
     }
+  }
+
+  private hasOrConditionsInQuery(): boolean {
+    const conditions = this.queryBuilder.getConditions()
+    for (let i = 1; i < conditions.length; i++) {
+      if (conditions[i].logicalOperator === LogicalOperator.OR) {
+        return true
+      }
+    }
+    return false
   }
 
   private buildPredicatesOrThrow(operation: string): relationalStore.RdbPredicates {
@@ -1068,6 +1279,66 @@ export class QueryExecutor {
     // 使用 whereIn 添加 IN 条件
     this.queryBuilder.whereIn(pkColumn.columnName, sourceIds)
     return true
+  }
+
+  private buildSelectSql(): QuerySqlResult {
+    const tableName = this.escapeIdentifier(this.queryBuilder.getTableName())
+    const selectClause = this.buildSelectClause()
+    const whereResult = this.buildWhereClause(this.queryBuilder.getAllConditions())
+    const groupByClause = this.buildGroupByClause()
+    const orderByClause = this.buildOrderByClause()
+    const limit = this.queryBuilder.getLimitValue()
+    const offset = this.queryBuilder.getOffsetValue()
+    let sql = `SELECT ${selectClause} FROM ${tableName}${whereResult.whereClause}${groupByClause}`
+    const havingClause = this.queryBuilder.getHavingClause()
+    if (havingClause.length > 0) {
+      sql += ` HAVING ${havingClause}`
+      const havingArgs = this.queryBuilder.getHavingArgs()
+      for (let i = 0; i < havingArgs.length; i++) {
+        whereResult.args.push(this.toRdbValue(havingArgs[i]))
+      }
+    }
+    sql += orderByClause
+    if (limit > 0) {
+      sql += ` LIMIT ${limit}`
+    }
+    if (offset > 0) {
+      sql += ` OFFSET ${offset}`
+    }
+    return new QuerySqlResult(sql, whereResult.args)
+  }
+
+  private buildSelectClause(): string {
+    if (this.queryBuilder.hasSelectRaw()) {
+      const expressions = this.queryBuilder.getSelectRawExpressions()
+      return expressions.join(', ')
+    }
+    const selectedColumns = this.queryBuilder.getSelectedColumns()
+    if (selectedColumns.length === 0) {
+      return '*'
+    }
+    const escapedColumns: Array<string> = []
+    for (let i = 0; i < selectedColumns.length; i++) {
+      escapedColumns.push(this.escapeIdentifier(selectedColumns[i]))
+    }
+    return escapedColumns.join(', ')
+  }
+
+  private buildGroupByClause(): string {
+    const groupByColumns = this.queryBuilder.getGroupByColumns()
+    if (groupByColumns.length === 0) {
+      return ''
+    }
+    return ` GROUP BY ${groupByColumns.map((column) => this.escapeIdentifier(column)).join(', ')}`
+  }
+
+  private buildOrderByClause(): string {
+    const orderByColumns = this.queryBuilder.getOrderByColumns()
+    if (orderByColumns.length === 0) {
+      return ''
+    }
+    const parts = orderByColumns.map((orderBy) => `${this.escapeIdentifier(orderBy.column)} ${orderBy.direction}`)
+    return ` ORDER BY ${parts.join(', ')}`
   }
 
 

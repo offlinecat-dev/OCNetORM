@@ -25,6 +25,7 @@ export class TransactionManager {
   async transaction(action: TransactionAction): Promise<TransactionResult> {
     let store: relationalStore.RdbStore
     let committed = false
+    let transactionStarted = false
     try {
       store = this.getStore()
     } catch (e) {
@@ -34,6 +35,7 @@ export class TransactionManager {
     }
     try {
       store.beginTransaction()
+      transactionStarted = true
       this.logger.logTransaction('BEGIN')
       await action()
       store.commit()
@@ -41,7 +43,7 @@ export class TransactionManager {
       this.logger.logTransaction('COMMIT')
       return TransactionResult.createSuccess()
     } catch (error) {
-      if (!committed) {
+      if (!committed && transactionStarted) {
         try {
           store.rollBack()
           this.logger.logTransaction('ROLLBACK')
@@ -94,6 +96,10 @@ export class TransactionManager {
           clearTimeout(timeoutId)
         }
         lastError = error instanceof Error ? error : new Error(String(error))
+        if (isTimedOut) {
+          this.logger.logError(`事务超时，停止重试: ${lastError.message}`)
+          break
+        }
         if (attempts < maxAttempts) {
           this.logger.logInfo(`事务执行失败，${options.retryDelay}ms 后重试 (${attempts}/${maxAttempts})`)
           await this.delay(options.retryDelay)
@@ -112,7 +118,9 @@ export class TransactionManager {
   ): Promise<TransactionResult> {
     let store: relationalStore.RdbStore
     let committed = false
+    let transactionStarted = false
     let isolationApplied = false
+    let readOnlyApplied = false
     try {
       store = this.getStore()
     } catch (e) {
@@ -121,10 +129,13 @@ export class TransactionManager {
       throw new TransactionRollbackError(`获取数据库连接失败: ${errorMessage}`)
     }
     try {
-      await this.applyIsolationLevel(store, options.isolation)
-      isolationApplied = true
+      isolationApplied = await this.applyIsolationLevel(store, options.isolation)
       store.beginTransaction()
+      transactionStarted = true
       this.logger.logTransaction(options.readOnly ? 'BEGIN (READ ONLY)' : 'BEGIN')
+      if (options.readOnly) {
+        readOnlyApplied = await this.applyReadOnlyMode(store, true)
+      }
       if (timeoutState?.timedOut) {
         throw new TransactionRollbackError(`事务超时 (${options.timeout}ms)`)
       }
@@ -140,7 +151,7 @@ export class TransactionManager {
       this.logger.logTransaction('COMMIT')
       return TransactionResult.createSuccess()
     } catch (error) {
-      if (!committed) {
+      if (!committed && transactionStarted) {
         try {
           store.rollBack()
           this.logger.logTransaction('ROLLBACK')
@@ -158,20 +169,43 @@ export class TransactionManager {
       if (timeoutState) {
         timeoutState.finished = true
       }
-      await this.resetTransactionOptions(store, isolationApplied)
+      await this.resetTransactionOptions(store, isolationApplied, readOnlyApplied)
     }
   }
 
-  private async applyIsolationLevel(store: relationalStore.RdbStore, isolation: IsolationLevel): Promise<void> {
+  private async applyIsolationLevel(store: relationalStore.RdbStore, isolation: IsolationLevel): Promise<boolean> {
     try {
       await store.executeSql(isolation === IsolationLevel.READ_UNCOMMITTED ? 'PRAGMA read_uncommitted = 1' : 'PRAGMA read_uncommitted = 0')
+      return true
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : String(e)
-      throw new TransactionRollbackError(`设置事务隔离级别失败: ${errorMessage}`)
+      this.logger.logError(`设置事务隔离级别失败，已降级为兼容模式: ${errorMessage}`)
+      return false
     }
   }
 
-  private async resetTransactionOptions(store: relationalStore.RdbStore, isolationApplied: boolean): Promise<void> {
+  private async applyReadOnlyMode(store: relationalStore.RdbStore, readOnly: boolean): Promise<boolean> {
+    try {
+      await store.executeSql(readOnly ? 'PRAGMA query_only = 1' : 'PRAGMA query_only = 0')
+      return true
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : String(e)
+      this.logger.logError(`设置事务只读模式失败，已降级为兼容模式: ${errorMessage}`)
+      return false
+    }
+  }
+
+  private async resetTransactionOptions(
+    store: relationalStore.RdbStore,
+    isolationApplied: boolean,
+    readOnlyApplied: boolean
+  ): Promise<void> {
+    if (readOnlyApplied) {
+      const restored = await this.applyReadOnlyMode(store, false)
+      if (!restored) {
+        this.logger.logError('恢复事务只读模式失败')
+      }
+    }
     if (isolationApplied) {
       try {
         await this.applyIsolationLevel(store, IsolationLevel.READ_COMMITTED)

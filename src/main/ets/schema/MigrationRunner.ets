@@ -35,11 +35,10 @@ export class MigrationRunner {
     try {
       store.beginTransaction()
       transactionActive = true
-      const failure = targetVersion > currentVersion
-        ? await this.runUpgrade(store, currentVersion, targetVersion, results, successLogs)
-        : await this.runRollback(store, currentVersion, targetVersion, results, successLogs)
-      if (failure !== null) {
-        return failure
+      if (targetVersion > currentVersion) {
+        await this.runUpgrade(store, currentVersion, targetVersion, results, successLogs)
+      } else {
+        await this.runRollback(store, currentVersion, targetVersion, results, successLogs)
       }
       await this.versionStore.updateVersionInDb(store, targetVersion)
       store.commit()
@@ -71,7 +70,7 @@ export class MigrationRunner {
     targetVersion: number,
     results: Array<MigrationResult>,
     successLogs: Array<MigrationLogRecord>
-  ): Promise<MigrationExecutionResult | null> {
+  ): Promise<void> {
     const pending = this.registry.getPendingMigrations(currentVersion)
     for (let i = 0; i < pending.length; i++) {
       const migration = pending[i]
@@ -82,12 +81,8 @@ export class MigrationRunner {
       if (failed === null) {
         continue
       }
-      return MigrationExecutionResult.createFailure(
-        currentVersion, targetVersion, currentVersion, results,
-        `迁移 v${migration.version} 失败: ${failed}`
-      )
+      throw new Error(`迁移 v${migration.version} 失败: ${failed}`)
     }
-    return null
   }
 
   private async runRollback(
@@ -96,7 +91,7 @@ export class MigrationRunner {
     targetVersion: number,
     results: Array<MigrationResult>,
     successLogs: Array<MigrationLogRecord>
-  ): Promise<MigrationExecutionResult | null> {
+  ): Promise<void> {
     const rollback = this.registry.getRollbackMigrations(currentVersion, targetVersion)
     for (let i = 0; i < rollback.length; i++) {
       const migration = rollback[i]
@@ -104,12 +99,7 @@ export class MigrationRunner {
       if (failed === null) {
         continue
       }
-      return MigrationExecutionResult.createFailure(
-        currentVersion, targetVersion, currentVersion, results,
-        `回滚 v${migration.version} 失败: ${failed}`
-      )
+      throw new Error(`回滚 v${migration.version} 失败: ${failed}`)
     }
-    return null
   }
 }
-

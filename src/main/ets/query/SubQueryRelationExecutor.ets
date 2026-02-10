@@ -118,22 +118,9 @@ export class SubQueryRelationExecutor {
       return []
     }
     const predicates = new relationalStore.RdbPredicates(targetTableName)
-    this.applySoftDeleteToPredicates(predicates, targetMetadata)
-
-    // 应用子查询条件
-    const conditions = subQuery.getConditions()
-    for (let i = 0; i < conditions.length; i++) {
-      const cond = conditions[i]
-      if (i > 0) {
-        if (cond.logicalOperator === LogicalOperator.OR) {
-          predicates.or()
-        } else {
-          predicates.and()
-        }
-      }
-      if (!this.applyConditionToPredicates(predicates, cond, targetMetadata, targetEntityName)) {
-        return []
-      }
+    const effectiveConditions = this.buildConditionsWithSoftDelete(targetMetadata, subQuery.getConditions())
+    if (!this.applyConditionsToPredicates(predicates, effectiveConditions, targetMetadata, targetEntityName)) {
+      return []
     }
 
     // 执行查询，只获取外键列
@@ -146,14 +133,15 @@ export class SubQueryRelationExecutor {
     }
 
     // 收集源实体 ID（去重）
-    const sourceIds: Set<string> = new Set()
+    const sourceIds: Map<string, ValueType> = new Map()
     try {
       while (resultSet !== null && resultSet.goToNextRow()) {
         const columnIndex = resultSet.getColumnIndex(inverseKey)
         if (!resultSet.isColumnNull(columnIndex)) {
           const fkValue = ResultSetUtils.getValueByRuntimeType(resultSet, columnIndex)
-          if (fkValue !== null) {
-            sourceIds.add(String(fkValue))
+          const normalized = this.normalizeIdValue(fkValue)
+          if (normalized !== null) {
+            this.collectUniqueId(sourceIds, normalized)
           }
         }
       }
@@ -163,18 +151,7 @@ export class SubQueryRelationExecutor {
       this.options.closeResultSet(resultSet)
     }
 
-    // 转换为数组
-    const result: Array<ValueType> = []
-    sourceIds.forEach((idStr: string) => {
-      const numId = Number(idStr)
-      if (!isNaN(numId)) {
-        result.push(numId)
-      } else {
-        result.push(idStr)
-      }
-    })
-
-    return result
+    return this.toValueArray(sourceIds)
   }
 
   /**
@@ -203,21 +180,14 @@ export class SubQueryRelationExecutor {
 
     // 第一步：查询目标表，获取符合条件的目标实体主键
     const targetPredicates = new relationalStore.RdbPredicates(targetEntityMetadata.tableName)
-    this.applySoftDeleteToPredicates(targetPredicates, targetEntityMetadata)
-
-    const conditions = subQuery.getConditions()
-    for (let i = 0; i < conditions.length; i++) {
-      const cond = conditions[i]
-      if (i > 0) {
-        if (cond.logicalOperator === LogicalOperator.OR) {
-          targetPredicates.or()
-        } else {
-          targetPredicates.and()
-        }
-      }
-      if (!this.applyConditionToPredicates(targetPredicates, cond, targetEntityMetadata, targetEntityName)) {
-        return []
-      }
+    const effectiveConditions = this.buildConditionsWithSoftDelete(targetEntityMetadata, subQuery.getConditions())
+    if (!this.applyConditionsToPredicates(
+      targetPredicates,
+      effectiveConditions,
+      targetEntityMetadata,
+      targetEntityName
+    )) {
+      return []
     }
 
     let targetResultSet: relationalStore.ResultSet | null = null
@@ -257,7 +227,13 @@ export class SubQueryRelationExecutor {
     }
 
     const sourcePredicates = new relationalStore.RdbPredicates(sourceMetadata.tableName)
-    this.applySoftDeleteToPredicates(sourcePredicates, sourceMetadata)
+    const sourceConditions = this.buildConditionsWithSoftDelete(sourceMetadata, [])
+    if (!this.applyConditionsToPredicates(sourcePredicates, sourceConditions, sourceMetadata, sourceEntityName)) {
+      return []
+    }
+    if (sourceConditions.length > 0) {
+      sourcePredicates.and()
+    }
     sourcePredicates.in(inverseKey, targetPkValues)
 
     let sourceResultSet: relationalStore.ResultSet | null = null
@@ -313,21 +289,14 @@ export class SubQueryRelationExecutor {
 
     // 第一步：查询目标表，获取符合条件的目标实体主键
     const targetPredicates = new relationalStore.RdbPredicates(targetTableName)
-    this.applySoftDeleteToPredicates(targetPredicates, targetEntityMetadata)
-
-    const conditions = subQuery.getConditions()
-    for (let i = 0; i < conditions.length; i++) {
-      const cond = conditions[i]
-      if (i > 0) {
-        if (cond.logicalOperator === LogicalOperator.OR) {
-          targetPredicates.or()
-        } else {
-          targetPredicates.and()
-        }
-      }
-      if (!this.applyConditionToPredicates(targetPredicates, cond, targetEntityMetadata, relation.targetEntity)) {
-        return []
-      }
+    const effectiveConditions = this.buildConditionsWithSoftDelete(targetEntityMetadata, subQuery.getConditions())
+    if (!this.applyConditionsToPredicates(
+      targetPredicates,
+      effectiveConditions,
+      targetEntityMetadata,
+      relation.targetEntity
+    )) {
+      return []
     }
 
     let targetResultSet: relationalStore.ResultSet | null = null
@@ -344,8 +313,10 @@ export class SubQueryRelationExecutor {
       while (targetResultSet !== null && targetResultSet.goToNextRow()) {
         const columnIndex = targetResultSet.getColumnIndex(targetPkColumn.columnName)
         if (!targetResultSet.isColumnNull(columnIndex)) {
-          const pkValue = targetResultSet.getLong(columnIndex)
-          targetPkValues.push(pkValue)
+          const pkValue = ResultSetUtils.getValueByRuntimeType(targetResultSet, columnIndex)
+          if (pkValue !== null && !(pkValue instanceof Uint8Array)) {
+            targetPkValues.push(pkValue as relationalStore.ValueType)
+          }
         }
       }
     } catch (e) {
@@ -371,14 +342,15 @@ export class SubQueryRelationExecutor {
     }
 
     // 收集源实体 ID（去重）
-    const sourceIds: Set<string> = new Set()
+    const sourceIds: Map<string, ValueType> = new Map()
     try {
       while (joinResultSet !== null && joinResultSet.goToNextRow()) {
         const columnIndex = joinResultSet.getColumnIndex(relation.joinSourceKey)
         if (!joinResultSet.isColumnNull(columnIndex)) {
           const sourceId = ResultSetUtils.getValueByRuntimeType(joinResultSet, columnIndex)
-          if (sourceId !== null) {
-            sourceIds.add(String(sourceId))
+          const normalized = this.normalizeIdValue(sourceId)
+          if (normalized !== null) {
+            this.collectUniqueId(sourceIds, normalized)
           }
         }
       }
@@ -388,26 +360,148 @@ export class SubQueryRelationExecutor {
       this.options.closeResultSet(joinResultSet)
     }
 
-    // 转换为数组
-    const result: Array<ValueType> = []
-    sourceIds.forEach((idStr: string) => {
-      const numId = Number(idStr)
-      if (!isNaN(numId)) {
-        result.push(numId)
-      } else {
-        result.push(idStr)
-      }
-    })
+    return this.toValueArray(sourceIds)
+  }
 
+  private normalizeIdValue(rawValue: ValueType | relationalStore.ValueType | null): ValueType {
+    if (rawValue === null || rawValue === undefined) {
+      return null
+    }
+    if (rawValue instanceof Uint8Array) {
+      return null
+    }
+    return rawValue as ValueType
+  }
+
+  private collectUniqueId(values: Map<string, ValueType>, id: ValueType): void {
+    const key = this.toIdKey(id)
+    if (!values.has(key)) {
+      values.set(key, id)
+    }
+  }
+
+  private toValueArray(values: Map<string, ValueType>): Array<ValueType> {
+    const result: Array<ValueType> = []
+    values.forEach((value) => {
+      result.push(value)
+    })
     return result
   }
 
-  private applySoftDeleteToPredicates(predicates: relationalStore.RdbPredicates, metadata: EntityMetadata): void {
-    if (!metadata.isSoftDeleteEnabled()) {
-      return
+  private toIdKey(id: ValueType): string {
+    if (typeof id === 'number') {
+      return `n:${id}`
     }
-    const deletedAtColumn = metadata.getDeletedAtColumn()
-    predicates.isNull(deletedAtColumn)
+    if (typeof id === 'boolean') {
+      return `b:${id ? 1 : 0}`
+    }
+    return `s:${String(id)}`
+  }
+
+  private applyConditionsToPredicates(
+    predicates: relationalStore.RdbPredicates,
+    conditions: Array<WhereCondition>,
+    metadata: EntityMetadata,
+    entityName: string
+  ): boolean {
+    for (let i = 0; i < conditions.length; i++) {
+      const condition = conditions[i]
+      if (i > 0) {
+        if (condition.logicalOperator === LogicalOperator.OR) {
+          predicates.or()
+        } else {
+          predicates.and()
+        }
+      }
+      if (!this.applyConditionToPredicates(predicates, condition, metadata, entityName)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  private createSoftDeleteCondition(metadata: EntityMetadata): WhereCondition {
+    const condition = new WhereCondition()
+    condition.column = metadata.getDeletedAtColumn()
+    condition.operator = ConditionOperator.IS_NULL
+    condition.value = null
+    condition.logicalOperator = LogicalOperator.AND
+    return condition
+  }
+
+  private buildConditionsWithSoftDelete(
+    metadata: EntityMetadata,
+    conditions: Array<WhereCondition>
+  ): Array<WhereCondition> {
+    const cloned = this.cloneWhereConditions(conditions)
+    if (!metadata.isSoftDeleteEnabled()) {
+      return cloned
+    }
+    const softDeleteCondition = this.createSoftDeleteCondition(metadata)
+    if (cloned.length === 0) {
+      return [softDeleteCondition]
+    }
+    if (!this.hasOrConditions(cloned)) {
+      const merged: Array<WhereCondition> = [softDeleteCondition]
+      for (let i = 0; i < cloned.length; i++) {
+        merged.push(cloned[i])
+      }
+      return merged
+    }
+    return this.mergeSoftDeleteWithOrConditions(cloned, softDeleteCondition)
+  }
+
+  private hasOrConditions(conditions: Array<WhereCondition>): boolean {
+    for (let i = 1; i < conditions.length; i++) {
+      if (conditions[i].logicalOperator === LogicalOperator.OR) {
+        return true
+      }
+    }
+    return false
+  }
+
+  private cloneWhereConditions(conditions: Array<WhereCondition>): Array<WhereCondition> {
+    const cloned: Array<WhereCondition> = []
+    for (let i = 0; i < conditions.length; i++) {
+      cloned.push(this.cloneWhereCondition(conditions[i]))
+    }
+    return cloned
+  }
+
+  private cloneWhereCondition(condition: WhereCondition): WhereCondition {
+    const cloned = new WhereCondition()
+    cloned.column = condition.column
+    cloned.operator = condition.operator
+    cloned.value = condition.value
+    cloned.secondValue = condition.secondValue
+    cloned.logicalOperator = condition.logicalOperator
+    return cloned
+  }
+
+  private mergeSoftDeleteWithOrConditions(
+    conditions: Array<WhereCondition>,
+    softDeleteCondition: WhereCondition
+  ): Array<WhereCondition> {
+    const merged: Array<WhereCondition> = []
+    let segmentStart = 0
+    for (let i = 1; i <= conditions.length; i++) {
+      const isSegmentEnd = i === conditions.length || conditions[i].logicalOperator === LogicalOperator.OR
+      if (!isSegmentEnd) {
+        continue
+      }
+      const clonedSoftDelete = this.cloneWhereCondition(softDeleteCondition)
+      clonedSoftDelete.logicalOperator = segmentStart === 0 ? LogicalOperator.AND : LogicalOperator.OR
+      merged.push(clonedSoftDelete)
+      for (let j = segmentStart; j < i; j++) {
+        const clonedCondition = this.cloneWhereCondition(conditions[j])
+        if (j === segmentStart) {
+          clonedCondition.logicalOperator = LogicalOperator.AND
+        }
+        merged.push(clonedCondition)
+      }
+      segmentStart = i
+    }
+    return merged
   }
 
   private applyConditionToPredicates(

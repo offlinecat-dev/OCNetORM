@@ -16,6 +16,7 @@ import { PaginationParams } from './PaginationParams'
 import { SubQuery, SubQueryCallback } from './SubQuery'
 import { QueryExecutor } from './QueryExecutor'
 import { RelationQueryOptions, RelationCountOption } from './RelationQueryOptions'
+import { EntityData } from '../mapping/EntityData'
 
 export class BatchUpdateValues {
   private values: Map<string, ValueType> = new Map()
@@ -450,11 +451,6 @@ export class QueryBuilder {
       case ConditionOperator.GREATER_EQUAL:
       case ConditionOperator.LESS_EQUAL:
       case ConditionOperator.LIKE:
-      case ConditionOperator.IN:
-      case ConditionOperator.NOT_IN:
-      case ConditionOperator.BETWEEN:
-      case ConditionOperator.IS_NULL:
-      case ConditionOperator.IS_NOT_NULL:
         return true
       default:
         return false
@@ -702,7 +698,7 @@ export class QueryBuilder {
   }
 
   hasRelationQueryOptions(): boolean {
-    return this.relationQueryOptions.size > 0
+    return this.relationQueryOptions.size > 0 || this.morphRelationQueryCallbacks.size > 0
   }
 
   /**
@@ -890,6 +886,20 @@ export class QueryBuilder {
   }
 
   /**
+   * 分块查询（大数据量场景）
+   * 按指定批大小逐批加载并通过回调处理
+   * @param batchSize 每批数量，必须大于 0
+   * @param callback 每批处理回调
+   */
+  async chunk(
+    batchSize: number,
+    callback: (entities: Array<EntityData>, chunkIndex: number) => Promise<void> | void
+  ): Promise<void> {
+    const executor = new QueryExecutor(this)
+    await executor.chunk(batchSize, callback)
+  }
+
+  /**
    * 设置查询超时（毫秒）
    * @param timeoutMs 超时时间，<= 0 表示禁用
    * @returns 当前实例（支持链式调用）
@@ -984,6 +994,7 @@ export class QueryBuilder {
     this.havingArgs = []
     this.selectRawExpressions = []
     this.relationQueryOptions.clear()
+    this.morphRelationQueryCallbacks.clear()
     this.relationCountOptions = []
     return this
   }
@@ -1174,6 +1185,16 @@ export class QueryBuilder {
       result = result.scope(scopeNames[i])
     }
     return result
+  }
+
+  toSQL(): string {
+    const executor = new QueryExecutor(this)
+    return executor.toSQL()
+  }
+
+  async explain(): Promise<Array<EntityData>> {
+    const executor = new QueryExecutor(this)
+    return await executor.explain()
   }
 
   /**

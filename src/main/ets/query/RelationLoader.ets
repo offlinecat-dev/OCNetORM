@@ -1439,12 +1439,107 @@ export class RelationLoader {
     metadata: EntityMetadata,
     options: RelationQueryOptions | null
   ): void {
-    this.applySoftDeleteToPredicates(predicates, metadata, options)
-    if (options === null) {
-      return
+    const conditions = this.buildEffectiveRelationConditions(metadata, options)
+    if (conditions.length > 0) {
+      this.applyWhereConditionsToPredicates(predicates, conditions)
     }
-    this.applyWhereConditionsToPredicates(predicates, options.conditions)
-    this.applyOrderByToPredicates(predicates, options)
+    if (options !== null) {
+      this.applyOrderByToPredicates(predicates, options)
+    }
+  }
+
+  private buildEffectiveRelationConditions(
+    metadata: EntityMetadata,
+    options: RelationQueryOptions | null
+  ): Array<WhereCondition> {
+    const relationConditions = options !== null
+      ? this.cloneWhereConditions(options.conditions)
+      : []
+    if (!metadata.isSoftDeleteEnabled()) {
+      return relationConditions
+    }
+    if (options !== null && options.includeDeleted) {
+      return relationConditions
+    }
+    const softDeleteCondition = this.createSoftDeleteCondition(metadata, options)
+    if (relationConditions.length === 0) {
+      return [softDeleteCondition]
+    }
+    if (!this.hasOrLogicalCondition(relationConditions)) {
+      const merged: Array<WhereCondition> = [softDeleteCondition]
+      for (let i = 0; i < relationConditions.length; i++) {
+        merged.push(relationConditions[i])
+      }
+      return merged
+    }
+    return this.mergeSoftDeleteWithOrConditions(relationConditions, softDeleteCondition)
+  }
+
+  private hasOrLogicalCondition(conditions: Array<WhereCondition>): boolean {
+    for (let i = 1; i < conditions.length; i++) {
+      if (conditions[i].logicalOperator === LogicalOperator.OR) {
+        return true
+      }
+    }
+    return false
+  }
+
+  private createSoftDeleteCondition(
+    metadata: EntityMetadata,
+    options: RelationQueryOptions | null
+  ): WhereCondition {
+    const condition = new WhereCondition()
+    condition.column = metadata.getDeletedAtColumn()
+    condition.operator = options !== null && options.onlyDeleted
+      ? ConditionOperator.IS_NOT_NULL
+      : ConditionOperator.IS_NULL
+    condition.value = null
+    condition.logicalOperator = LogicalOperator.AND
+    return condition
+  }
+
+  private cloneWhereConditions(conditions: Array<WhereCondition>): Array<WhereCondition> {
+    const cloned: Array<WhereCondition> = []
+    for (let i = 0; i < conditions.length; i++) {
+      cloned.push(this.cloneWhereCondition(conditions[i]))
+    }
+    return cloned
+  }
+
+  private cloneWhereCondition(condition: WhereCondition): WhereCondition {
+    const cloned = new WhereCondition()
+    cloned.column = condition.column
+    cloned.operator = condition.operator
+    cloned.value = condition.value
+    cloned.secondValue = condition.secondValue
+    cloned.logicalOperator = condition.logicalOperator
+    return cloned
+  }
+
+  private mergeSoftDeleteWithOrConditions(
+    conditions: Array<WhereCondition>,
+    softDeleteCondition: WhereCondition
+  ): Array<WhereCondition> {
+    const merged: Array<WhereCondition> = []
+    let segmentStart = 0
+    for (let i = 1; i <= conditions.length; i++) {
+      const isSegmentEnd = i === conditions.length || conditions[i].logicalOperator === LogicalOperator.OR
+      if (!isSegmentEnd) {
+        continue
+      }
+      const clonedSoftDelete = this.cloneWhereCondition(softDeleteCondition)
+      clonedSoftDelete.logicalOperator = segmentStart === 0 ? LogicalOperator.AND : LogicalOperator.OR
+      merged.push(clonedSoftDelete)
+      for (let j = segmentStart; j < i; j++) {
+        const clonedCondition = this.cloneWhereCondition(conditions[j])
+        if (j === segmentStart) {
+          clonedCondition.logicalOperator = LogicalOperator.AND
+        }
+        merged.push(clonedCondition)
+      }
+      segmentStart = i
+    }
+    return merged
   }
 
   private applyOrderByToPredicates(

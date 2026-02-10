@@ -37,8 +37,6 @@ export class MigrationStepExecutor {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       results.push(new MigrationResult(migration.version, false, Date.now() - startTime, errorMessage))
-      const rollbackError = this.rollbackSafely(store)
-      const finalError = this.mergeFailureMessage(errorMessage, rollbackError)
       await this.logService.safeLog(store, {
         version: migration.version,
         name: migration.description,
@@ -46,9 +44,9 @@ export class MigrationStepExecutor {
         direction,
         summary: `${direction === MigrationDirection.UP ? '迁移' : '回滚'} v${migration.version} 执行失败`,
         success: false,
-        errorMessage: finalError
+        errorMessage
       })
-      return finalError
+      return errorMessage
     }
   }
 
@@ -65,4 +63,3 @@ export class MigrationStepExecutor {
     return rollbackErrorMessage ? `${errorMessage}; 回滚失败: ${rollbackErrorMessage}` : errorMessage
   }
 }
-
