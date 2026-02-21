@@ -62,7 +62,7 @@ export class DatabaseInitializer {
     const config = new DatabaseConfig(
       'app_database.db',                    // 数据库文件名
       relationalStore.SecurityLevel.S1,     // 安全级别
-      false,                                // 是否加密
+      true,                                 // 是否加密（3.0 默认开启）
       true,                                 // 启用日志
       LogLevel.DEBUG                        // 日志级别
     )

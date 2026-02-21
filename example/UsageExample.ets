@@ -140,7 +140,7 @@ async function initializeORM(context: Context): Promise<void> {
   const config = new DatabaseConfig(
     'example.db',
     relationalStore.SecurityLevel.S1,
-    false,
+    true,
     true,
     LogLevel.DEBUG
   )
@@ -419,9 +419,16 @@ async function transactionWithOptionsExample(): Promise<void> {
   const retryOptions = TransactionOptions.withRetry(3, 200)
   console.info(`重试次数: ${retryOptions.retries}, 重试延迟: ${retryOptions.retryDelay}ms`)
 
+  // 3.0 起 serializable() 为 fail-fast：创建即抛错
+  try {
+    TransactionOptions.serializable()
+  } catch (error) {
+    console.info(`serializable() 预期失败: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
   // 自定义配置
   const txConfig = new TxOptionsConfig()
-  txConfig.isolation = IsolationLevel.SERIALIZABLE
+  txConfig.isolation = IsolationLevel.READ_COMMITTED
   txConfig.timeout = 5000
   txConfig.retries = 2
   txConfig.retryDelay = 100

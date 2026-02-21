@@ -126,7 +126,7 @@ struct UsageExamplePage {
       const config = new DatabaseConfig(
         'ocorm_example.db',
         relationalStore.SecurityLevel.S1,
-        false,
+        true,
         true,
         LogLevel.DEBUG
       )
