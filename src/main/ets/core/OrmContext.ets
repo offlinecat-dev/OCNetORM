@@ -8,6 +8,9 @@ import { MetadataStorage } from './MetadataStorage'
 import { DatabaseManager } from '../database/DatabaseManager'
 import { Logger } from '../logging/Logger'
 import { LogLevel } from '../logging/LogLevel'
+import { HooksProcessor } from './HooksProcessor'
+import { HookName, GlobalHookCallback } from '../types/EntityHooks'
+import { sanitizeSqlPreview } from '../errors/ErrorSanitizer'
 
 /**
  * ORM 上下文配置选项
@@ -23,7 +26,31 @@ export interface OrmContextConfig {
   enableLogging?: boolean
   /** 日志级别 */
   logLevel?: LogLevel
+  /** 慢查询阈值（毫秒），默认 1000 */
+  slowQueryThresholdMs?: number
 }
+
+export class OrmEvent {
+  eventName: string = ''
+  timestamp: number = 0
+  entityName: string = ''
+  operation: string = ''
+  sql: string = ''
+  duration: number = 0
+  threshold: number = 0
+  idText: string = ''
+  affectedRows: number = 0
+  isNew: boolean = false
+  softDelete: boolean = false
+  force: boolean = false
+
+  constructor(eventName: string) {
+    this.eventName = eventName
+    this.timestamp = Date.now()
+  }
+}
+
+export type OrmEventListener = (event: OrmEvent) => void | Promise<void>
 
 /**
  * ORM 上下文类
@@ -32,6 +59,10 @@ export interface OrmContextConfig {
 export class OrmContext {
   /** 单例实例 */
   private static instance: OrmContext | null = null
+  /** 全局事件监听器 */
+  private static eventListeners: Map<string, Array<OrmEventListener>> = new Map()
+  /** 慢查询阈值（毫秒） */
+  private static slowQueryThresholdMs: number = 1000
 
   /** 元数据存储实例 */
   private metadataStorage: MetadataStorage
@@ -90,8 +121,116 @@ export class OrmContext {
       const level = config.logLevel !== undefined ? config.logLevel : LogLevel.INFO
       context.logger.configure(enabled, level)
     }
+    if (config.slowQueryThresholdMs !== undefined) {
+      OrmContext.setSlowQueryThresholdMs(config.slowQueryThresholdMs)
+    }
 
     context.configured = true
+  }
+
+  static registerGlobalHook(hookName: HookName, callback: GlobalHookCallback): void {
+    HooksProcessor.getInstance().registerGlobalHook(hookName, callback)
+  }
+
+  static clearGlobalHooks(hookName?: HookName): void {
+    HooksProcessor.getInstance().clearGlobalHooks(hookName)
+  }
+
+  static setSlowQueryThresholdMs(thresholdMs: number): void {
+    OrmContext.slowQueryThresholdMs = thresholdMs >= 0 ? Math.floor(thresholdMs) : 1000
+  }
+
+  static getSlowQueryThresholdMs(): number {
+    return OrmContext.slowQueryThresholdMs
+  }
+
+  static on(eventName: string, listener: OrmEventListener): void {
+    const normalized = eventName.trim()
+    if (normalized.length === 0) {
+      return
+    }
+    let listeners = OrmContext.eventListeners.get(normalized)
+    if (listeners === undefined) {
+      listeners = []
+      OrmContext.eventListeners.set(normalized, listeners)
+    }
+    listeners.push(listener)
+  }
+
+  static off(eventName: string, listener: OrmEventListener): void {
+    const listeners = OrmContext.eventListeners.get(eventName.trim())
+    if (listeners === undefined) {
+      return
+    }
+    for (let i = listeners.length - 1; i >= 0; i--) {
+      if (listeners[i] === listener) {
+        listeners.splice(i, 1)
+      }
+    }
+  }
+
+  static once(eventName: string, listener: OrmEventListener): void {
+    const onceListener: OrmEventListener = async (event) => {
+      OrmContext.off(eventName, onceListener)
+      await listener(event)
+    }
+    OrmContext.on(eventName, onceListener)
+  }
+
+  static clearEventListeners(eventName?: string): void {
+    if (eventName !== undefined) {
+      OrmContext.eventListeners.delete(eventName.trim())
+      return
+    }
+    OrmContext.eventListeners.clear()
+  }
+
+  static async emit(eventName: string, event?: OrmEvent): Promise<void> {
+    const normalized = eventName.trim()
+    if (normalized.length === 0) {
+      return
+    }
+    const listeners = OrmContext.eventListeners.get(normalized)
+    if (listeners === undefined || listeners.length === 0) {
+      return
+    }
+    const payload = event !== undefined ? event : new OrmEvent(normalized)
+    if (payload.eventName.length === 0) {
+      payload.eventName = normalized
+    }
+    if (payload.timestamp <= 0) {
+      payload.timestamp = Date.now()
+    }
+    const snapshot = listeners.slice()
+    for (let i = 0; i < snapshot.length; i++) {
+      try {
+        const result = snapshot[i](payload)
+        if (result instanceof Promise) {
+          await result
+        }
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e)
+        Logger.getInstance().logError(`事件监听器执行失败: ${normalized}, ${message}`)
+      }
+    }
+  }
+
+  static async emitSlowQuery(
+    operation: string,
+    sql: string,
+    duration: number,
+    entityName: string = ''
+  ): Promise<void> {
+    if (duration <= OrmContext.slowQueryThresholdMs) {
+      return
+    }
+    const event = new OrmEvent('query:slow')
+    event.operation = operation
+    event.sql = sanitizeSqlPreview(sql)
+    event.duration = duration
+    event.threshold = OrmContext.slowQueryThresholdMs
+    event.entityName = entityName
+    await OrmContext.emit('query:slow', event)
   }
 
   /**
@@ -135,6 +274,9 @@ export class OrmContext {
     this.databaseManager = DatabaseManager.getInstance()
     this.logger = Logger.getInstance()
     this.configured = false
+    OrmContext.clearGlobalHooks()
+    OrmContext.clearEventListeners()
+    OrmContext.slowQueryThresholdMs = 1000
   }
 
   /**

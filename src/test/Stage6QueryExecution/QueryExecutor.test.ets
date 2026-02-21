@@ -306,6 +306,44 @@ export default function queryExecutorTest() {
       expect(errorType).assertEqual('ExecutionError');
     });
 
+    it('get timeout should close late resultSet', 0, async () => {
+      setupUserEntity();
+      const builder = new QueryBuilder('User').timeout(5);
+      const executor = new QueryExecutor(builder);
+
+      let closed = false;
+      const fakeResultSet = {
+        rowCount: 0,
+        columnNames: ['id', 'user_name', 'user_email'],
+        goToNextRow: () => false,
+        goToFirstRow: () => false,
+        getColumnIndex: (_name: string) => 0,
+        isColumnNull: (_index: number) => true,
+        getLong: (_index: number) => 0,
+        getDouble: (_index: number) => 0,
+        getString: (_index: number) => '',
+        getBlob: (_index: number) => new Uint8Array(),
+        close: () => { closed = true; }
+      } as unknown as relationalStore.ResultSet;
+
+      const fakeStore = {
+        query: async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 30));
+          return fakeResultSet;
+        }
+      } as unknown as relationalStore.RdbStore;
+
+      const manager = DatabaseManager.getInstance() as unknown as { store: relationalStore.RdbStore | null, initialized: boolean, healthy: boolean };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      await executor.get().catch(() => {
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 40));
+      expect(closed).assertEqual(true);
+    });
+
     it('should work with soft delete entity', 0, () => {
       setupSoftDeleteEntity();
       const builder = new QueryBuilder('Article');

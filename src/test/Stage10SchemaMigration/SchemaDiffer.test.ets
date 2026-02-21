@@ -7,13 +7,17 @@ import {
 } from '../../main/ets/schema/SchemaDiffer';
 import { SchemaInspector } from '../../main/ets/schema/SchemaInspector';
 import { MetadataStorage } from '../../main/ets/core/MetadataStorage';
+import { ValidationMetadataStorage } from '../../main/ets/validation/ValidationMetadataStorage';
 import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
+import { defineEntity } from '../../main/ets/core/EntitySchema';
 import { ColumnType } from '../../main/ets/types/ColumnType';
+import { relationalStore } from '@kit.ArkData';
 
 export default function schemaDifferTest() {
   describe('schemaDifferTest', () => {
     beforeEach(() => {
       MetadataStorage.resetInstance();
+      ValidationMetadataStorage.resetInstance();
     });
 
     // ==================== 10.3 SchemaDiffer ====================
@@ -99,6 +103,10 @@ export default function schemaDifferTest() {
 
     it('SchemaChangeType should have ADD_COLUMN value', 0, () => {
       expect(SchemaChangeType.ADD_COLUMN).assertEqual('ADD_COLUMN');
+    });
+
+    it('SchemaChangeType should have CREATE_INDEX value', 0, () => {
+      expect(SchemaChangeType.CREATE_INDEX).assertEqual('CREATE_INDEX');
     });
 
     it('SchemaChangeType should have REBUILD_TABLE value', 0, () => {
@@ -358,6 +366,111 @@ export default function schemaDifferTest() {
       }
       expect(hasDestructive).assertEqual(true);
       expect(result.changes.length).assertEqual(2);
+    });
+
+    it('diff should generate CREATE_INDEX change when index missing', 0, async () => {
+      defineEntity('IndexedUser', {
+        tableName: 'indexed_users',
+        columns: [
+          { property: 'id', type: ColumnType.INTEGER, primaryKey: true },
+          { property: 'email', type: ColumnType.TEXT }
+        ],
+        indexes: [{ columns: ['email'], unique: true }]
+      });
+      const inspector = {
+        getExistingTables: async (_store: relationalStore.RdbStore): Promise<Array<string>> => ['indexed_users'],
+        getTableInfo: async (_store: relationalStore.RdbStore, _tableName: string) => ({
+          name: 'indexed_users',
+          columns: [
+            { name: 'id', type: 'INTEGER', notNull: true, defaultValue: null, primaryKey: true },
+            { name: 'email', type: 'TEXT', notNull: false, defaultValue: null, primaryKey: false }
+          ],
+          indexes: []
+        })
+      } as unknown as SchemaInspector;
+      const differ = new SchemaDiffer(inspector);
+      const diff = await differ.diff({} as relationalStore.RdbStore);
+      expect(diff.changes.length).assertEqual(1);
+      expect(diff.changes[0].type).assertEqual(SchemaChangeType.CREATE_INDEX);
+      expect(diff.changes[0].sql[0].indexOf('CREATE UNIQUE INDEX') >= 0).assertEqual(true);
+    });
+
+    it('diff should generate CREATE_INDEX change for unique validation rule', 0, async () => {
+      const storage = MetadataStorage.getInstance();
+      storage.registerEntity('ValidatedUser', 'validated_users');
+      storage.registerColumn('ValidatedUser', new ColumnMetadata('id', 'id').setType(ColumnType.INTEGER).setPrimaryKey(true));
+      storage.registerColumn('ValidatedUser', new ColumnMetadata('email', 'email').setType(ColumnType.TEXT));
+      ValidationMetadataStorage.getInstance().registerRule('ValidatedUser', 'email', { type: 'unique' });
+
+      const inspector = {
+        getExistingTables: async (_store: relationalStore.RdbStore): Promise<Array<string>> => ['validated_users'],
+        getTableInfo: async (_store: relationalStore.RdbStore, _tableName: string) => ({
+          name: 'validated_users',
+          columns: [
+            { name: 'id', type: 'INTEGER', notNull: true, defaultValue: null, primaryKey: true },
+            { name: 'email', type: 'TEXT', notNull: false, defaultValue: null, primaryKey: false }
+          ],
+          indexes: []
+        })
+      } as unknown as SchemaInspector;
+      const differ = new SchemaDiffer(inspector);
+      const diff = await differ.diff({} as relationalStore.RdbStore);
+      expect(diff.changes.length).assertEqual(1);
+      expect(diff.changes[0].type).assertEqual(SchemaChangeType.CREATE_INDEX);
+      expect(diff.changes[0].sql[0].indexOf('"uidx_validated_users_email"') >= 0).assertEqual(true);
+    });
+
+    it('diff should skip CREATE_INDEX when equivalent index exists', 0, async () => {
+      defineEntity('IndexedUser2', {
+        tableName: 'indexed_users2',
+        columns: [
+          { property: 'id', type: ColumnType.INTEGER, primaryKey: true },
+          { property: 'email', type: ColumnType.TEXT }
+        ],
+        indexes: [{ columns: ['email'], unique: true }]
+      });
+      const inspector = {
+        getExistingTables: async (_store: relationalStore.RdbStore): Promise<Array<string>> => ['indexed_users2'],
+        getTableInfo: async (_store: relationalStore.RdbStore, _tableName: string) => ({
+          name: 'indexed_users2',
+          columns: [
+            { name: 'id', type: 'INTEGER', notNull: true, defaultValue: null, primaryKey: true },
+            { name: 'email', type: 'TEXT', notNull: false, defaultValue: null, primaryKey: false }
+          ],
+          indexes: [{ name: 'custom_email_idx', unique: true, columns: ['email'] }]
+        })
+      } as unknown as SchemaInspector;
+      const differ = new SchemaDiffer(inspector);
+      const diff = await differ.diff({} as relationalStore.RdbStore);
+      expect(diff.changes.length).assertEqual(0);
+    });
+
+    it('diff should recreate indexes when table rebuild is required', 0, async () => {
+      defineEntity('IndexedUser3', {
+        tableName: 'indexed_users3',
+        columns: [
+          { property: 'id', type: ColumnType.INTEGER, primaryKey: true },
+          { property: 'email', type: ColumnType.TEXT, nullable: false }
+        ],
+        indexes: [{ columns: ['email'], unique: true }]
+      });
+      const inspector = {
+        getExistingTables: async (_store: relationalStore.RdbStore): Promise<Array<string>> => ['indexed_users3'],
+        getTableInfo: async (_store: relationalStore.RdbStore, _tableName: string) => ({
+          name: 'indexed_users3',
+          columns: [
+            { name: 'id', type: 'INTEGER', notNull: true, defaultValue: null, primaryKey: true },
+            { name: 'email', type: 'TEXT', notNull: false, defaultValue: null, primaryKey: false }
+          ],
+          indexes: [{ name: 'uidx_indexed_users3_email', unique: true, columns: ['email'] }]
+        })
+      } as unknown as SchemaInspector;
+      const differ = new SchemaDiffer(inspector);
+      const diff = await differ.diff({} as relationalStore.RdbStore);
+      const hasRebuild = diff.changes.some((change) => change.type === SchemaChangeType.REBUILD_TABLE);
+      const hasCreateIndex = diff.changes.some((change) => change.type === SchemaChangeType.CREATE_INDEX);
+      expect(hasRebuild).assertEqual(true);
+      expect(hasCreateIndex).assertEqual(true);
     });
 
     // 表名特殊字符测试

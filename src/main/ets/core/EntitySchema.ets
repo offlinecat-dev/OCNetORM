@@ -6,6 +6,7 @@
 import { ColumnType } from '../types/ColumnType'
 import { MetadataStorage } from './MetadataStorage'
 import { EntityMetadata } from './EntityMetadata'
+import { IndexMetadata } from './IndexMetadata'
 import { ScopeRegistry, ScopeFunction } from './ScopeRegistry'
 import { ColumnOptions, createColumnOptions, registerColumn, registerPrimaryKey, registerAutoIncrementPrimaryKey } from '../decorators/ColumnDecorator'
 import { registerEntity, createEntityOptions } from '../decorators/EntityDecorator'
@@ -59,6 +60,18 @@ export interface MorphToSchema {
 }
 
 /**
+ * 索引配置
+ */
+export interface IndexSchema {
+  /** 索引名称（可选，不传自动生成） */
+  name?: string
+  /** 索引列（可传属性名或列名） */
+  columns: Array<string>
+  /** 是否唯一索引 */
+  unique?: boolean
+}
+
+/**
  * 实体定义
  */
 export interface EntitySchema {
@@ -70,6 +83,8 @@ export interface EntitySchema {
   softDelete?: boolean | SoftDeleteSchema
   /** 多态单值关系配置 */
   morphTo?: MorphToSchema | Array<MorphToSchema>
+  /** 索引配置 */
+  indexes?: Array<IndexSchema>
   /** 查询作用域定义 */
   scopes?: Record<string, ScopeFunction>
 }
@@ -142,6 +157,10 @@ export function defineEntity(entityName: string, schema: EntitySchema): EntityMe
 
   if (schema.morphTo !== undefined) {
     registerMorphToRelations(storage, entityName, schema.morphTo)
+  }
+
+  if (schema.indexes !== undefined) {
+    registerIndexes(metadata, schema.indexes)
   }
 
   // 注册查询作用域
@@ -220,4 +239,61 @@ function registerMorphToRelations(
       item.typeMap ? item.typeMap : {}
     )
   }
+}
+
+function registerIndexes(metadata: EntityMetadata, indexes: Array<IndexSchema>): void {
+  for (let i = 0; i < indexes.length; i++) {
+    const indexSchema = indexes[i]
+    const columns = resolveIndexColumns(metadata, indexSchema.columns)
+    if (columns.length === 0) {
+      throw new Error('index.columns 不能为空')
+    }
+    const unique = indexSchema.unique === true
+    const indexName = buildIndexName(metadata.tableName, columns, unique, indexSchema.name)
+    metadata.addIndex(new IndexMetadata(indexName, columns, unique))
+  }
+}
+
+function resolveIndexColumns(metadata: EntityMetadata, candidates: Array<string>): Array<string> {
+  const columns: Array<string> = []
+  for (let i = 0; i < candidates.length; i++) {
+    const token = candidates[i].trim()
+    if (token.length === 0) {
+      continue
+    }
+    const byProperty = metadata.getColumnByProperty(token)
+    if (byProperty !== null) {
+      columns.push(byProperty.columnName)
+      continue
+    }
+    const byName = metadata.getColumnByName(token)
+    if (byName !== null) {
+      columns.push(byName.columnName)
+      continue
+    }
+    throw new Error(`索引列未注册: ${token}`)
+  }
+  return columns
+}
+
+function buildIndexName(
+  tableName: string,
+  columns: Array<string>,
+  unique: boolean,
+  customName?: string
+): string {
+  if (customName !== undefined && customName.trim().length > 0) {
+    return customName.trim()
+  }
+  const prefix = unique ? 'uidx' : 'idx'
+  const parts: Array<string> = []
+  parts.push(sanitizeIndexToken(tableName))
+  for (let i = 0; i < columns.length; i++) {
+    parts.push(sanitizeIndexToken(columns[i]))
+  }
+  return `${prefix}_${parts.join('_')}`
+}
+
+function sanitizeIndexToken(value: string): string {
+  return value.replace(/[^A-Za-z0-9_]/g, '_')
 }

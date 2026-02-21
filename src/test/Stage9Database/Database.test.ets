@@ -3,6 +3,7 @@ import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
 import { DatabaseConfig } from '../../main/ets/database/DatabaseConfig';
 import { DatabaseNotInitializedError } from '../../main/ets/errors/DatabaseError';
 import { QueryCache } from '../../main/ets/query/QueryCache';
+import { EntityData } from '../../main/ets/mapping/EntityData';
 import { Logger } from '../../main/ets/logging/Logger';
 import { LogLevel } from '../../main/ets/logging/LogLevel';
 import { relationalStore } from '@kit.ArkData';
@@ -23,7 +24,7 @@ export default function databaseTest() {
       const config = new DatabaseConfig('test.db');
       expect(config.name).assertEqual('test.db');
       expect(config.securityLevel).assertEqual(relationalStore.SecurityLevel.S1);
-      expect(config.encrypt).assertEqual(false);
+      expect(config.encrypt).assertEqual(true);
       expect(config.enableLogger).assertEqual(false);
       expect(config.loggerLevel).assertEqual(LogLevel.INFO);
       expect(config.healthCheckIntervalMs).assertEqual(0);
@@ -256,6 +257,23 @@ export default function databaseTest() {
       expect(QueryCache.getInstance().isEnabled()).assertEqual(true);
     });
 
+    it('DatabaseManager should clear query cache when connection config changes', 0, () => {
+      const manager = DatabaseManager.getInstance() as unknown as {
+        handleQueryCacheForConfigChange: (previous: DatabaseConfig | null, next: DatabaseConfig) => void
+      };
+      const cache = QueryCache.getInstance();
+      cache.configure({ enabled: true });
+      cache.setNamespace('db_a');
+
+      const data = new EntityData('User');
+      data.addProperty('id', 1, 'number');
+      cache.set('User', 1, data);
+      expect(cache.getSize()).assertEqual(1);
+
+      manager.handleQueryCacheForConfigChange(new DatabaseConfig('db_a'), new DatabaseConfig('db_b'));
+      expect(cache.getSize()).assertEqual(0);
+    });
+
     it('DatabaseManager ping should use querySql', 0, async () => {
       const manager = DatabaseManager.getInstance() as unknown as {
         store: relationalStore.RdbStore | null,
@@ -278,6 +296,15 @@ export default function databaseTest() {
       const result = await DatabaseManager.getInstance().ping();
       expect(result).assertEqual(true);
       expect(queryCalled).assertEqual(true);
+    });
+
+    it('DatabaseManager applyRuntimeConfig should sync QueryCache namespace', 0, () => {
+      const manager = DatabaseManager.getInstance() as unknown as {
+        applyRuntimeConfig: (config: DatabaseConfig) => void
+      };
+      const config = new DatabaseConfig('tenant_b.db').setQueryCache(true, 32, 5000);
+      manager.applyRuntimeConfig(config);
+      expect(QueryCache.getInstance().getNamespace()).assertEqual('tenant_b.db');
     });
 
     it('DatabaseConfig with enableQueryCache false should configure cache disabled', 0, () => {

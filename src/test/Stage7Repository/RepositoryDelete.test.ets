@@ -7,6 +7,8 @@ import { EntityData } from '../../main/ets/mapping/EntityData';
 import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { SoftDeleteNotEnabledError } from '../../main/ets/errors/SoftDeleteError';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
+import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { relationalStore } from '@kit.ArkData';
 
 const setupUserEntity = (): void => {
   const storage = MetadataStorage.getInstance();
@@ -65,6 +67,7 @@ export default function repositoryDeleteTest() {
     beforeEach(() => {
       MetadataStorage.resetInstance();
       HooksProcessor.resetInstance();
+      DatabaseManager.resetInstance();
     });
 
     it('DeleteResult.createSuccess should create success result', 0, () => {
@@ -216,5 +219,38 @@ export default function repositoryDeleteTest() {
       const result = await repo.removeById(1);
       expect(result.success).assertEqual(false);
     });
+
+    it('removeById should return actual affected rows for hard delete', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+      const fakeStore = {
+        delete: async () => 0
+      } as unknown as relationalStore.RdbStore;
+      const manager = DatabaseManager.getInstance() as unknown as { store: relationalStore.RdbStore | null, initialized: boolean, healthy: boolean };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      const result = await repo.removeById(123);
+      expect(result.success).assertEqual(true);
+      expect(result.affectedRows).assertEqual(0);
+    });
+
+    it('restore should return actual affected rows', 0, async () => {
+      setupSoftDeleteEntity();
+      const repo = new Repository('Article');
+      const fakeStore = {
+        update: async () => 0
+      } as unknown as relationalStore.RdbStore;
+      const manager = DatabaseManager.getInstance() as unknown as { store: relationalStore.RdbStore | null, initialized: boolean, healthy: boolean };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      const result = await repo.restore(10);
+      expect(result.success).assertEqual(true);
+      expect(result.affectedRows).assertEqual(0);
+    });
+
   });
 }

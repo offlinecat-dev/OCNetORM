@@ -4,6 +4,7 @@
  */
 
 import { ColumnMetadata } from './ColumnMetadata'
+import { IndexMetadata } from './IndexMetadata'
 import { EntityHooks } from '../types/EntityHooks'
 
 /**
@@ -19,6 +20,9 @@ export class EntityMetadata {
 
   /** 列元数据数组 */
   columns: Array<ColumnMetadata> = []
+
+  /** 索引元数据数组 */
+  indexes: Array<IndexMetadata> = []
 
   /** 是否启用软删除 */
   softDelete: boolean = false
@@ -63,6 +67,37 @@ export class EntityMetadata {
    */
   addColumn(column: ColumnMetadata): void {
     this.columns.push(column)
+  }
+
+  /**
+   * 添加索引元数据（按名称或签名去重）
+   * @param index 索引元数据
+   */
+  addIndex(index: IndexMetadata): void {
+    const signature = index.getSignature()
+    for (let i = 0; i < this.indexes.length; i++) {
+      const existing = this.indexes[i]
+      if (existing.name === index.name || existing.getSignature() === signature) {
+        return
+      }
+    }
+    this.indexes.push(index)
+  }
+
+  /**
+   * 获取索引元数据列表
+   */
+  getIndexes(): Array<IndexMetadata> {
+    return this.indexes.slice()
+  }
+
+  hasIndex(indexName: string): boolean {
+    for (let i = 0; i < this.indexes.length; i++) {
+      if (this.indexes[i].name === indexName) {
+        return true
+      }
+    }
+    return false
   }
 
   /**

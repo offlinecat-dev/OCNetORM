@@ -363,7 +363,7 @@ await DatabaseManager.getInstance().close(): Promise<void>
 |------|------|------|
 | `name` | `string` | 数据库文件名 |
 | `securityLevel` | `relationalStore.SecurityLevel` | 安全级别（默认 S1） |
-| `encrypt` | `boolean` | 是否加密（默认 false） |
+| `encrypt` | `boolean` | 是否加密（默认 true） |
 | `enableLogger` | `boolean` | 是否启用日志（默认 false） |
 | `loggerLevel` | `LogLevel` | 日志级别（默认 INFO） |
 | `healthCheckIntervalMs` | `number` | 健康检查间隔（毫秒），0 表示禁用（默认 0） |

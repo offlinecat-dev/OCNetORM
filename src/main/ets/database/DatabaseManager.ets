@@ -75,6 +75,9 @@ export class DatabaseManager implements DatabaseManagerAdapter {
    * @returns Promise<void>
    */
   async initialize(context: Context, config: DatabaseConfig): Promise<void> {
+    const previousConfig = this.config
+    this.handleQueryCacheForConfigChange(previousConfig, config)
+
     // 如果已经初始化且连接参数一致，重用连接并刷新运行时配置
     if (this.initialized && this.store !== null && this.config !== null) {
       const sameConnection = this.isSameConnectionConfig(this.config, config)
@@ -322,17 +325,33 @@ export class DatabaseManager implements DatabaseManagerAdapter {
       current.encrypt === next.encrypt
   }
 
+  private handleQueryCacheForConfigChange(
+    previousConfig: DatabaseConfig | null,
+    nextConfig: DatabaseConfig
+  ): void {
+    if (previousConfig === null) {
+      return
+    }
+    if (this.isSameConnectionConfig(previousConfig, nextConfig)) {
+      return
+    }
+    QueryCache.getInstance().clear()
+  }
+
   private applyRuntimeConfig(config: DatabaseConfig): void {
     this.getLogger().configure(config.enableLogger, config.loggerLevel)
 
+    const queryCache = QueryCache.getInstance()
+    queryCache.setNamespace(config.name)
+
     if (config.enableQueryCache) {
-      QueryCache.getInstance().configure({
+      queryCache.configure({
         enabled: true,
         maxSize: config.queryCacheMaxSize,
         ttlMs: config.queryCacheTtlMs
       })
     } else {
-      QueryCache.getInstance().configure({
+      queryCache.configure({
         enabled: false
       })
     }

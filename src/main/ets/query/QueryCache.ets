@@ -55,7 +55,7 @@ export class QueryCache {
   /** 单例实例 */
   private static instance: QueryCache = new QueryCache()
 
-  /** 缓存存储 - 键格式: encode(entityName)\x00encode(id) */
+  /** 缓存存储 - 键格式: encode(namespace)\x00encode(entityName)\x00encode(id) */
   private cache: Map<string, CacheEntry> = new Map()
   /** 最大缓存条目数 */
   private maxSize: number = 100
@@ -67,6 +67,8 @@ export class QueryCache {
   private hits: number = 0
   /** 缓存未命中次数 */
   private misses: number = 0
+  /** 当前缓存命名空间（默认 default） */
+  private namespace: string = 'default'
   /** 统计计数缩放阈值，保持 hits + misses 在安全整数范围内 */
   private static readonly COUNTER_SCALE_THRESHOLD: number = Math.floor(Number.MAX_SAFE_INTEGER / 2)
 
@@ -137,10 +139,16 @@ export class QueryCache {
     return encodeURIComponent(value)
   }
 
+  private normalizeNamespace(namespace: string): string {
+    const trimmed = namespace.trim()
+    return trimmed.length > 0 ? trimmed : 'default'
+  }
+
   private generateKey(entityName: string, id: ValueType): string {
+    const encodedNamespace = this.encodeKeyPart(this.namespace)
     const encodedEntity = this.encodeKeyPart(entityName)
     const encodedId = this.encodeKeyPart(String(id))
-    return `${encodedEntity}\x00${encodedId}`
+    return `${encodedNamespace}\x00${encodedEntity}\x00${encodedId}`
   }
 
   /**
@@ -289,7 +297,7 @@ export class QueryCache {
    * @param entityName 实体名称
    */
   invalidateEntity(entityName: string): void {
-    const prefix = `${this.encodeKeyPart(entityName)}\x00`
+    const prefix = `${this.encodeKeyPart(this.namespace)}\x00${this.encodeKeyPart(entityName)}\x00`
     const keysToDelete: Array<string> = []
 
     this.cache.forEach((_: CacheEntry, key: string) => {
@@ -378,6 +386,22 @@ export class QueryCache {
    */
   disable(): void {
     this.enabled = false
+  }
+
+  /**
+   * 设置缓存命名空间（用于多数据库隔离）
+   * @param namespace 命名空间标识（通常使用数据库名）
+   */
+  setNamespace(namespace: string): void {
+    this.namespace = this.normalizeNamespace(namespace)
+  }
+
+  /**
+   * 获取当前缓存命名空间（主要用于测试）
+   * @returns 命名空间标识
+   */
+  getNamespace(): string {
+    return this.namespace
   }
 
   /**

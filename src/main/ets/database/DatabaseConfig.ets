@@ -16,7 +16,7 @@ export class DatabaseConfig {
   /** 安全级别 */
   securityLevel: relationalStore.SecurityLevel = relationalStore.SecurityLevel.S1
   /** 是否加密 */
-  encrypt: boolean = false
+  encrypt: boolean = true
   /** 是否启用日志 */
   enableLogger: boolean = false
   /** 日志级别 */

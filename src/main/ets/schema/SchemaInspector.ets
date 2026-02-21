@@ -18,11 +18,26 @@ export interface ColumnInfo {
 }
 
 /**
+ * 索引信息
+ */
+export interface IndexInfo {
+  name: string
+  unique: boolean
+  columns: Array<string>
+}
+
+interface IndexListRow {
+  name: string
+  unique: boolean
+}
+
+/**
  * 表信息
  */
 export interface TableInfo {
   name: string
   columns: Array<ColumnInfo>
+  indexes?: Array<IndexInfo>
 }
 
 /**
@@ -107,13 +122,76 @@ export class SchemaInspector {
         }
       }
 
-      return { name: tableName, columns }
+      const indexes = await this.getTableIndexes(store, tableName)
+      return { name: tableName, columns, indexes }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ExecutionError(sql, `读取表结构失败: ${errorMessage}`)
     } finally {
       this.closeResultSetSafely(resultSet)
     }
+  }
+
+  async getTableIndexes(store: relationalStore.RdbStore, tableName: string): Promise<Array<IndexInfo>> {
+    const escapedTable = this.escapeIdentifier(tableName)
+    const sql = `PRAGMA index_list(${escapedTable})`
+    let resultSet: relationalStore.ResultSet | null = null
+    const indexes: Array<IndexInfo> = []
+    const indexRows: Array<IndexListRow> = []
+    try {
+      resultSet = await store.querySql(sql)
+      while (resultSet.goToNextRow()) {
+        const nameIndex = resultSet.getColumnIndex('name')
+        if (nameIndex < 0 || resultSet.isColumnNull(nameIndex)) {
+          continue
+        }
+        const indexName = resultSet.getString(nameIndex)
+        if (indexName.startsWith('sqlite_autoindex_')) {
+          continue
+        }
+        const uniqueIndex = resultSet.getColumnIndex('unique')
+        const unique = uniqueIndex >= 0 && !resultSet.isColumnNull(uniqueIndex)
+          ? resultSet.getLong(uniqueIndex) === 1
+          : false
+        const indexRow: IndexListRow = { name: indexName, unique: unique }
+        indexRows.push(indexRow)
+      }
+      this.closeResultSetSafely(resultSet)
+      resultSet = null
+      for (let i = 0; i < indexRows.length; i++) {
+        const row = indexRows[i]
+        const columns = await this.getIndexColumns(store, row.name)
+        const indexInfo: IndexInfo = { name: row.name, unique: row.unique, columns: columns }
+        indexes.push(indexInfo)
+      }
+      return indexes
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      throw new ExecutionError(sql, `读取索引信息失败: ${errorMessage}`)
+    } finally {
+      this.closeResultSetSafely(resultSet)
+    }
+  }
+
+  private async getIndexColumns(store: relationalStore.RdbStore, indexName: string): Promise<Array<string>> {
+    const escapedIndex = this.escapeIdentifier(indexName)
+    const sql = `PRAGMA index_info(${escapedIndex})`
+    let resultSet: relationalStore.ResultSet | null = null
+    const columns: Array<string> = []
+    try {
+      resultSet = await store.querySql(sql)
+      while (resultSet.goToNextRow()) {
+        const nameIndex = resultSet.getColumnIndex('name')
+        if (nameIndex >= 0 && !resultSet.isColumnNull(nameIndex)) {
+          columns.push(resultSet.getString(nameIndex))
+        }
+      }
+    } catch (e) {
+      return []
+    } finally {
+      this.closeResultSetSafely(resultSet)
+    }
+    return columns
   }
 
   private closeResultSetSafely(resultSet: relationalStore.ResultSet | null): void {

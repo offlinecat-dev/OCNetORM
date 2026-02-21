@@ -80,7 +80,9 @@ export class AggregateExecutor {
         }
       }
       const orderByColumns = this.options.queryBuilder.getOrderByColumns()
-      const orderByPart = orderByColumns.length > 0 ? ` ORDER BY ${orderByColumns.map((o) => `${this.options.escapeIdentifier(o.column)} ${o.direction}`).join(', ')}` : ''
+      const orderByPart = orderByColumns.length > 0
+        ? ` ORDER BY ${orderByColumns.map((o) => `${this.options.escapeIdentifier(o.column)} ${this.normalizeOrderDirection(o.direction)}`).join(', ')}`
+        : ''
       const sql = `SELECT ${selectPart} FROM ${tableName}${wherePart}${groupByPart}${havingPart}${orderByPart}`
       let resultSet: relationalStore.ResultSet | null = null
       const result = new AggregateResult()
@@ -110,6 +112,14 @@ export class AggregateExecutor {
         this.options.releaseQuerySlot()
       }
     }
+  }
+
+  private normalizeOrderDirection(direction: string): string {
+    const normalized = direction.trim().toUpperCase()
+    if (normalized === 'ASC' || normalized === 'DESC') {
+      return normalized
+    }
+    throw new ExecutionError('ORDER BY', `非法排序方向: ${direction}`)
   }
 
   private async executeAggregateFunction(func: string, column: string): Promise<number> {

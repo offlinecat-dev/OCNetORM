@@ -12,9 +12,9 @@ export enum IsolationLevel {
   READ_UNCOMMITTED = 'READ_UNCOMMITTED',
   /** 读已提交 - 只能读取已提交的数据（SQLite 默认） */
   READ_COMMITTED = 'READ_COMMITTED',
-  /** 可重复读 - 同一事务内多次读取结果一致 */
+  /** 可重复读 - 当前实现不提供强语义，执行时会显式报错 */
   REPEATABLE_READ = 'REPEATABLE_READ',
-  /** 串行化 - 最高隔离级别，完全串行执行 */
+  /** 串行化 - 当前实现不提供强语义，执行时会显式报错 */
   SERIALIZABLE = 'SERIALIZABLE'
 }
 
@@ -124,8 +124,6 @@ export class TransactionOptions {
    * @returns 串行化事务选项
    */
   static serializable(): TransactionOptions {
-    const options = new TransactionOptions()
-    options.isolation = IsolationLevel.SERIALIZABLE
-    return options
+    throw new Error('当前不支持 SERIALIZABLE 隔离级别，请使用 READ_COMMITTED 或 READ_UNCOMMITTED')
   }
 }

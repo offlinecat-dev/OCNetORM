@@ -2,7 +2,9 @@ import { describe, beforeEach, it, expect } from '@ohos/hypium';
 import { SchemaBuilder, CreateTableResult, CreateAllTablesResult } from '../../main/ets/schema/SchemaBuilder';
 import { EntityMetadata } from '../../main/ets/core/EntityMetadata';
 import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
+import { IndexMetadata } from '../../main/ets/core/IndexMetadata';
 import { MetadataStorage } from '../../main/ets/core/MetadataStorage';
+import { ValidationMetadataStorage } from '../../main/ets/validation/ValidationMetadataStorage';
 import { ColumnType } from '../../main/ets/types/ColumnType';
 import { RelationType } from '../../main/ets/types/RelationType';
 
@@ -12,6 +14,7 @@ export default function schemaBuilderTest() {
 
     beforeEach(() => {
       MetadataStorage.resetInstance();
+      ValidationMetadataStorage.resetInstance();
       builder = new SchemaBuilder();
     });
 
@@ -99,6 +102,44 @@ export default function schemaBuilderTest() {
 
       const sql = builder.generateCreateTableSql(metadata);
       expect(sql.indexOf('UNIQUE') >= 0).assertEqual(true);
+    });
+
+    it('generateCreateIndexSql should generate index statements', 0, () => {
+      const metadata = new EntityMetadata('User', 'users');
+      const idColumn = new ColumnMetadata('id', 'id');
+      idColumn.columnType = ColumnType.INTEGER;
+      idColumn.isPrimaryKey = true;
+      metadata.addColumn(idColumn);
+      const emailColumn = new ColumnMetadata('email', 'email');
+      emailColumn.columnType = ColumnType.TEXT;
+      metadata.addColumn(emailColumn);
+      metadata.addIndex(new IndexMetadata('uidx_users_email', ['email'], true));
+      const indexSql = builder.generateCreateIndexSql(metadata);
+      expect(indexSql.length).assertEqual(1);
+      expect(indexSql[0].indexOf('CREATE UNIQUE INDEX IF NOT EXISTS') >= 0).assertEqual(true);
+      expect(indexSql[0].indexOf('"uidx_users_email"') >= 0).assertEqual(true);
+    });
+
+    it('generateCreateIndexSql should include unique index from validation rule', 0, () => {
+      const storage = MetadataStorage.getInstance();
+      storage.registerEntity('User', 'users');
+      const idColumn = new ColumnMetadata('id', 'id');
+      idColumn.columnType = ColumnType.INTEGER;
+      idColumn.isPrimaryKey = true;
+      storage.registerColumn('User', idColumn);
+      const emailColumn = new ColumnMetadata('email', 'email');
+      emailColumn.columnType = ColumnType.TEXT;
+      storage.registerColumn('User', emailColumn);
+      ValidationMetadataStorage.getInstance().registerRule('User', 'email', { type: 'unique' });
+
+      const metadata = storage.getEntityMetadata('User');
+      expect(metadata !== null).assertEqual(true);
+      if (metadata !== null) {
+        const indexSql = builder.generateCreateIndexSql(metadata);
+        expect(indexSql.length).assertEqual(1);
+        expect(indexSql[0].indexOf('CREATE UNIQUE INDEX IF NOT EXISTS') >= 0).assertEqual(true);
+        expect(indexSql[0].indexOf('"uidx_users_email"') >= 0).assertEqual(true);
+      }
     });
 
     // generateCreateTableSql - 非空约束

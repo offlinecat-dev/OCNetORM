@@ -117,6 +117,23 @@ export default function manyToManyTest() {
       expect(errorType).assertEqual('RelationNotFoundError');
     });
 
+    it('attach should accept string primary keys', 0, async () => {
+      setupPostEntity();
+      const repo = new Repository('Post');
+      let threw = false;
+      let errorType = '';
+      try {
+        await repo.attach('post_A', 'tag_A', 'unknownRelation');
+      } catch (error) {
+        threw = true;
+        if (error instanceof RelationNotFoundError) {
+          errorType = 'RelationNotFoundError';
+        }
+      }
+      expect(threw).assertEqual(true);
+      expect(errorType).assertEqual('RelationNotFoundError');
+    });
+
     it('attach should return failure when database not initialized', 0, async () => {
       setupPostEntity();
       setupTagEntity();
@@ -143,6 +160,23 @@ export default function manyToManyTest() {
         }
       }
 
+      expect(threw).assertEqual(true);
+      expect(errorType).assertEqual('RelationNotFoundError');
+    });
+
+    it('detach should accept string primary keys', 0, async () => {
+      setupPostEntity();
+      const repo = new Repository('Post');
+      let threw = false;
+      let errorType = '';
+      try {
+        await repo.detach('post_A', 'tag_A', 'unknownRelation');
+      } catch (error) {
+        threw = true;
+        if (error instanceof RelationNotFoundError) {
+          errorType = 'RelationNotFoundError';
+        }
+      }
       expect(threw).assertEqual(true);
       expect(errorType).assertEqual('RelationNotFoundError');
     });

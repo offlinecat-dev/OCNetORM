@@ -1337,7 +1337,9 @@ export class QueryExecutor {
     if (orderByColumns.length === 0) {
       return ''
     }
-    const parts = orderByColumns.map((orderBy) => `${this.escapeIdentifier(orderBy.column)} ${orderBy.direction}`)
+    const parts = orderByColumns.map((orderBy) =>
+      `${this.escapeIdentifier(orderBy.column)} ${this.normalizeOrderDirection(orderBy.direction)}`
+    )
     return ` ORDER BY ${parts.join(', ')}`
   }
 
@@ -1443,7 +1445,7 @@ export class QueryExecutor {
           break
         case ConditionOperator.LIKE:
           whereParts.push(`${column} LIKE ?`)
-          args.push(cond.value !== null ? String(cond.value) : '')
+          args.push(cond.value === null || Array.isArray(cond.value) ? '' : String(cond.value))
           break
         case ConditionOperator.BETWEEN:
           whereParts.push(`${column} BETWEEN ? AND ?`)
@@ -1476,6 +1478,14 @@ export class QueryExecutor {
       escapedParts.push(`"${part}"`)
     }
     return escapedParts.join('.')
+  }
+
+  private normalizeOrderDirection(direction: string): string {
+    const normalized = direction.trim().toUpperCase()
+    if (normalized === 'ASC' || normalized === 'DESC') {
+      return normalized
+    }
+    throw new ExecutionError('ORDER BY', `非法排序方向: ${direction}`)
   }
 
   private validateMutationQuery(operation: string): void {

@@ -1,5 +1,5 @@
 import { describe, beforeEach, it, expect } from '@ohos/hypium';
-import { SchemaInspector, ColumnInfo, TableInfo } from '../../main/ets/schema/SchemaInspector';
+import { SchemaInspector, ColumnInfo, TableInfo, IndexInfo } from '../../main/ets/schema/SchemaInspector';
 
 export default function schemaInspectorTest() {
   describe('schemaInspectorTest', () => {
@@ -58,6 +58,17 @@ export default function schemaInspectorTest() {
 
       expect(columnInfo.type).assertEqual('TEXT');
       expect(columnInfo.defaultValue).assertEqual("'default'");
+    });
+
+    it('IndexInfo interface should have correct structure', 0, () => {
+      const indexInfo: IndexInfo = {
+        name: 'idx_users_email',
+        unique: true,
+        columns: ['email']
+      };
+      expect(indexInfo.name).assertEqual('idx_users_email');
+      expect(indexInfo.unique).assertEqual(true);
+      expect(indexInfo.columns.length).assertEqual(1);
     });
 
     // TableInfo 接口测试

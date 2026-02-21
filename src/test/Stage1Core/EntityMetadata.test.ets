@@ -1,6 +1,7 @@
 import { describe, beforeAll, beforeEach, afterEach, afterAll, it, expect } from '@ohos/hypium';
 import { EntityMetadata } from '../../main/ets/core/EntityMetadata';
 import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
+import { IndexMetadata } from '../../main/ets/core/IndexMetadata';
 import { EntityHooks } from '../../main/ets/types/EntityHooks';
 
 class EntityMetadataBundle {
@@ -81,6 +82,18 @@ export default function entityMetadataTest() {
       metadata.setHooks(null);
       expect(metadata.getHooks() === null).assertEqual(true);
       expect(metadata.hasHooks()).assertEqual(false);
+    });
+
+    it('index add/get/has should deduplicate by name and signature', 0, () => {
+      const metadata = new EntityMetadata('User', 'users');
+      const idxByName = new IndexMetadata('idx_users_email', ['email'], false);
+      const idxBySignature = new IndexMetadata('idx_users_email_v2', ['email'], false);
+      metadata.addIndex(idxByName);
+      metadata.addIndex(idxByName);
+      metadata.addIndex(idxBySignature);
+      expect(metadata.getIndexes().length).assertEqual(1);
+      expect(metadata.hasIndex('idx_users_email')).assertEqual(true);
+      expect(metadata.hasIndex('idx_users_missing')).assertEqual(false);
     });
   });
 }

@@ -68,9 +68,15 @@ export default function repositoryTransactionTest() {
       expect(options.timeout).assertEqual(5000);
     });
 
-    it('TransactionOptions.serializable should create serializable options', 0, () => {
-      const options = TransactionOptions.serializable();
-      expect(options.isolation).assertEqual(IsolationLevel.SERIALIZABLE);
+    it('TransactionOptions.serializable should throw unsupported error', 0, () => {
+      let threw = false;
+      try {
+        TransactionOptions.serializable();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        threw = message.includes('SERIALIZABLE');
+      }
+      expect(threw).assertEqual(true);
     });
 
     it('TransactionOptions.fromConfig should create options from config', 0, () => {
@@ -206,6 +212,46 @@ export default function repositoryTransactionTest() {
       expect(rollbackCount).assertEqual(1);
     });
 
+    it('transactionWithOptions timeout should not retry', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+      const options = TransactionOptions.fromConfig({ timeout: 10, retries: 2, retryDelay: 5 });
+
+      let beginCount = 0;
+      const fakeStore = {
+        beginTransaction: () => {
+          beginCount++;
+        },
+        commit: () => {
+        },
+        rollBack: () => {
+        },
+        executeSql: async () => {
+        }
+      } as unknown as relationalStore.RdbStore;
+
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      let threw = false;
+      try {
+        await repo.transactionWithOptions(async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 30));
+        }, options);
+      } catch (error) {
+        threw = error instanceof TransactionRollbackError;
+      }
+
+      expect(threw).assertEqual(true);
+      expect(beginCount).assertEqual(1);
+    });
+
     it('transactionWithOptions with retry should attempt multiple times', 0, async () => {
       setupUserEntity();
       const repo = new Repository('User');
@@ -241,20 +287,70 @@ export default function repositoryTransactionTest() {
       expect(threw).assertEqual(true);
     });
 
-    it('transactionWithOptions with isolation level should work', 0, async () => {
+    it('transactionWithOptions should fail fast at options creation for serializable', 0, async () => {
       setupUserEntity();
       const repo = new Repository('User');
-      const options = TransactionOptions.serializable();
-
       let threw = false;
       try {
+        const options = TransactionOptions.serializable();
         await repo.transactionWithOptions(async () => {
         }, options);
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        threw = message.includes('SERIALIZABLE');
+      }
+      expect(threw).assertEqual(true);
+    });
+
+    it('transactionWithOptions should fail fast when readOnly PRAGMA unsupported', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+      const options = TransactionOptions.readOnly();
+      let beginCount = 0;
+      const fakeStore = {
+        beginTransaction: () => { beginCount++; },
+        commit: () => {},
+        rollBack: () => {},
+        executeSql: async (_sql: string) => { throw new Error('pragma unsupported'); }
+      } as unknown as relationalStore.RdbStore;
+      const manager = DatabaseManager.getInstance() as unknown as { store: relationalStore.RdbStore | null, initialized: boolean, healthy: boolean };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+      let threw = false;
+      try {
+        await repo.transactionWithOptions(async () => {}, options);
+      } catch (error) {
         threw = error instanceof TransactionRollbackError;
       }
-
       expect(threw).assertEqual(true);
+      expect(beginCount).assertEqual(0);
+    });
+
+    it('transactionWithOptions should not start transaction when serializable options creation fails', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+      let beginCount = 0;
+      const fakeStore = {
+        beginTransaction: () => { beginCount++; },
+        commit: () => {},
+        rollBack: () => {},
+        executeSql: async () => {}
+      } as unknown as relationalStore.RdbStore;
+      const manager = DatabaseManager.getInstance() as unknown as { store: relationalStore.RdbStore | null, initialized: boolean, healthy: boolean };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+      let threw = false;
+      try {
+        const options = TransactionOptions.serializable();
+        await repo.transactionWithOptions(async () => {}, options);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        threw = message.includes('SERIALIZABLE');
+      }
+      expect(threw).assertEqual(true);
+      expect(beginCount).assertEqual(0);
     });
 
     it('transaction callback error should be propagated', 0, async () => {

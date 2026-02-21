@@ -18,7 +18,7 @@ export { EntityInfo, EntityRegistry } from './EntityConstructor'
 export { RelationType } from './RelationType'
 
 // 实体钩子
-export { HookCallback, EntityHooks } from './EntityHooks'
+export { HookCallback, HookName, GlobalHookCallback, EntityHooks } from './EntityHooks'
 
 // 列定义基类
 export { ColumnDef } from './ColumnDef'

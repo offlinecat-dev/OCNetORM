@@ -7,6 +7,8 @@ import { EntityData } from '../../main/ets/mapping/EntityData';
 import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { QueryCache } from '../../main/ets/query/QueryCache';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
+import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { relationalStore } from '@kit.ArkData';
 
 const setupUserEntity = (): void => {
   const storage = MetadataStorage.getInstance();
@@ -51,12 +53,24 @@ const setupSoftDeleteEntity = (): void => {
   }
 };
 
+const bindStore = (store: relationalStore.RdbStore): void => {
+  const manager = DatabaseManager.getInstance() as unknown as {
+    store: relationalStore.RdbStore | null,
+    initialized: boolean,
+    healthy: boolean
+  };
+  manager.store = store;
+  manager.initialized = true;
+  manager.healthy = true;
+};
+
 export default function repositoryQueryTest() {
   describe('repositoryQueryTest', () => {
     beforeEach(() => {
       MetadataStorage.resetInstance();
       QueryCache.resetInstance();
       HooksProcessor.resetInstance();
+      DatabaseManager.resetInstance();
     });
 
     it('findById should throw ExecutionError when database not initialized', 0, async () => {
@@ -250,6 +264,61 @@ export default function repositoryQueryTest() {
       }
 
       expect(threw).assertEqual(true);
+    });
+
+    it('rawExecute should reject multi statements', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+
+      let threw = false;
+      try {
+        await repo.rawExecute('UPDATE users SET user_name = ? WHERE id = ?; DELETE FROM users WHERE id = ?', ['A', 1, 1]);
+      } catch (error) {
+        threw = error instanceof ExecutionError;
+      }
+
+      expect(threw).assertEqual(true);
+    });
+
+    it('rawExecute should reject non-parameterized write SQL', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+
+      let threw = false;
+      try {
+        await repo.rawExecute(`UPDATE users SET user_name = 'Alice' WHERE id = 1`);
+      } catch (error) {
+        threw = error instanceof ExecutionError;
+      }
+
+      expect(threw).assertEqual(true);
+    });
+
+    it('rawExecute should allow parameterized DML and clear cache', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+      const executed: Array<string> = [];
+      let receivedArgsLength = 0;
+      bindStore({
+        executeSql: async (sql: string, args?: Array<relationalStore.ValueType>) => {
+          executed.push(sql);
+          receivedArgsLength = args ? args.length : 0;
+        }
+      } as unknown as relationalStore.RdbStore);
+
+      const cache = QueryCache.getInstance();
+      cache.configure({ enabled: true });
+      const cached = new EntityData('User');
+      cached.addProperty('id', 1, 'number');
+      cache.set('User', 1, cached);
+      expect(cache.getSize()).assertEqual(1);
+
+      await repo.rawExecute('UPDATE users SET user_name = ? WHERE id = ?', ['Alice', 1]);
+
+      expect(executed.length).assertEqual(1);
+      expect(executed[0]).assertEqual('UPDATE users SET user_name = ? WHERE id = ?');
+      expect(receivedArgsLength).assertEqual(2);
+      expect(cache.getSize()).assertEqual(0);
     });
 
     it('QueryCache should be singleton', 0, () => {

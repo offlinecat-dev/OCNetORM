@@ -2,9 +2,6 @@
 
 > **QQ 交流群：`1012852504`**  
 > 欢迎加入交流 OCORM 使用经验、问题反馈与最佳实践。
->
-> **kiro2api 群：`590391769`**  
-> 推荐一个实惠的 Claude Opus 中转，资源目前免费畅享各种主流大模型。
 
 **轻量级 HarmonyOS SQLite ORM 框架**
 
@@ -18,29 +15,40 @@
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-black?style=for-the-badge&logo=github)](https://github.com/offlinecat-dev/OCNetORM)
 [![Report Bug](https://img.shields.io/badge/Issues-Report_Bug-red?style=for-the-badge&logo=github)](https://github.com/offlinecat-dev/OCNetORM/issues)
 
-> [!TIP]
-> 给大家推荐一个实惠的 claude opus 中转 资源 目前免费畅享各种主流大模型 kiro2api群：590391769
+## 目录
+
+- [特性](#特性)
+- [性能基准](#性能基准)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [事务只读说明](#事务只读说明)
+- [常用工作流](#常用工作流)
+- [文档](#文档)
+- [兼容性](#兼容性)
+- [常见问题](#常见问题)
+- [贡献](#贡献)
+- [License](#license)
 
 ## 特性
 
-- 🚀 轻量高效，无额外依赖
-- 🔒 类型安全，严格遵循 ArkTS 类型系统
-- 🔗 链式查询，流畅的 QueryBuilder API
-- 📦 Repository 模式，简洁的 CRUD 接口
-- 🔄 完整的事务支持
-- 🛠️ 自动建表与数据库迁移
-- ⚡ 自动类型转换
-- 🔗 关联查询 (OneToMany/ManyToOne/ManyToMany)
-- 📥 预加载/延迟加载策略
-- 🪝 生命周期钩子
-- ✅ 数据验证 (required/length/email)
-- 🗑️ 软删除支持
-- 📄 分页查询
-- ⚙️ 批量插入
-- 💾 查询缓存 (TTL/LRU)
-- ⏱️ 高级事务（超时/重试/隔离级别）
-- 🔀 ViewModel 双向映射
-- 🎯 响应式数据绑定 (@ObservedV2)
+### 核心版（8 条）
+
+- 🚀 轻量无额外运行时依赖，面向 HarmonyOS SQLite 的 ArkTS ORM
+- 🔒 类型安全 API，统一 `Repository` + `QueryBuilder` + `QueryExecutor`
+- 🧱 支持 `defineEntity` 与装饰器双模式建模
+- 📦 完整 CRUD 与链式条件查询（分页、排序、过滤）
+- 🔗 关系映射与加载（一对一/一对多/多对一/多对多，`with`/`withLazy`）
+- 🔄 事务能力（基础事务 + 超时/重试/隔离级别）
+- ✅ 数据治理（生命周期钩子、验证、软删除）
+- 🛠️ Schema 自动建表与迁移（版本管理、回滚）
+
+### 企业版扩展能力
+
+- 🛡️ 原生 SQL 只读保护与 `readOnly` 事务连接状态自动恢复
+- 🔍 高级查询能力（聚合、子查询 `whereExists`、`withCount`）
+- ⚡ 性能增强（批量插入、查询缓存 TTL/LRU、查询并发槽控制）
+- 🔀 工具链支持（Seeder / Factory / MigrationGenerator）
+- 📈 工程化能力（ViewModel 双向映射、日志脱敏、错误国际化）
 
 ## 性能基准
 
@@ -192,6 +200,13 @@ await repo.transactionWithOptions(async (txRepo) => {
 }, options)
 ```
 
+## 事务只读说明
+
+- `TransactionOptions.readOnly = true` 会在事务开始后尝试启用连接级只读模式（`PRAGMA query_only = 1`）。
+- 事务结束后会自动恢复连接状态（`PRAGMA query_only = 0`），避免影响后续普通写操作。
+- 如果底层环境不支持该 PRAGMA，会自动降级为兼容模式并记录日志，不会直接导致事务失败。
+- 只读模式用于业务安全兜底，不建议将其作为数据库权限控制的唯一手段。
+
 ### 7. 批量插入
 
 ```typescript
@@ -299,9 +314,27 @@ cache.configure({
 // 写操作自动使缓存失效
 ```
 
+## 常用工作流
+
+```bash
+# 安装依赖
+ohpm install
+
+# 构建 HAR（OCORM 模块）
+hvigor assembleHar
+
+# 运行 OCORM 测试
+hvigor test
+```
+
+- 示例代码：`../entry/src/main/ets/example`
+- 开发文档：`./docs/developer-guide`
+- 变更记录：`./CHANGELOG.md`
+
 ## 文档
 
 📚 **[完整开发文档](./docs/developer-guide/00-目录索引.md)**
+📍 **[文档入口导航](./docs/README.md)**
 
 ### 入门基础
 | 文档 | 说明 |
@@ -357,6 +390,17 @@ cache.configure({
 - HarmonyOS NEXT (API 17+)
 - OpenHarmony 5.0+
 - 目标 SDK: 6.0.1 (API 21)
+
+## 常见问题
+
+### Q1：readOnly 事务会不会影响后续写操作？
+- 不会。事务结束时会自动恢复连接级只读状态。
+
+### Q2：为什么我看到“已降级为兼容模式”的日志？
+- 当前数据库环境不支持某些 PRAGMA（如 `query_only`/`read_uncommitted`），OCORM 会自动降级并继续执行事务。
+
+### Q3：生产环境建议开启什么日志级别？
+- 建议 `LogLevel.ERROR`，开发环境可使用 `LogLevel.DEBUG`。
 
 ## 贡献
 

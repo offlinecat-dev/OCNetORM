@@ -6,6 +6,7 @@ import { Repository, SaveResult } from '../../main/ets/repository/index';
 import { EntityData } from '../../main/ets/mapping/EntityData';
 import { EntityNotRegisteredError } from '../../main/ets/errors/MetadataError';
 import { ExecutionError } from '../../main/ets/errors/DatabaseError';
+import { UniqueValidationError } from '../../main/ets/errors/ValidationError';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
 import { ValidationMetadataStorage } from '../../main/ets/validation/ValidationMetadataStorage';
 import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
@@ -252,5 +253,77 @@ export default function saveInsertUpdateTest() {
         expect(capturedBucket['id']).assertEqual(10);
       }
     });
+
+    it('update should return actual affected rows', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+      const entityData = createExistingEntityData(999);
+
+      const fakeStore = {
+        update: async () => 0
+      } as unknown as relationalStore.RdbStore;
+
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      const result = await repo.save(entityData);
+      expect(result.success).assertEqual(true);
+      expect(result.affectedRows).assertEqual(0);
+    });
+
+    it('save insert should throw UniqueValidationError when db unique constraint fails', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+      const entityData = createNewEntityData();
+      const fakeStore = {
+        insertSync: () => { throw new Error('UNIQUE constraint failed: users.user_email'); }
+      } as unknown as relationalStore.RdbStore;
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+      let threw = false;
+      try {
+        await repo.save(entityData);
+      } catch (error) {
+        threw = error instanceof UniqueValidationError;
+      }
+      expect(threw).assertEqual(true);
+    });
+
+    it('save update should throw UniqueValidationError when db unique constraint fails', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+      const entityData = createExistingEntityData(1);
+      const fakeStore = {
+        update: async () => { throw new Error('UNIQUE constraint failed: users.user_email'); }
+      } as unknown as relationalStore.RdbStore;
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+      let threw = false;
+      try {
+        await repo.save(entityData);
+      } catch (error) {
+        threw = error instanceof UniqueValidationError;
+      }
+      expect(threw).assertEqual(true);
+    });
+
   });
 }

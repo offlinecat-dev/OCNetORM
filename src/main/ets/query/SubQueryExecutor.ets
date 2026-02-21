@@ -49,7 +49,7 @@ export class SubQueryExecutor {
       return []
     }
 
-    let resultIds: Set<string> | null = null
+    let resultIds: Map<string, ValueType> | null = null
     for (let i = 0; i < subQueries.length; i++) {
       const subQueryIds = await this.options.executeOneSubQuery(
         subQueries[i],
@@ -57,19 +57,27 @@ export class SubQueryExecutor {
         entityName,
         sourcePkColumn.columnName
       )
+      const currentIds: Map<string, ValueType> = new Map()
+      for (let j = 0; j < subQueryIds.length; j++) {
+        const value = subQueryIds[j]
+        if (value === null || value === undefined) {
+          continue
+        }
+        const key = this.toIdKey(value)
+        if (!currentIds.has(key)) {
+          currentIds.set(key, value)
+        }
+      }
       if (resultIds === null) {
-        resultIds = new Set<string>()
-        for (let j = 0; j < subQueryIds.length; j++) {
-          resultIds.add(String(subQueryIds[j]))
-        }
+        resultIds = currentIds
       } else {
-        const merged = new Set<string>()
-        for (let j = 0; j < subQueryIds.length; j++) {
-          const id = String(subQueryIds[j])
-          if (resultIds.has(id)) {
-            merged.add(id)
+        const merged: Map<string, ValueType> = new Map()
+        currentIds.forEach((value, key) => {
+          if (resultIds !== null && resultIds.has(key)) {
+            const existed = resultIds.get(key)
+            merged.set(key, existed !== undefined ? existed : value)
           }
-        }
+        })
         resultIds = merged
       }
       if (resultIds.size === 0) {
@@ -79,11 +87,20 @@ export class SubQueryExecutor {
 
     const finalIds: Array<ValueType> = []
     if (resultIds !== null) {
-      resultIds.forEach((id: string) => {
-        const asNum = Number(id)
-        finalIds.push(isNaN(asNum) ? id : asNum)
+      resultIds.forEach((id) => {
+        finalIds.push(id)
       })
     }
     return finalIds
+  }
+
+  private toIdKey(id: ValueType): string {
+    if (typeof id === 'number') {
+      return `n:${id}`
+    }
+    if (typeof id === 'boolean') {
+      return `b:${id ? 1 : 0}`
+    }
+    return `s:${String(id)}`
   }
 }

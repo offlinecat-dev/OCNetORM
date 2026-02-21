@@ -185,13 +185,23 @@ export default function loggerTest() {
       expect(history[0].indexOf('13812345678') < 0).assertEqual(true);
     });
 
-    it('logQuery should not sanitize short numbers', 0, () => {
+    it('logQuery should not sanitize very short numbers', 0, () => {
       const logger = Logger.getInstance();
       logger.configure(true, LogLevel.DEBUG);
       logger.setRecordHistory(true);
-      logger.logQuery('SELECT * FROM users WHERE id = 123456', 10);
+      logger.logQuery('SELECT * FROM users WHERE id = 123', 10);
       const history = logger.getLogHistory();
-      expect(history[0].indexOf('123456') >= 0).assertEqual(true);
+      expect(history[0].indexOf('123') >= 0).assertEqual(true);
+    });
+
+    it('logQuery should sanitize 4-digit medical identifiers', 0, () => {
+      const logger = Logger.getInstance();
+      logger.configure(true, LogLevel.DEBUG);
+      logger.setRecordHistory(true);
+      logger.logQuery('SELECT * FROM visits WHERE visit_no = 1234', 10);
+      const history = logger.getLogHistory();
+      expect(history[0].indexOf('[***]') >= 0).assertEqual(true);
+      expect(history[0].indexOf('1234') < 0).assertEqual(true);
     });
 
     // ==================== logTransaction 测试 ====================
@@ -289,6 +299,18 @@ export default function loggerTest() {
       const history = logger.getLogHistory();
       expect(history[0].indexOf("'[***]'") >= 0).assertEqual(true);
       expect(history[0].indexOf('[***]') >= 0).assertEqual(true);
+    });
+
+    it('logError should sanitize sensitive key-value pairs', 0, () => {
+      const logger = Logger.getInstance();
+      logger.configure(true, LogLevel.ERROR);
+      logger.setRecordHistory(true);
+      logger.logError('Save failed: patientId=abc123, mrn=9988');
+      const history = logger.getLogHistory();
+      expect(history[0].indexOf('patientId=[***]') >= 0).assertEqual(true);
+      expect(history[0].indexOf('mrn=[***]') >= 0).assertEqual(true);
+      expect(history[0].indexOf('abc123') < 0).assertEqual(true);
+      expect(history[0].indexOf('9988') < 0).assertEqual(true);
     });
 
     // ==================== logDebug 测试 ====================

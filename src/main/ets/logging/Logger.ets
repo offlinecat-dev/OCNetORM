@@ -17,6 +17,7 @@ import { LogLevel } from './LogLevel'
 const LOG_TYPE_QUERY: string = 'QUERY'
 const LOG_TYPE_TRANSACTION: string = 'TRANSACTION'
 const LOG_TYPE_ERROR: string = 'ERROR'
+const LOG_TYPE_WARN: string = 'WARN'
 const LOG_TYPE_DEBUG: string = 'DEBUG'
 const LOG_TYPE_TASKPOOL: string = 'TASKPOOL'
 const LOG_TYPE_PAGINATION: string = 'PAGINATION'
@@ -24,6 +25,9 @@ const LOG_TYPE_PARALLEL_RELATION: string = 'PARALLEL_RELATION'
 const LOG_TYPE_BATCH_INSERT: string = 'BATCH_INSERT'
 const MAX_LOG_MESSAGE_LENGTH: number = 512
 const MAX_LOG_HISTORY: number = 200
+const NUMERIC_TOKEN_PATTERN: RegExp = /\b\d{4,}\b/g
+const SENSITIVE_KEY_VALUE_PATTERN: RegExp =
+  /\b(patient(?:_?id)?|medical(?:_?record)?|mrn|id_?card|identity(?:_?no)?|cert(?:ificate)?(?:_?no)?|card(?:_?no)?|visit(?:_?no)?|case(?:_?no)?|phone|mobile|contact(?:_?no)?|ssn|passport|insur(?:ance)?(?:_?no)?)\b\s*([:=])\s*(\"[^\"]*\"|'[^']*'|[^\s,;)\]}]+)/ig
 
 /**
  * Logger 类
@@ -176,8 +180,8 @@ export class Logger {
   private sanitizeSql(sql: string): string {
     // 将引号内的字符串值替换为 [***]
     let result = sql.replace(/'[^']*'/g, "'[***]'")
-    // 将超过6位的连续数字替换为 [***]（可能是手机号、身份证等）
-    result = result.replace(/\b\d{7,}\b/g, '[***]')
+    result = this.maskSensitiveKeyValuePairs(result)
+    result = this.maskNumericTokens(result)
     return result
   }
 
@@ -211,6 +215,21 @@ export class Logger {
     const message = this.formatMessage(LOG_TYPE_ERROR, '-', errorMessage, true)
     this.recordToHistory(message)
     hilog.error(this.domain, this.tag, message)
+  }
+
+  /**
+   * 记录警告日志
+   * 在 INFO 及以上级别记录
+   *
+   * @param warnMessage 警告信息
+   */
+  logWarn(warnMessage: string): void {
+    if (!this.shouldLog(LogLevel.INFO)) {
+      return
+    }
+    const message = this.formatMessage(LOG_TYPE_WARN, '-', warnMessage, true)
+    this.recordToHistory(message)
+    hilog.warn(this.domain, this.tag, message)
   }
 
   /**
@@ -261,14 +280,25 @@ export class Logger {
   private sanitizeLogMessage(content: string, redactSensitive: boolean): string {
     let sanitized = content.replace(/[\x00-\x1F\x7F]/g, ' ')
     if (redactSensitive) {
+      sanitized = this.maskSensitiveKeyValuePairs(sanitized)
       sanitized = sanitized.replace(/'[^']*'/g, "'[***]'")
       sanitized = sanitized.replace(/\"[^\"]*\"/g, '"[***]"')
-      sanitized = sanitized.replace(/\b\d{7,}\b/g, '[***]')
+      sanitized = this.maskNumericTokens(sanitized)
     }
     if (sanitized.length > MAX_LOG_MESSAGE_LENGTH) {
       return `${sanitized.slice(0, MAX_LOG_MESSAGE_LENGTH)}...`
     }
     return sanitized
+  }
+
+  private maskSensitiveKeyValuePairs(content: string): string {
+    return content.replace(SENSITIVE_KEY_VALUE_PATTERN, (_matched: string, key: string, separator: string) => {
+      return `${key}${separator}[***]`
+    })
+  }
+
+  private maskNumericTokens(content: string): string {
+    return content.replace(NUMERIC_TOKEN_PATTERN, '[***]')
   }
 
   /**

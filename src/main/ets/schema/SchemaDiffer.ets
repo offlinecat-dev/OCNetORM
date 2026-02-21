@@ -5,11 +5,13 @@
 
 import { relationalStore } from '@kit.ArkData'
 import { ColumnMetadata } from '../core/ColumnMetadata'
+import { IndexMetadata } from '../core/IndexMetadata'
 import { MetadataStorage } from '../core/MetadataStorage'
 import { ManyToManyMetadata } from '../core/ManyToManyMetadata'
 import { RelationType } from '../types/RelationType'
 import { ColumnType } from '../types/ColumnType'
-import { SchemaInspector, TableInfo, ColumnInfo } from './SchemaInspector'
+import { SchemaInspector, TableInfo, ColumnInfo, IndexInfo } from './SchemaInspector'
+import { resolveEntityIndexes } from './UniqueIndexResolver'
 
 /**
  * Schema 变更类型
@@ -19,6 +21,8 @@ export enum SchemaChangeType {
   CREATE_TABLE = 'CREATE_TABLE',
   /** 新增列 */
   ADD_COLUMN = 'ADD_COLUMN',
+  /** 新建索引 */
+  CREATE_INDEX = 'CREATE_INDEX',
   /** 重建表（包含删除/修改列） */
   REBUILD_TABLE = 'REBUILD_TABLE'
 }
@@ -100,11 +104,13 @@ export class SchemaDiffer {
       const existing = existingTables.indexOf(tableName) >= 0
 
       if (!existing) {
+        const createSql = [desired.createSql]
+        this.appendCreateIndexSql(createSql, desired)
         const rollbackSql = [`DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName)}`]
         result.addChange({
           type: SchemaChangeType.CREATE_TABLE,
           tableName,
-          sql: [desired.createSql],
+          sql: createSql,
           rollbackSql,
           summary: `创建表 ${tableName}`,
           destructive: false
@@ -113,13 +119,14 @@ export class SchemaDiffer {
       }
 
       const tableInfo = await this.inspector.getTableInfo(store, tableName)
-      this.collectColumnChanges(result, desired, tableInfo)
+      const rebuilt = this.collectColumnChanges(result, desired, tableInfo)
+      this.collectIndexChanges(result, desired, tableInfo, rebuilt)
     }
 
     return result
   }
 
-  private collectColumnChanges(result: SchemaDiffResult, desired: DesiredTable, tableInfo: TableInfo): void {
+  private collectColumnChanges(result: SchemaDiffResult, desired: DesiredTable, tableInfo: TableInfo): boolean {
     const desiredColumnMap = this.mapDesiredColumns(desired.columns)
     const existingColumnMap = this.mapExistingColumns(tableInfo.columns)
 
@@ -147,7 +154,7 @@ export class SchemaDiffer {
     if (requiresRebuild) {
       const rebuildChange = this.buildRebuildChange(desired, tableInfo, columnsToModify, columnsToDrop)
       result.addChange(rebuildChange)
-      return
+      return true
     }
 
     for (let i = 0; i < columnsToAdd.length; i++) {
@@ -165,6 +172,64 @@ export class SchemaDiffer {
         destructive: false
       })
     }
+    return false
+  }
+
+  private appendCreateIndexSql(sqlStatements: Array<string>, desired: DesiredTable): void {
+    for (let i = 0; i < desired.indexes.length; i++) {
+      sqlStatements.push(this.generateCreateIndexSql(desired.tableName, desired.indexes[i]))
+    }
+  }
+
+  private collectIndexChanges(
+    result: SchemaDiffResult,
+    desired: DesiredTable,
+    tableInfo: TableInfo,
+    forceCreate: boolean
+  ): void {
+    const existingIndexes = tableInfo.indexes ? tableInfo.indexes : []
+    for (let i = 0; i < desired.indexes.length; i++) {
+      const index = desired.indexes[i]
+      if (!forceCreate && this.hasEquivalentIndex(index, existingIndexes)) {
+        continue
+      }
+      const sql = this.generateCreateIndexSql(desired.tableName, index)
+      result.addChange({
+        type: SchemaChangeType.CREATE_INDEX,
+        tableName: desired.tableName,
+        columnName: index.columns.join(','),
+        sql: [sql],
+        rollbackSql: [`DROP INDEX IF EXISTS ${this.escapeIdentifier(index.name)}`],
+        summary: `创建索引 ${index.name}`,
+        destructive: false
+      })
+    }
+  }
+
+  private hasEquivalentIndex(desired: IndexMetadata, existingIndexes: Array<IndexInfo>): boolean {
+    const desiredColumns = this.normalizeIndexColumns(desired.columns)
+    for (let i = 0; i < existingIndexes.length; i++) {
+      const existing = existingIndexes[i]
+      if (existing.unique !== desired.unique) {
+        continue
+      }
+      const existingColumns = this.normalizeIndexColumns(existing.columns)
+      if (desiredColumns === existingColumns) {
+        return true
+      }
+      if (existing.name === desired.name && desiredColumns === existingColumns) {
+        return true
+      }
+    }
+    return false
+  }
+
+  private normalizeIndexColumns(columns: Array<string>): string {
+    return columns.map((name) => this.normalizeIdentifier(name)).join(',')
+  }
+
+  private normalizeIdentifier(value: string): string {
+    return value.trim().toLowerCase()
   }
 
   private requiresRebuild(
@@ -336,6 +401,7 @@ export class SchemaDiffer {
       tables.push({
         tableName: metadata.tableName,
         columns: metadata.columns,
+        indexes: resolveEntityIndexes(metadata),
         createSql: this.generateCreateTableSql(metadata.tableName, metadata.columns),
         isJoinTable: false
       })
@@ -349,6 +415,7 @@ export class SchemaDiffer {
         tables.push({
           tableName: relation.joinTable,
           columns,
+          indexes: [],
           createSql: this.generateJoinTableSql(relation),
           isJoinTable: true
         })
@@ -433,6 +500,14 @@ export class SchemaDiffer {
     return `CREATE TABLE IF NOT EXISTS ${escapedTableName} (${columnsStr})`
   }
 
+  private generateCreateIndexSql(tableName: string, index: IndexMetadata): string {
+    const escapedTable = this.escapeIdentifier(tableName)
+    const escapedIndex = this.escapeIdentifier(index.name)
+    const columnSql = index.columns.map((name) => this.escapeIdentifier(name)).join(', ')
+    const uniqueSql = index.unique ? 'UNIQUE ' : ''
+    return `CREATE ${uniqueSql}INDEX IF NOT EXISTS ${escapedIndex} ON ${escapedTable} (${columnSql})`
+  }
+
   private generateColumnDefinition(column: ColumnMetadata): string {
     const parts: Array<string> = []
     parts.push(this.escapeIdentifier(column.columnName))
@@ -482,6 +557,7 @@ export class SchemaDiffer {
 interface DesiredTable {
   tableName: string
   columns: Array<ColumnMetadata>
+  indexes: Array<IndexMetadata>
   createSql: string
   isJoinTable: boolean
 }

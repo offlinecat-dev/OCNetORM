@@ -7,6 +7,7 @@ import { relationalStore } from '@kit.ArkData'
 import { EntityMetadata } from '../core/EntityMetadata'
 import { MetadataStorage } from '../core/MetadataStorage'
 import { HooksProcessor } from '../core/HooksProcessor'
+import { OrmContext } from '../core/OrmContext'
 import { DataMapper } from '../mapping/DataMapper'
 import { EntityData } from '../mapping/EntityData'
 import { ResultSetRow } from '../mapping/ResultSetRow'
@@ -64,6 +65,8 @@ export class Repository {
   private crudOperations: CrudOperations
   /** 删除操作管理器 */
   private deleteOperations: DeleteOperations
+  /** 事务严格模式深度（>0 表示事务回调中失败结果应抛错） */
+  private strictTransactionDepth: number = 0
 
   /**
    * 构造函数
@@ -165,7 +168,8 @@ export class Repository {
    * @returns Promise<SaveResult>
    */
   async save(entityData: EntityData): Promise<SaveResult> {
-    return await this.crudOperations.save(entityData)
+    const result = await this.crudOperations.save(entityData)
+    return this.ensureSaveResultSuccess(result, 'SAVE')
   }
 
   /**
@@ -354,7 +358,8 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async remove(entityData: EntityData): Promise<DeleteResult> {
-    return await this.deleteOperations.remove(entityData)
+    const result = await this.deleteOperations.remove(entityData)
+    return this.ensureDeleteResultSuccess(result, 'REMOVE')
   }
 
   /**
@@ -365,7 +370,8 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async removeById(id: ValueType): Promise<DeleteResult> {
-    return await this.deleteOperations.removeById(id)
+    const result = await this.deleteOperations.removeById(id)
+    return this.ensureDeleteResultSuccess(result, 'REMOVE_BY_ID')
   }
 
   /**
@@ -374,7 +380,8 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async forceRemove(entityData: EntityData): Promise<DeleteResult> {
-    return await this.deleteOperations.forceRemove(entityData)
+    const result = await this.deleteOperations.forceRemove(entityData)
+    return this.ensureDeleteResultSuccess(result, 'FORCE_REMOVE')
   }
 
   /**
@@ -383,7 +390,8 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async forceRemoveById(id: ValueType): Promise<DeleteResult> {
-    return await this.deleteOperations.forceRemoveById(id)
+    const result = await this.deleteOperations.forceRemoveById(id)
+    return this.ensureDeleteResultSuccess(result, 'FORCE_REMOVE_BY_ID')
   }
 
   /**
@@ -394,7 +402,8 @@ export class Repository {
    * @throws SoftDeleteNotEnabledError 如果实体未启用软删除
    */
   async restore(id: ValueType): Promise<SaveResult> {
-    return await this.deleteOperations.restore(id)
+    const result = await this.deleteOperations.restore(id)
+    return this.ensureSaveResultSuccess(result, 'RESTORE')
   }
 
   /**
@@ -590,6 +599,57 @@ export class Repository {
     return row
   }
 
+  private async withStrictTransactionGuard(callback: () => Promise<void>): Promise<void> {
+    this.strictTransactionDepth += 1
+    try {
+      await callback()
+    } finally {
+      this.strictTransactionDepth -= 1
+    }
+  }
+
+  private inStrictTransaction(): boolean {
+    return this.strictTransactionDepth > 0
+  }
+
+  private ensureSaveResultSuccess(result: SaveResult, operation: string): SaveResult {
+    if (!this.inStrictTransaction() || result.success) {
+      return result
+    }
+    const message = result.errorMessage.length > 0 ? result.errorMessage : `${operation} 返回失败结果`
+    throw new ExecutionError(operation, message)
+  }
+
+  private ensureDeleteResultSuccess(result: DeleteResult, operation: string): DeleteResult {
+    if (!this.inStrictTransaction() || result.success) {
+      return result
+    }
+    const message = result.errorMessage.length > 0 ? result.errorMessage : `${operation} 返回失败结果`
+    throw new ExecutionError(operation, message)
+  }
+
+  private ensureBatchInsertResultSuccess(result: BatchInsertResult): BatchInsertResult {
+    if (!this.inStrictTransaction() || result.success) {
+      return result
+    }
+    const message = result.errorMessage.length > 0 ? result.errorMessage : 'BATCH_INSERT 返回失败结果'
+    throw new ExecutionError('BATCH_INSERT', message)
+  }
+
+  private ensureSaveAllResultsSuccess(results: Array<SaveResult>): Array<SaveResult> {
+    if (!this.inStrictTransaction()) {
+      return results
+    }
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].success) {
+        continue
+      }
+      const base = results[i].errorMessage.length > 0 ? results[i].errorMessage : 'SAVE_ALL 子项失败'
+      throw new ExecutionError('SAVE_ALL', `第 ${i} 项失败: ${base}`)
+    }
+    return results
+  }
+
   /**
    * 在事务中执行操作
    * 如果回调函数执行成功，事务将被提交
@@ -599,7 +659,9 @@ export class Repository {
    */
   async transaction(callback: TransactionCallback): Promise<TransactionResult> {
     return await this.transactionManager.transaction(async () => {
-      await callback(this)
+      await this.withStrictTransactionGuard(async () => {
+        await callback(this)
+      })
     })
   }
 
@@ -615,7 +677,9 @@ export class Repository {
     options: TransactionOptions
   ): Promise<TransactionResult> {
     return await this.transactionManager.transactionWithOptions(async () => {
-      await callback(this)
+      await this.withStrictTransactionGuard(async () => {
+        await callback(this)
+      })
     }, options)
   }
 
@@ -626,7 +690,8 @@ export class Repository {
    * @returns Promise<Array<SaveResult>>
    */
   async saveAll(entities: Array<EntityData>): Promise<Array<SaveResult>> {
-    return await this.batchOperations.saveAll(entities)
+    const results = await this.batchOperations.saveAll(entities)
+    return this.ensureSaveAllResultsSuccess(results)
   }
 
   /**
@@ -642,7 +707,8 @@ export class Repository {
     entities: Array<EntityData>,
     options: BatchInsertOptions = BatchInsertOptions.createDefault()
   ): Promise<BatchInsertResult> {
-    return await this.batchOperations.batchInsert(entities, options)
+    const result = await this.batchOperations.batchInsert(entities, options)
+    return this.ensureBatchInsertResultSuccess(result)
   }
 
   /**
@@ -655,8 +721,9 @@ export class Repository {
    * @throws RelationNotFoundError 如果关联关系未注册
    * Requirements: 5.5
    */
-  async attach(sourceId: number, targetId: number, relationName: string): Promise<SaveResult> {
-    return await this.relationManager.attach(sourceId, targetId, relationName)
+  async attach(sourceId: ValueType, targetId: ValueType, relationName: string): Promise<SaveResult> {
+    const result = await this.relationManager.attach(sourceId, targetId, relationName)
+    return this.ensureSaveResultSuccess(result, 'ATTACH')
   }
 
   /**
@@ -669,8 +736,9 @@ export class Repository {
    * @throws RelationNotFoundError 如果关联关系未注册
    * Requirements: 5.6
    */
-  async detach(sourceId: number, targetId: number, relationName: string): Promise<DeleteResult> {
-    return await this.relationManager.detach(sourceId, targetId, relationName)
+  async detach(sourceId: ValueType, targetId: ValueType, relationName: string): Promise<DeleteResult> {
+    const result = await this.relationManager.detach(sourceId, targetId, relationName)
+    return this.ensureDeleteResultSuccess(result, 'DETACH')
   }
 
   /**
@@ -684,7 +752,8 @@ export class Repository {
    * Requirements: 5.7
    */
   async sync(sourceId: ValueType, targetIds: Array<ValueType>, relationName: string): Promise<SaveResult> {
-    return await this.relationManager.sync(sourceId, targetIds, relationName)
+    const result = await this.relationManager.sync(sourceId, targetIds, relationName)
+    return this.ensureSaveResultSuccess(result, 'SYNC')
   }
 
   // ==================== 聚合函数 ====================
@@ -758,6 +827,7 @@ export class Repository {
 
         const duration = Date.now() - startTime
         this.logger.logQuery(`RAW: ${normalizedSql}`, duration)
+        await OrmContext.emitSlowQuery('RAW_QUERY', normalizedSql, duration, this.entityName)
 
         while (resultSet.goToNextRow()) {
           const row = this.resultSetToRow(resultSet)
@@ -770,7 +840,11 @@ export class Repository {
       return results
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
-      this.logger.logError(`RAW QUERY 失败: ${errorMessage}`)
+      if (this.isExpectedRawQueryGuardError(errorMessage)) {
+        this.logger.logWarn(`[W_RAW_QUERY_READONLY_GUARD] RAW QUERY 拒绝: ${errorMessage}`)
+      } else {
+        this.logger.logError(`RAW QUERY 失败: ${errorMessage}`)
+      }
       throw new ExecutionError('RAW_QUERY', errorMessage)
     }
   }
@@ -784,24 +858,90 @@ export class Repository {
   async rawExecute(sql: string, args: Array<ValueType> = []): Promise<void> {
     const startTime = Date.now()
     try {
+      const normalizedSql = this.validateRawExecuteSql(sql, args.length)
       const store = this.getStore()
       const rdbArgs: Array<relationalStore.ValueType> = []
       for (let i = 0; i < args.length; i++) {
         rdbArgs.push(this.toRdbValue(args[i]))
       }
 
-      await store.executeSql(sql, rdbArgs)
+      await store.executeSql(normalizedSql, rdbArgs)
 
       const duration = Date.now() - startTime
-      this.logger.logQuery(`RAW EXECUTE: ${sql}`, duration)
+      this.logger.logQuery(`RAW EXECUTE: ${normalizedSql}`, duration)
+      await OrmContext.emitSlowQuery('RAW_EXECUTE', normalizedSql, duration, this.entityName)
 
       // 原生 SQL 可能跨实体写入，保守策略：清空缓存
       this.queryCache.clear()
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
-      this.logger.logError(`RAW EXECUTE 失败: ${errorMessage}`)
+      if (this.isExpectedRawExecuteGuardError(errorMessage)) {
+        this.logger.logWarn(`[W_RAW_EXECUTE_GUARD] RAW EXECUTE 拒绝: ${errorMessage}`)
+      } else {
+        this.logger.logError(`RAW EXECUTE 失败: ${errorMessage}`)
+      }
       throw new ExecutionError('RAW_EXECUTE', errorMessage)
     }
+  }
+
+  private isExpectedRawQueryGuardError(errorMessage: string): boolean {
+    const normalized = errorMessage.toLowerCase()
+    return normalized.includes('raw_query 仅允许') ||
+      normalized.includes('raw_query 禁止写操作') ||
+      normalized.includes('raw_query 不允许执行多条 sql') ||
+      normalized.includes('sql 语句不能为空') ||
+      normalized.includes('raw_query only allows') ||
+      normalized.includes('raw_query write is not allowed')
+  }
+
+  private isExpectedRawExecuteGuardError(errorMessage: string): boolean {
+    const normalized = errorMessage.toLowerCase()
+    return normalized.includes('raw_execute 仅允许') ||
+      normalized.includes('raw_execute 不允许执行多条 sql') ||
+      normalized.includes('raw_execute 禁止') ||
+      normalized.includes('raw_execute 参数数量') ||
+      normalized.includes('sql 语句不能为空') ||
+      normalized.includes('raw_execute only allows')
+  }
+
+  private countPlaceholder(sql: string): number {
+    const matches = sql.match(/\?/g)
+    return matches ? matches.length : 0
+  }
+
+  private validateRawExecuteSql(sql: string, argsLength: number): string {
+    const trimmedSql = sql.trim()
+    if (trimmedSql.length === 0) {
+      throw new ExecutionError('RAW_EXECUTE', 'SQL 语句不能为空')
+    }
+    const normalized = trimmedSql.endsWith(';') ? trimmedSql.slice(0, trimmedSql.length - 1).trim() : trimmedSql
+    if (normalized.includes(';')) {
+      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 不允许执行多条 SQL')
+    }
+    if (normalized.includes('--') || normalized.includes('/*') || normalized.includes('*/')) {
+      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 禁止 SQL 注释片段')
+    }
+
+    const upperSql = normalized.toUpperCase()
+    const allowedWrite = upperSql.startsWith('INSERT ') || upperSql.startsWith('UPDATE ') ||
+      upperSql.startsWith('DELETE ') || upperSql.startsWith('REPLACE ')
+    if (!allowedWrite) {
+      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 仅允许 INSERT/UPDATE/DELETE/REPLACE')
+    }
+
+    const forbiddenKeywords = /\b(DROP|ALTER|CREATE|TRUNCATE|ATTACH|DETACH|VACUUM|REINDEX|PRAGMA)\b/
+    if (forbiddenKeywords.test(upperSql)) {
+      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 禁止危险 SQL 关键字')
+    }
+
+    const placeholderCount = this.countPlaceholder(normalized)
+    if (placeholderCount <= 0) {
+      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 仅允许参数化 SQL（必须使用 ? 占位符）')
+    }
+    if (placeholderCount !== argsLength) {
+      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 参数数量与占位符数量不一致')
+    }
+    return normalized
   }
 
   private validateRawQuerySql(sql: string): string {

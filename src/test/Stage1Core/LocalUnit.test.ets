@@ -191,6 +191,28 @@ export default function localUnitTest() {
         }
       });
 
+      it('defineEntity should register index metadata', 0, () => {
+        const storage = createStorage();
+        const metadata = defineEntity('UserIndex', {
+          tableName: 'users_index',
+          columns: [
+            { property: 'id', type: ColumnType.INTEGER, primaryKey: true },
+            { property: 'email', type: ColumnType.TEXT },
+            { property: 'status', name: 'user_status', type: ColumnType.TEXT }
+          ],
+          indexes: [
+            { columns: ['email'], unique: true },
+            { name: 'idx_user_status', columns: ['user_status'] }
+          ]
+        });
+        expect(storage.getEntityMetadata('UserIndex') !== null).assertEqual(true);
+        const indexes = metadata.getIndexes();
+        expect(indexes.length).assertEqual(2);
+        expect(indexes[0].unique).assertEqual(true);
+        expect(indexes[0].columns[0]).assertEqual('email');
+        expect(indexes[1].name).assertEqual('idx_user_status');
+      });
+
       it('clear and resetInstance should remove all metadata', 0, () => {
         const storage = createStorage();
         storage.registerEntity('User');

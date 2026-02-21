@@ -14,7 +14,7 @@ export class HookExecutionError extends OrmError {
   /**
    * 构造函数
    * @param entityName 实体名称
-   * @param hookName 钩子名称（beforeSave/afterLoad/beforeDelete）
+   * @param hookName 钩子名称（beforeSave/afterLoad/beforeDelete/...）
    * @param originalError 原始错误信息
    */
   constructor(entityName: string, hookName: string, originalError: string) {

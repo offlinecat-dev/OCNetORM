@@ -5,6 +5,9 @@
 // 列元数据
 export { ColumnMetadata } from './ColumnMetadata'
 
+// 索引元数据
+export { IndexMetadata } from './IndexMetadata'
+
 // 实体元数据
 export { EntityMetadata } from './EntityMetadata'
 
@@ -24,13 +27,13 @@ export { MorphToMetadata } from './MorphToMetadata'
 export { HooksProcessor } from './HooksProcessor'
 
 // ORM 上下文（依赖注入）
-export { OrmContext, OrmContextConfig } from './OrmContext'
+export { OrmContext, OrmContextConfig, OrmEvent, OrmEventListener } from './OrmContext'
 
 // 统一初始化入口
 export { OCORMInit, OCORMInitOptions } from './OrmInit'
 
 // 快速实体注册工具
-export { defineEntity, EntitySchema, ColumnSchema, SoftDeleteSchema, MorphToSchema } from './EntitySchema'
+export { defineEntity, EntitySchema, ColumnSchema, SoftDeleteSchema, MorphToSchema, IndexSchema } from './EntitySchema'
 
 // 查询作用域注册表
 export {

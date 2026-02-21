@@ -160,20 +160,26 @@ export class PredicateBuilder {
         return `${column} LIKE ${PredicateBuilder.singleValueToString(value)}`
 
       case ConditionOperator.IN:
-        if (Array.isArray(value)) {
-          const inValues = PredicateBuilder.toPredicateArray(value)
-          predicates.in(column, inValues)
-          return `${column} IN (${PredicateBuilder.arrayToString(value)})`
+        if (!Array.isArray(value)) {
+          throw new PredicateBuildError('unknown', `IN 条件值必须是数组: ${column}`)
         }
-        return `${column} IN ()`
+        if (value.length === 0) {
+          throw new PredicateBuildError('unknown', `IN 空数组条件无法转换为 RdbPredicates: ${column}`)
+        }
+        const inValues = PredicateBuilder.toPredicateArray(value)
+        predicates.in(column, inValues)
+        return `${column} IN (${PredicateBuilder.arrayToString(value)})`
 
       case ConditionOperator.NOT_IN:
-        if (Array.isArray(value)) {
-          const notInValues = PredicateBuilder.toPredicateArray(value)
-          predicates.notIn(column, notInValues)
-          return `${column} NOT IN (${PredicateBuilder.arrayToString(value)})`
+        if (!Array.isArray(value)) {
+          throw new PredicateBuildError('unknown', `NOT IN 条件值必须是数组: ${column}`)
         }
-        return `${column} NOT IN ()`
+        if (value.length === 0) {
+          throw new PredicateBuildError('unknown', `NOT IN 空数组条件无法转换为 RdbPredicates: ${column}`)
+        }
+        const notInValues = PredicateBuilder.toPredicateArray(value)
+        predicates.notIn(column, notInValues)
+        return `${column} NOT IN (${PredicateBuilder.arrayToString(value)})`
 
       case ConditionOperator.BETWEEN:
         const minValue = PredicateBuilder.singleValueToPredicateValue(value)
@@ -206,6 +212,9 @@ export class PredicateBuilder {
       // 如果是数组，返回 null（不应该用于单值条件）
       return null
     }
+    if (value === undefined) {
+      return null
+    }
     if (typeof value === 'string') {
       return value
     }
@@ -214,6 +223,19 @@ export class PredicateBuilder {
     }
     if (typeof value === 'boolean') {
       return value ? 1 : 0
+    }
+    if (value instanceof Date) {
+      return value.getTime()
+    }
+    if (value instanceof Uint8Array) {
+      return value
+    }
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value as object)
+      } catch (e) {
+        return null
+      }
     }
     return null
   }
@@ -257,18 +279,8 @@ export class PredicateBuilder {
   private static toPredicateArray(values: Array<ValueType>): Array<relationalStore.ValueType> {
     const result: Array<relationalStore.ValueType> = []
     for (let i = 0; i < values.length; i++) {
-      const v = values[i]
-      if (v === null) {
-        result.push(null)
-      } else if (typeof v === 'string') {
-        result.push(v)
-      } else if (typeof v === 'number') {
-        result.push(v)
-      } else if (typeof v === 'boolean') {
-        result.push(v ? 1 : 0)
-      } else {
-        result.push(null)
-      }
+      const converted = PredicateBuilder.singleValueToPredicateValue(values[i])
+      result.push(converted)
     }
     return result
   }

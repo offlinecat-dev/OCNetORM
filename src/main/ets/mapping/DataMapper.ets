@@ -85,7 +85,9 @@ export class DataMapper {
             const defaultDbValue = TypeConverter.toDbValue(
               column.defaultValue,
               column.columnType,
-              this.inferPropertyType(column)
+              this.inferPropertyType(column),
+              undefined,
+              column.columnName
             )
             bucket.set(column.columnName, defaultDbValue)
           } else {
@@ -96,7 +98,13 @@ export class DataMapper {
       }
 
       // 转换值
-      const dbValue = TypeConverter.toDbValue(propValue, column.columnType, propType)
+      const dbValue = TypeConverter.toDbValue(
+        propValue,
+        column.columnType,
+        propType,
+        undefined,
+        column.columnName
+      )
 
       // 检查非空约束
       if (dbValue === null && !column.isNullable) {

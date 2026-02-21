@@ -1,5 +1,90 @@
 # CHANGELOG
 
+## [2.4.37] - 2026-02-21
+
+### 安全加固
+- 强化 `HAVING` 安全校验：新增危险 SQL 关键字拦截，阻断 `UNION/SELECT/FROM/JOIN` 等高风险片段
+- 强化 `ORDER BY` 方向校验：`QueryBuilder.orderBy` 增加运行时白名单（仅允许 `ASC/DESC`）
+- 增加二次防线：`QueryExecutor` 与 `AggregateExecutor` 在 SQL 组装阶段再次校验排序方向
+- 降低事务配置串扰风险：`TransactionManager` 对事务入口新增串行互斥，避免连接级 `PRAGMA` 在并发事务间互相影响
+- 修复事务锁释放时机：超时场景下等待内部回滚/清理结束后再释放锁，避免后续事务提前进入
+- 提升安全默认值：`DatabaseConfig.encrypt` 默认由 `false` 调整为 `true`
+- 降低慢查询信息泄露风险：`OrmContext.emitSlowQuery` 改为透传脱敏后的 SQL 预览
+- 消除隔离级别语义冲突：`TransactionOptions.serializable()` 改为前置失败，避免“构造成功、执行期才失败”
+- 修正更新日志语义：`CrudOperations` 的 UPDATE 日志补齐 `SET` 片段，避免排障误导
+
+### 测试
+- `entry/src/test/EntryOrmSecurityFix.test.ets` 新增安全回归：
+  - `having` 关键字拦截
+  - `orderBy` 方向运行时校验
+  - 篡改排序方向的执行层拦截
+  - 事务并发串行化验证
+  - 默认加密配置验证
+  - 慢查询 SQL 脱敏事件验证
+- `OCORM/src/test/Stage9Database/Database.test.ets` 同步更新默认加密断言
+
+## [2.4.36] - 2026-02-13
+
+### 修复
+- 修复 `#8 类型转换静默改写`：`TypeConverter.toDbValue` 在 `INTEGER/REAL` 场景下，非法输入默认改为抛出 `TypeConversionError`，不再静默回退为 `0`
+- 新增 `toDbValue` 宽松模式：仅当显式传入 `{ strict: false, fallbackValue }` 时才返回兜底值
+- `DataMapper` 调用 `toDbValue` 时补充列名参数，确保类型错误上下文可定位到具体列
+
+### 测试
+- `OCORM/src/test/Stage4Mapping/TypeConverter.test.ets` 新增 strict 抛错与 lenient 兜底回归，并修正 REAL 字符串数值断言
+- `entry/src/main/ets/suites/MappingSuite.ets` 新增 `TypeConverter_ToDbValue_StrictAndLenient` 集成回归
+
+## [2.4.35] - 2026-02-13
+
+### 修复
+- 修复 `#6 Unique` 并发竞态收敛不足：`@Unique` 规则自动映射为数据库唯一索引（含 SchemaBuilder/SchemaDiffer 路径）
+- 修复写入阶段唯一冲突语义不一致：`CrudOperations` 在数据库唯一约束失败时统一抛出 `UniqueValidationError`
+
+### 测试
+- `OCORM/src/test/Stage7Repository/SaveInsertUpdate.test.ets` 新增数据库唯一冲突映射回归（insert/update）
+- `OCORM/src/test/Stage10SchemaMigration/SchemaBuilder.test.ets` 新增 `@Unique` 规则索引生成回归
+- `OCORM/src/test/Stage10SchemaMigration/SchemaDiffer.test.ets` 新增 `@Unique` 规则索引差异回归
+
+## [2.4.34] - 2026-02-13
+
+### 修复
+- 修复切库缓存串库风险：`QueryCache` 缓存键新增数据库命名空间，`DatabaseManager` 在连接配置变化时强制清空缓存并绑定当前命名空间
+- 强化 `rawExecute` 安全护栏：仅允许参数化 `INSERT/UPDATE/DELETE/REPLACE`，拒绝多语句、SQL 注释片段和危险关键字
+
+### 测试
+- `OCORM/src/test/Stage8Cache/QueryCache.test.ets` 新增命名空间隔离与按命名空间失效回归
+- `OCORM/src/test/Stage9Database/Database.test.ets` 新增切库清缓存与命名空间同步回归
+- `OCORM/src/test/Stage7Repository/RepositoryQuery.test.ets` 新增 rawExecute 安全闸回归
+- `entry/src/main/ets/suites/QuerySuite.ets` 新增 rawExecute 安全闸集成回归
+
+## [2.4.33] - 2026-02-13
+
+### 修复
+- 强化 `Critical #2`：`CrudOperations.save` / `DeleteOperations.remove` 在需要级联原子性时，`SAVEPOINT` 不可用将立即失败，不再静默降级为“跳过 savepoint”
+- 强化回滚可靠性：保存点 `RELEASE/ROLLBACK` 失败改为显式报错，避免吞错导致的“假成功”
+- 调整 `RelationManager.sync`：优先使用 `SAVEPOINT`；若语句不被底层支持则自动回退旧事务模式
+- 强化 `WP-03` 事务语义：`REPEATABLE_READ` / `SERIALIZABLE` 改为显式拒绝，不再映射为兼容降级
+- 强化 `WP-03` 只读语义：`PRAGMA query_only` 设置失败改为立即失败，不再降级执行
+
+### 测试
+- `entry/src/test/EntryOrmCriticalFix.test.ets` 新增回归：
+  - save/remove 在 savepoint 不可用时应阻断写入
+  - sync 在 savepoint 路径下的提交与回滚行为
+- 事务语义回归补充：
+  - `entry/src/test/EntryOrmReviewFix.test.ets` 覆盖 readOnly/隔离级别强语义失败
+  - `OCORM/src/test/Stage7Repository/RepositoryTransaction.test.ets` 覆盖配置错误不启动事务
+
+## [2.4.32] - 2026-02-10
+
+### 新增
+- `QueryBuilder` 新增 `chunk(batchSize, callback)` 分块查询 API（大数据量分批处理）
+
+### 改进
+- `QueryExecutor` 新增分块执行能力，支持自动恢复原 `limit/offset` 查询状态
+
+### 测试
+- `entry/src/main/ets/suites/QuerySuite.ets` 新增分块查询回归用例（正常分批、非法批大小、回调异常恢复）
+
 ## [2.4.31] - 2026-02-09
 
 ### 重构（Phase 4 收口）

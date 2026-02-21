@@ -12,6 +12,7 @@ import { ColumnType } from '../types/ColumnType'
 import { RelationType } from '../types/RelationType'
 import { DatabaseManager } from '../database/DatabaseManager'
 import { ExecutionError } from '../errors/DatabaseError'
+import { resolveEntityIndexes } from './UniqueIndexResolver'
 
 /**
  * 建表执行结果类
@@ -196,6 +197,23 @@ export class SchemaBuilder {
     return sql
   }
 
+  generateCreateIndexSql(metadata: EntityMetadata): Array<string> {
+    const statements: Array<string> = []
+    const indexes = resolveEntityIndexes(metadata)
+    const escapedTable = this.escapeIdentifier(metadata.tableName)
+    for (let i = 0; i < indexes.length; i++) {
+      const index = indexes[i]
+      if (index.columns.length === 0) {
+        continue
+      }
+      const escapedIndex = this.escapeIdentifier(index.name)
+      const columnSql = index.columns.map((name) => this.escapeIdentifier(name)).join(', ')
+      const uniqueSql = index.unique ? 'UNIQUE ' : ''
+      statements.push(`CREATE ${uniqueSql}INDEX IF NOT EXISTS ${escapedIndex} ON ${escapedTable} (${columnSql})`)
+    }
+    return statements
+  }
+
   /**
    * 生成单个列的定义 SQL 片段
    * @param column 列元数据
@@ -303,14 +321,17 @@ export class SchemaBuilder {
    * @returns Promise<CreateTableResult>
    */
   async createTable(store: relationalStore.RdbStore, metadata: EntityMetadata): Promise<CreateTableResult> {
-    const sql = this.generateCreateTableSql(metadata)
+    const sqlStatements: Array<string> = [this.generateCreateTableSql(metadata), ...this.generateCreateIndexSql(metadata)]
+    const mergedSql = sqlStatements.join('; ')
 
     try {
-      await store.executeSql(sql)
-      return CreateTableResult.createSuccess(metadata.tableName, sql)
+      for (let i = 0; i < sqlStatements.length; i++) {
+        await store.executeSql(sqlStatements[i])
+      }
+      return CreateTableResult.createSuccess(metadata.tableName, mergedSql)
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
-      return CreateTableResult.createFailure(metadata.tableName, sql, errorMessage)
+      return CreateTableResult.createFailure(metadata.tableName, mergedSql, errorMessage)
     }
   }
 

@@ -5,7 +5,7 @@
 
 import { EntityData } from '../mapping/EntityData'
 import { MetadataStorage } from './MetadataStorage'
-import { EntityHooks, HookCallback } from '../types/EntityHooks'
+import { EntityHooks, HookCallback, HookName, GlobalHookCallback } from '../types/EntityHooks'
 import { HookExecutionError } from '../errors/HookError'
 
 /**
@@ -15,11 +15,28 @@ import { HookExecutionError } from '../errors/HookError'
 export class HooksProcessor {
   /** 单例实例 */
   private static instance: HooksProcessor = new HooksProcessor()
+  /** 全局钩子注册表 */
+  private globalHooks: Map<HookName, Array<GlobalHookCallback>> = new Map()
 
   /**
    * 私有构造函数，防止外部实例化
    */
   private constructor() {
+    this.initializeGlobalHooks()
+  }
+
+  private initializeGlobalHooks(): void {
+    this.globalHooks.set('beforeSave', [])
+    this.globalHooks.set('afterLoad', [])
+    this.globalHooks.set('beforeDelete', [])
+    this.globalHooks.set('beforeInsert', [])
+    this.globalHooks.set('afterInsert', [])
+    this.globalHooks.set('beforeUpdate', [])
+    this.globalHooks.set('afterUpdate', [])
+    this.globalHooks.set('afterDelete', [])
+    this.globalHooks.set('afterSave', [])
+    this.globalHooks.set('beforeRestore', [])
+    this.globalHooks.set('afterRestore', [])
   }
 
   /**
@@ -37,6 +54,28 @@ export class HooksProcessor {
     HooksProcessor.instance = new HooksProcessor()
   }
 
+  registerGlobalHook(hookName: HookName, callback: GlobalHookCallback): void {
+    const callbacks = this.globalHooks.get(hookName)
+    if (callbacks === undefined) {
+      this.globalHooks.set(hookName, [callback])
+      return
+    }
+    callbacks.push(callback)
+  }
+
+  clearGlobalHooks(hookName?: HookName): void {
+    if (hookName !== undefined) {
+      const callbacks = this.globalHooks.get(hookName)
+      if (callbacks !== undefined) {
+        callbacks.splice(0, callbacks.length)
+      }
+      return
+    }
+    this.globalHooks.forEach((callbacks) => {
+      callbacks.splice(0, callbacks.length)
+    })
+  }
+
   /**
    * 获取实体的钩子配置
    * @param entityName 实体名称
@@ -48,6 +87,16 @@ export class HooksProcessor {
       return null
     }
     return metadata.getHooks()
+  }
+
+  private resolveErrorMessage(error: Error | Object | string): string {
+    if (error instanceof Error) {
+      return error.message
+    }
+    if (typeof error === 'string') {
+      return error
+    }
+    return '未知错误'
   }
 
 
@@ -63,7 +112,7 @@ export class HooksProcessor {
     callback: HookCallback,
     data: EntityData,
     entityName: string,
-    hookName: string
+    hookName: HookName
   ): Promise<void> {
     try {
       const result = callback(data)
@@ -72,15 +121,83 @@ export class HooksProcessor {
         await result
       }
     } catch (error) {
-      // 将错误转换为字符串
-      let errorMessage = '未知错误'
-      if (error instanceof Error) {
-        errorMessage = error.message
-      } else if (typeof error === 'string') {
-        errorMessage = error
-      }
-      throw new HookExecutionError(entityName, hookName, errorMessage)
+      throw new HookExecutionError(entityName, hookName, this.resolveErrorMessage(error))
     }
+  }
+
+  private async executeGlobalCallback(
+    callback: GlobalHookCallback,
+    data: EntityData,
+    entityName: string,
+    hookName: HookName
+  ): Promise<void> {
+    try {
+      const result = callback(entityName, data)
+      if (result instanceof Promise) {
+        await result
+      }
+    } catch (error) {
+      throw new HookExecutionError(entityName, hookName, this.resolveErrorMessage(error))
+    }
+  }
+
+  private async executeGlobalHooks(hookName: HookName, entityName: string, data: EntityData): Promise<void> {
+    const callbacks = this.globalHooks.get(hookName)
+    if (callbacks === undefined || callbacks.length === 0) {
+      return
+    }
+    for (let i = 0; i < callbacks.length; i++) {
+      await this.executeGlobalCallback(callbacks[i], data, entityName, hookName)
+    }
+  }
+
+  private getEntityHookCallback(hooks: EntityHooks | null, hookName: HookName): HookCallback | null {
+    if (hooks === null) {
+      return null
+    }
+    switch (hookName) {
+      case 'beforeSave':
+        return hooks.beforeSave
+      case 'afterLoad':
+        return hooks.afterLoad
+      case 'beforeDelete':
+        return hooks.beforeDelete
+      case 'beforeInsert':
+        return hooks.beforeInsert
+      case 'afterInsert':
+        return hooks.afterInsert
+      case 'beforeUpdate':
+        return hooks.beforeUpdate
+      case 'afterUpdate':
+        return hooks.afterUpdate
+      case 'afterDelete':
+        return hooks.afterDelete
+      case 'afterSave':
+        return hooks.afterSave
+      case 'beforeRestore':
+        return hooks.beforeRestore
+      case 'afterRestore':
+        return hooks.afterRestore
+      default:
+        return null
+    }
+  }
+
+  private async executeHook(entityName: string, data: EntityData, hookName: HookName): Promise<void> {
+    const hooks = this.getHooks(entityName)
+    const callback = this.getEntityHookCallback(hooks, hookName)
+    const isBeforeHook = hookName.startsWith('before')
+    if (isBeforeHook) {
+      await this.executeGlobalHooks(hookName, entityName, data)
+      if (callback !== null) {
+        await this.executeCallback(callback, data, entityName, hookName)
+      }
+      return
+    }
+    if (callback !== null) {
+      await this.executeCallback(callback, data, entityName, hookName)
+    }
+    await this.executeGlobalHooks(hookName, entityName, data)
   }
 
   /**
@@ -91,11 +208,7 @@ export class HooksProcessor {
    * @throws HookExecutionError 如果钩子执行失败
    */
   async executeBeforeSave(entityName: string, data: EntityData): Promise<void> {
-    const hooks = this.getHooks(entityName)
-    if (hooks === null || hooks.beforeSave === null) {
-      return
-    }
-    await this.executeCallback(hooks.beforeSave, data, entityName, 'beforeSave')
+    await this.executeHook(entityName, data, 'beforeSave')
   }
 
   /**
@@ -106,11 +219,7 @@ export class HooksProcessor {
    * @throws HookExecutionError 如果钩子执行失败
    */
   async executeAfterLoad(entityName: string, data: EntityData): Promise<void> {
-    const hooks = this.getHooks(entityName)
-    if (hooks === null || hooks.afterLoad === null) {
-      return
-    }
-    await this.executeCallback(hooks.afterLoad, data, entityName, 'afterLoad')
+    await this.executeHook(entityName, data, 'afterLoad')
   }
 
   /**
@@ -121,11 +230,39 @@ export class HooksProcessor {
    * @throws HookExecutionError 如果钩子执行失败
    */
   async executeBeforeDelete(entityName: string, data: EntityData): Promise<void> {
-    const hooks = this.getHooks(entityName)
-    if (hooks === null || hooks.beforeDelete === null) {
-      return
-    }
-    await this.executeCallback(hooks.beforeDelete, data, entityName, 'beforeDelete')
+    await this.executeHook(entityName, data, 'beforeDelete')
+  }
+
+  async executeBeforeInsert(entityName: string, data: EntityData): Promise<void> {
+    await this.executeHook(entityName, data, 'beforeInsert')
+  }
+
+  async executeAfterInsert(entityName: string, data: EntityData): Promise<void> {
+    await this.executeHook(entityName, data, 'afterInsert')
+  }
+
+  async executeBeforeUpdate(entityName: string, data: EntityData): Promise<void> {
+    await this.executeHook(entityName, data, 'beforeUpdate')
+  }
+
+  async executeAfterUpdate(entityName: string, data: EntityData): Promise<void> {
+    await this.executeHook(entityName, data, 'afterUpdate')
+  }
+
+  async executeAfterDelete(entityName: string, data: EntityData): Promise<void> {
+    await this.executeHook(entityName, data, 'afterDelete')
+  }
+
+  async executeAfterSave(entityName: string, data: EntityData): Promise<void> {
+    await this.executeHook(entityName, data, 'afterSave')
+  }
+
+  async executeBeforeRestore(entityName: string, data: EntityData): Promise<void> {
+    await this.executeHook(entityName, data, 'beforeRestore')
+  }
+
+  async executeAfterRestore(entityName: string, data: EntityData): Promise<void> {
+    await this.executeHook(entityName, data, 'afterRestore')
   }
 
   /**
@@ -136,13 +273,15 @@ export class HooksProcessor {
    * @throws HookExecutionError 如果钩子执行失败
    */
   async executeAfterLoadBatch(entityName: string, dataList: Array<EntityData>): Promise<void> {
-    const hooks = this.getHooks(entityName)
-    if (hooks === null || hooks.afterLoad === null) {
-      return
-    }
     for (let i = 0; i < dataList.length; i++) {
-      await this.executeCallback(hooks.afterLoad, dataList[i], entityName, 'afterLoad')
+      await this.executeAfterLoad(entityName, dataList[i])
     }
+  }
+
+  private hasHook(entityName: string, hookName: HookName): boolean {
+    const hooks = this.getHooks(entityName)
+    const callback = this.getEntityHookCallback(hooks, hookName)
+    return callback !== null
   }
 
   /**
@@ -151,8 +290,7 @@ export class HooksProcessor {
    * @returns 是否有 beforeSave 钩子
    */
   hasBeforeSaveHook(entityName: string): boolean {
-    const hooks = this.getHooks(entityName)
-    return hooks !== null && hooks.beforeSave !== null
+    return this.hasHook(entityName, 'beforeSave')
   }
 
   /**
@@ -161,8 +299,7 @@ export class HooksProcessor {
    * @returns 是否有 afterLoad 钩子
    */
   hasAfterLoadHook(entityName: string): boolean {
-    const hooks = this.getHooks(entityName)
-    return hooks !== null && hooks.afterLoad !== null
+    return this.hasHook(entityName, 'afterLoad')
   }
 
   /**
@@ -171,8 +308,7 @@ export class HooksProcessor {
    * @returns 是否有 beforeDelete 钩子
    */
   hasBeforeDeleteHook(entityName: string): boolean {
-    const hooks = this.getHooks(entityName)
-    return hooks !== null && hooks.beforeDelete !== null
+    return this.hasHook(entityName, 'beforeDelete')
   }
 
   /**
@@ -181,12 +317,16 @@ export class HooksProcessor {
    * @returns 是否有任何钩子
    */
   hasAnyHook(entityName: string): boolean {
-    const hooks = this.getHooks(entityName)
-    if (hooks === null) {
-      return false
-    }
-    return hooks.beforeSave !== null ||
-           hooks.afterLoad !== null ||
-           hooks.beforeDelete !== null
+    return this.hasHook(entityName, 'beforeSave') ||
+      this.hasHook(entityName, 'afterLoad') ||
+      this.hasHook(entityName, 'beforeDelete') ||
+      this.hasHook(entityName, 'beforeInsert') ||
+      this.hasHook(entityName, 'afterInsert') ||
+      this.hasHook(entityName, 'beforeUpdate') ||
+      this.hasHook(entityName, 'afterUpdate') ||
+      this.hasHook(entityName, 'afterDelete') ||
+      this.hasHook(entityName, 'afterSave') ||
+      this.hasHook(entityName, 'beforeRestore') ||
+      this.hasHook(entityName, 'afterRestore')
   }
 }

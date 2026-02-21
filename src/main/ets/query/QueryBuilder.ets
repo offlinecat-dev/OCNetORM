@@ -355,7 +355,8 @@ export class QueryBuilder {
     if (resolvedColumn === null) {
       throw new InvalidConditionError(column, `列 '${column}' 在实体 '${this.entityName}' 中不存在`)
     }
-    const orderByClause = new OrderByClause(resolvedColumn, direction)
+    const safeDirection = this.normalizeSortDirectionOrThrow(String(direction))
+    const orderByClause = new OrderByClause(resolvedColumn, safeDirection)
     this.orderByColumns.push(orderByClause)
     return this
   }
@@ -457,12 +458,24 @@ export class QueryBuilder {
     }
   }
 
+  private normalizeSortDirectionOrThrow(direction: string): SortDirection {
+    const normalized = direction.trim().toUpperCase()
+    if (normalized === 'ASC') {
+      return 'ASC'
+    }
+    if (normalized === 'DESC') {
+      return 'DESC'
+    }
+    throw new InvalidConditionError('ORDER BY', `非法排序方向: ${direction}`)
+  }
+
   private validateAndNormalizeHavingClause(clause: string, args: Array<ValueType>): string {
     const normalized = clause.trim()
     if (normalized.length === 0) {
       throw new InvalidConditionError('HAVING', 'HAVING 条件不能为空')
     }
     this.ensureNoDangerousSqlTokens(normalized, 'HAVING')
+    this.ensureNoDangerousSqlKeywords(normalized, 'HAVING')
     if (!/^[A-Za-z0-9_(),.*+\-/%<>=!\s?]+$/.test(normalized)) {
       throw new InvalidConditionError('HAVING', 'HAVING 子句包含非法字符')
     }
@@ -508,6 +521,14 @@ export class QueryBuilder {
       value.includes('`')
     if (hasDangerousToken) {
       throw new InvalidConditionError(fieldName, `${fieldName} 包含危险 SQL 片段`)
+    }
+  }
+
+  private ensureNoDangerousSqlKeywords(value: string, fieldName: string): void {
+    const forbiddenKeywordPattern =
+      /\b(UNION|SELECT|FROM|JOIN|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|PRAGMA|VACUUM|REINDEX)\b/i
+    if (forbiddenKeywordPattern.test(value)) {
+      throw new InvalidConditionError(fieldName, `${fieldName} 包含危险 SQL 关键字`)
     }
   }
 

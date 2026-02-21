@@ -71,11 +71,11 @@ export class BatchOperations {
           await this.validateUniqueConstraints(entities[i], batchUniqueKeys)
         } catch (error) {
           if (error instanceof ValidationError) {
-            this.logger.logError(`批量插入验证失败 (索引 ${i}): ${error.message}`)
+            this.logger.logWarn(`[W_BATCH_VALIDATION] 批量插入验证失败 (索引 ${i}): ${error.message}`)
             return BatchInsertResult.createFailure(`验证失败 (索引 ${i}): ${error.message}`, [i])
           }
           const errorMessage = error instanceof Error ? error.message : String(error)
-          this.logger.logError(`批量插入验证失败 (索引 ${i}): ${errorMessage}`)
+          this.logger.logWarn(`[W_BATCH_VALIDATION] 批量插入验证失败 (索引 ${i}): ${errorMessage}`)
           return BatchInsertResult.createFailure(`验证失败 (索引 ${i}): ${errorMessage}`, [i])
         }
       }
@@ -144,7 +144,11 @@ export class BatchOperations {
       )
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
-      this.logger.logError(`批量插入执行失败: ${errorMessage}`)
+      if (this.isExpectedReadOnlyWriteDenied(errorMessage)) {
+        this.logger.logWarn(`[W_TX_READONLY_WRITE_DENIED] 批量插入执行失败: ${errorMessage}`)
+      } else {
+        this.logger.logError(`批量插入执行失败: ${errorMessage}`)
+      }
       return BatchInsertResult.createFailure(`批量插入执行失败: ${errorMessage}`)
     }
   }
@@ -242,5 +246,14 @@ export class BatchOperations {
       return value
     }
     return null
+  }
+
+  private isExpectedReadOnlyWriteDenied(errorMessage: string): boolean {
+    const normalized = errorMessage.toLowerCase()
+    return normalized.includes('readonly database') ||
+      normalized.includes('read-only') ||
+      normalized.includes('attempt to write a readonly database') ||
+      normalized.includes('query_only') ||
+      errorMessage.includes('只读')
   }
 }

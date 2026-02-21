@@ -82,7 +82,13 @@ export class TypeConverter {
    * @param propertyType 属性类型标识（用于特殊类型如 Date、boolean）
    * @returns 数据库值
    */
-  static toDbValue(value: ValueType, columnType: ColumnType, propertyType: string): DbValueType {
+  static toDbValue(
+    value: ValueType,
+    columnType: ColumnType,
+    propertyType: string,
+    options?: TypeConversionOptions,
+    columnName: string = 'unknown'
+  ): DbValueType {
     // 处理 null 值
     if (value === null) {
       return null
@@ -94,8 +100,11 @@ export class TypeConverter {
         return TypeConverter.dateToTimestamp(value)
       }
       if (typeof value === 'number') {
-        // Date 已经是时间戳形式
-        return value
+        if (!isNaN(value) && isFinite(value)) {
+          // Date 已经是时间戳形式
+          return value
+        }
+        return TypeConverter.handleToDbConversionError(value, 'Date(number)', columnName, options)
       }
     }
 
@@ -123,18 +132,36 @@ export class TypeConverter {
 
       case ColumnType.INTEGER:
         if (typeof value === 'number') {
-          return Math.floor(value)
+          if (!isNaN(value) && isFinite(value)) {
+            return Math.floor(value)
+          }
+          return TypeConverter.handleToDbConversionError(value, 'INTEGER(number)', columnName, options)
         }
         if (typeof value === 'boolean') {
           return TypeConverter.booleanToInt(value)
         }
-        return 0
+        if (typeof value === 'string') {
+          const parsedInt = TypeConverter.parseNumber(value)
+          if (parsedInt !== null) {
+            return Math.floor(parsedInt)
+          }
+        }
+        return TypeConverter.handleToDbConversionError(value, 'INTEGER(number)', columnName, options)
 
       case ColumnType.REAL:
         if (typeof value === 'number') {
-          return value
+          if (!isNaN(value) && isFinite(value)) {
+            return value
+          }
+          return TypeConverter.handleToDbConversionError(value, 'REAL(number)', columnName, options)
         }
-        return 0
+        if (typeof value === 'string') {
+          const parsedReal = TypeConverter.parseNumber(value)
+          if (parsedReal !== null) {
+            return parsedReal
+          }
+        }
+        return TypeConverter.handleToDbConversionError(value, 'REAL(number)', columnName, options)
 
       case ColumnType.BLOB:
         // BLOB 类型：如果值已经是字符串（Base64编码），保持不变
@@ -151,6 +178,56 @@ export class TypeConverter {
       default:
         return null
     }
+  }
+
+  private static toDbFallback(options?: TypeConversionOptions): DbValueType {
+    if (options?.fallbackValue === undefined || options.fallbackValue === null) {
+      return null
+    }
+    if (typeof options.fallbackValue === 'string' || typeof options.fallbackValue === 'number') {
+      return options.fallbackValue
+    }
+    if (typeof options.fallbackValue === 'boolean') {
+      return TypeConverter.booleanToInt(options.fallbackValue)
+    }
+    if (options.fallbackValue instanceof Uint8Array) {
+      return options.fallbackValue
+    }
+    return null
+  }
+
+  private static toDbTypeName(value: ValueType): string {
+    if (value instanceof Date) {
+      return 'Date'
+    }
+    if (value instanceof Uint8Array) {
+      return 'Uint8Array'
+    }
+    return typeof value
+  }
+
+  private static parseNumber(text: string): number | null {
+    const trimmed = text.trim()
+    if (trimmed.length === 0) {
+      return null
+    }
+    const parsed = Number(trimmed)
+    if (isNaN(parsed) || !isFinite(parsed)) {
+      return null
+    }
+    return parsed
+  }
+
+  private static handleToDbConversionError(
+    value: ValueType,
+    expectedType: string,
+    columnName: string,
+    options?: TypeConversionOptions
+  ): DbValueType {
+    if (options?.strict === false) {
+      return TypeConverter.toDbFallback(options)
+    }
+    throw new TypeConversionError(TypeConverter.toDbTypeName(value), expectedType, columnName)
   }
 
   private static handleConversionError(
@@ -228,21 +305,22 @@ export class TypeConverter {
           // 返回 JSON 字符串，由调用方解析
           return value
         }
+        if (value instanceof Uint8Array) {
+          return value
+        }
+        if (typeof value === 'object') {
+          return value
+        }
         return TypeConverter.handleConversionError(typeof value, 'object', columnName, options)
 
       case 'Uint8Array':
       case 'blob':
       case 'BLOB':
-        // BLOB 类型：返回字符串形式（Base64）或 null
-        // 注意：ValueType 不包含 Uint8Array，所以 BLOB 数据需要以字符串形式处理
-        if (typeof value === 'string') {
+        if (value instanceof Uint8Array) {
           return value
         }
-        if (value instanceof Uint8Array) {
-          // 如果需要在 ValueType 中存储，可以转换为 Base64 字符串
-          // 这里返回 null，因为 ValueType 不支持 Uint8Array
-          // 调用方应直接从 ResultSet 获取 BLOB 数据
-          return null
+        if (typeof value === 'string') {
+          return value
         }
         return null
 

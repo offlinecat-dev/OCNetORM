@@ -139,6 +139,23 @@ export default function queryCacheTest() {
       expect(cache.get('User', 'abc\u0000def')?.getPropertyValue('name')).assertEqual('WithNull');
     });
 
+    it('same entity and id should be isolated by namespace', 0, () => {
+      const cache = QueryCache.getInstance();
+      cache.configure({ enabled: true });
+
+      cache.setNamespace('db_a');
+      cache.set('User', 1, createEntityData('User', 1, 'Alice_A'));
+
+      cache.setNamespace('db_b');
+      expect(cache.get('User', 1)).assertEqual(null);
+      cache.set('User', 1, createEntityData('User', 1, 'Alice_B'));
+
+      cache.setNamespace('db_a');
+      expect(cache.get('User', 1)?.getPropertyValue('name')).assertEqual('Alice_A');
+      cache.setNamespace('db_b');
+      expect(cache.get('User', 1)?.getPropertyValue('name')).assertEqual('Alice_B');
+    });
+
     it('invalidateEntity should handle entityName with null character safely', 0, () => {
       const cache = QueryCache.getInstance();
       cache.configure({ enabled: true });
@@ -380,6 +397,23 @@ export default function queryCacheTest() {
       expect(cache.get('User', 2)).assertEqual(null);
       expect(cache.get('User', 3)).assertEqual(null);
       expect(cache.get('Post', 1) !== null).assertEqual(true);
+    });
+
+    it('invalidateEntity should only affect current namespace', 0, () => {
+      const cache = QueryCache.getInstance();
+      cache.configure({ enabled: true });
+
+      cache.setNamespace('db_a');
+      cache.set('User', 1, createEntityData('User', 1, 'A_User'));
+      cache.setNamespace('db_b');
+      cache.set('User', 1, createEntityData('User', 1, 'B_User'));
+
+      cache.setNamespace('db_a');
+      cache.invalidateEntity('User');
+      expect(cache.get('User', 1)).assertEqual(null);
+
+      cache.setNamespace('db_b');
+      expect(cache.get('User', 1)?.getPropertyValue('name')).assertEqual('B_User');
     });
 
     it('invalidateEntity for non-existent entity should not throw', 0, () => {

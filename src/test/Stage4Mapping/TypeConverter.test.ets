@@ -43,7 +43,7 @@ export default function typeConverterTest() {
       expect(boolValue).assertEqual(1);
 
       const realValue = TypeConverter.toDbValue('3.5', ColumnType.REAL, 'string');
-      expect(realValue).assertEqual(0);
+      expect(realValue).assertEqual(3.5);
 
       const blobString = TypeConverter.toDbValue('blob', ColumnType.BLOB, 'string');
       expect(blobString).assertEqual('blob');
@@ -62,6 +62,34 @@ export default function typeConverterTest() {
       const payload = { a: 1, b: 'x' };
       const objectValue = TypeConverter.toDbValue(payload as ValueType, ColumnType.TEXT, 'object');
       expect(objectValue).assertEqual(JSON.stringify(payload));
+    });
+
+    it('toDbValue should throw in strict mode and use fallback in lenient mode', 0, () => {
+      let strictThrew = false;
+      try {
+        TypeConverter.toDbValue('NaN', ColumnType.INTEGER, 'string', undefined, 'age_col');
+      } catch (error) {
+        strictThrew = error instanceof TypeConversionError;
+      }
+      expect(strictThrew).assertEqual(true);
+
+      const lenientInt = TypeConverter.toDbValue(
+        'NaN',
+        ColumnType.INTEGER,
+        'string',
+        { strict: false, fallbackValue: 0 },
+        'age_col'
+      );
+      expect(lenientInt).assertEqual(0);
+
+      const lenientReal = TypeConverter.toDbValue(
+        'bad_real',
+        ColumnType.REAL,
+        'string',
+        { strict: false, fallbackValue: 1.5 },
+        'score_col'
+      );
+      expect(lenientReal).assertEqual(1.5);
     });
 
     it('fromDbValue should convert and throw on mismatch', 0, () => {
@@ -88,6 +116,14 @@ export default function typeConverterTest() {
         threw = error instanceof TypeConversionError;
       }
       expect(threw).assertEqual(true);
+    });
+
+    it('fromDbValue should preserve Uint8Array for object/blob', 0, () => {
+      const bytes = new Uint8Array([1, 2, 3]);
+      const objectValue = TypeConverter.fromDbValue(bytes, 'object', 'blob_col');
+      const blobValue = TypeConverter.fromDbValue(bytes, 'blob', 'blob_col');
+      expect(objectValue instanceof Uint8Array).assertEqual(true);
+      expect(blobValue instanceof Uint8Array).assertEqual(true);
     });
   });
 }
