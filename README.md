@@ -6,11 +6,12 @@
 **轻量级 HarmonyOS SQLite ORM 框架**
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.4.30-green.svg)](https://github.com/offlinecat-dev/OCNetORM/releases)
+[![Version](https://img.shields.io/badge/Version-3.0.0-green.svg)](https://github.com/offlinecat-dev/OCNetORM/releases)
 [![HarmonyOS](https://img.shields.io/badge/HarmonyOS-Next-orange.svg)](https://developer.harmonyos.com)
 [![OpenHarmony](https://img.shields.io/badge/OpenHarmony-5.0+-purple.svg)](https://www.openharmony.cn)
 
-基于 `@ohos.data.relationalStore` 构建，提供类型安全的数据库操作 API。
+基于 `@ohos.data.relationalStore` 构建，提供类型安全的数据库操作 API。  
+当前文档对应 **OCORM 3.0.0**。
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-black?style=for-the-badge&logo=github)](https://github.com/offlinecat-dev/OCNetORM)
 [![Report Bug](https://img.shields.io/badge/Issues-Report_Bug-red?style=for-the-badge&logo=github)](https://github.com/offlinecat-dev/OCNetORM/issues)
@@ -18,6 +19,7 @@
 ## 目录
 
 - [特性](#特性)
+- [3.0 版本说明](#30-版本说明)
 - [性能基准](#性能基准)
 - [安装](#安装)
 - [快速开始](#快速开始)
@@ -25,6 +27,7 @@
 - [常用工作流](#常用工作流)
 - [文档](#文档)
 - [兼容性](#兼容性)
+- [2.x 兼容性与升级说明](#2x-兼容性与升级说明)
 - [常见问题](#常见问题)
 - [贡献](#贡献)
 - [License](#license)
@@ -50,6 +53,17 @@
 - 🔀 工具链支持（Seeder / Factory / MigrationGenerator）
 - 📈 工程化能力（ViewModel 双向映射、日志脱敏、错误国际化）
 
+## 3.0 版本说明
+
+- OCORM 3.0 是在 2.4.x 稳定线基础上的主版本升级，重点是安全策略统一与模块化重构收敛。
+- 对日常开发最直接的变化是默认行为更安全、事务语义更严格、工具链能力更完整。
+
+3.0 重点变化：
+- 默认加密开启：`DatabaseConfig.encrypt` 默认值为 `true`
+- 事务策略收紧：`serializable()` fail-fast；`REPEATABLE_READ/SERIALIZABLE` 当前实现显式拒绝执行
+- SQL 安全增强：`HAVING` 风险关键字拦截，`ORDER BY` 方向运行时双重校验
+- 新增工具链：`SeederManager`、`defineFactory`、`MigrationGenerator`
+
 ## 性能基准
 
 > 测试设备：HarmonyOS 真机 | 测试日期：2026-01-27
@@ -69,14 +83,14 @@
 
 ## 安装
 
-[![ohpm](https://img.shields.io/badge/ohpm-v2.4.30-blue?style=for-the-badge)](https://ohpm.openharmony.cn/)
+[![ohpm](https://img.shields.io/badge/ohpm-v3.0.0-blue?style=for-the-badge)](https://ohpm.openharmony.cn/)
 
 在 HarmonyOS 项目的 `oh-package.json5` 中添加依赖：
 
 ```json5
 {
   "dependencies": {
-    "@offlinecat/ocorm": "2.4.30"
+    "@offlinecat/ocorm": "3.0.0"
   }
 }
 ```
@@ -193,7 +207,7 @@ await repo.transaction(async (txRepo) => {
 const options = TransactionOptions.fromConfig({
   timeout: 10000,
   retries: 3,
-  isolation: IsolationLevel.SERIALIZABLE
+  isolation: IsolationLevel.READ_COMMITTED
 })
 await repo.transactionWithOptions(async (txRepo) => {
   // 关键业务操作
@@ -204,7 +218,7 @@ await repo.transactionWithOptions(async (txRepo) => {
 
 - `TransactionOptions.readOnly = true` 会在事务开始后尝试启用连接级只读模式（`PRAGMA query_only = 1`）。
 - 事务结束后会自动恢复连接状态（`PRAGMA query_only = 0`），避免影响后续普通写操作。
-- 如果底层环境不支持该 PRAGMA，会自动降级为兼容模式并记录日志，不会直接导致事务失败。
+- 如果底层环境不支持该 PRAGMA，事务会明确失败并返回错误，避免只读语义被静默绕过。
 - 只读模式用于业务安全兜底，不建议将其作为数据库权限控制的唯一手段。
 
 ### 7. 批量插入
@@ -391,13 +405,33 @@ hvigor test
 - OpenHarmony 5.0+
 - 目标 SDK: 6.0.1 (API 21)
 
+## 2.x 兼容性与升级说明
+
+3.0 对 2.x 的定位是“API 主体兼容，默认行为收紧”。
+
+保持兼容（通常无需改动）：
+- `Repository` / `QueryBuilder` / `EntityData` 核心用法
+- 关系映射、分页、缓存、迁移、验证的主调用路径
+- 包入口导入方式：`import { ... } from '@offlinecat/ocorm'`
+
+需要关注（可能影响旧行为）：
+- `DatabaseConfig.encrypt` 默认值改为 `true`
+- `TransactionOptions.serializable()` 改为 fail-fast
+- `REPEATABLE_READ/SERIALIZABLE` 当前实现显式拒绝执行
+- 只读事务在 `PRAGMA query_only` 不可用时将直接失败
+
+升级建议（2.x -> 3.0）：
+1. 显式检查 `DatabaseConfig` 中 `encrypt` 配置是否符合业务预期。
+2. 将事务隔离级别统一调整为当前已支持级别（优先 `READ_COMMITTED`）。
+3. 对 `readOnly` 事务补充失败分支处理，避免依赖旧版“降级继续执行”假设。
+
 ## 常见问题
 
 ### Q1：readOnly 事务会不会影响后续写操作？
 - 不会。事务结束时会自动恢复连接级只读状态。
 
 ### Q2：为什么我看到“已降级为兼容模式”的日志？
-- 当前数据库环境不支持某些 PRAGMA（如 `query_only`/`read_uncommitted`），OCORM 会自动降级并继续执行事务。
+- 3.0 起事务语义更严格。若你仍看到类似日志，通常来自旧版本运行日志或自定义封装层，请以当前版本行为为准并检查事务配置。
 
 ### Q3：生产环境建议开启什么日志级别？
 - 建议 `LogLevel.ERROR`，开发环境可使用 `LogLevel.DEBUG`。

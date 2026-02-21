@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## [3.0.0] - 2026-02-21
+
+### 版本定位
+- 发布 `3.0` 主版本，整合 2.4.31 ~ 2.4.37 的核心重构与安全加固成果
+- 对外 API 维持以 `import { ... } from '@offlinecat/ocorm'` 为中心的使用方式
+
+### 主要增强
+- 新增工具链能力：`SeederManager`、`defineFactory`、`MigrationGenerator`
+- 完成 Repository/Query/Schema 关键模块职责拆分，提升可维护性与测试可控性
+- 完成事务与查询安全加固：`HAVING` 风险关键字拦截、`ORDER BY` 方向双重校验
+- 加强事务一致性：并发事务串行互斥、超时清理后再释放锁、只读模式严格恢复
+- 完成 `@Unique` 到数据库唯一索引的映射闭环，补齐对应 Schema 构建与差异计算路径
+
+### 行为变化（升级需关注）
+- `DatabaseConfig.encrypt` 默认值调整为 `true`
+- `TransactionOptions.serializable()` 改为 fail-fast（创建时直接抛错）
+- `REPEATABLE_READ` / `SERIALIZABLE` 在当前实现中均显式拒绝执行
+- 只读事务在底层不支持 `PRAGMA query_only` 时将明确失败，不再静默降级
+
+### 2.x 兼容性
+- 2.x 的核心 CRUD、QueryBuilder、关联映射、迁移、验证 API 在 3.0 中保持可用
+- 可能受影响的是“默认行为与安全策略”而非主调用方式，详见 README 的《2.x 兼容性与升级说明》
+
 ## [2.4.37] - 2026-02-21
 
 ### 安全加固
