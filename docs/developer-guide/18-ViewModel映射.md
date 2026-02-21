@@ -51,7 +51,7 @@ export class UserViewModel {
 ### 简单转换（使用回调）
 
 ```typescript
-import { ViewModelMapper, EntityData } from '@aspect/ocorm'
+import { ViewModelMapper, EntityData } from '@offlinecat/ocorm'
 import { UserViewModel } from './UserViewModel'
 
 // EntityData → ViewModel
@@ -79,7 +79,7 @@ if (user !== null) {
 ### 反向转换（ViewModel → EntityData）
 
 ```typescript
-import { ViewModelMapper, EntityData } from '@aspect/ocorm'
+import { ViewModelMapper, EntityData } from '@offlinecat/ocorm'
 
 const viewModel = new UserViewModel()
 viewModel.name = '张三'
@@ -109,7 +109,7 @@ const entityData = ViewModelMapper.toEntityData(
 ### 创建映射配置
 
 ```typescript
-import { ViewModelMappingConfig, EntityData } from '@aspect/ocorm'
+import { ViewModelMappingConfig, EntityData } from '@offlinecat/ocorm'
 import { UserViewModel } from './UserViewModel'
 
 const userMappingConfig = new ViewModelMappingConfig<UserViewModel>(
@@ -145,7 +145,7 @@ userMappingConfig.setReverseMapper(
 ### 使用配置进行转换
 
 ```typescript
-import { ViewModelMapper } from '@aspect/ocorm'
+import { ViewModelMapper } from '@offlinecat/ocorm'
 
 // EntityData → ViewModel（使用配置）
 const viewModel = ViewModelMapper.toViewModelWithConfig(entityData, userMappingConfig)
@@ -183,7 +183,7 @@ const config = new ViewModelMappingConfig<UserViewModel>('User', () => new UserV
 ### EntityData 数组 → ViewModel 数组
 
 ```typescript
-import { ViewModelMapper, Repository } from '@aspect/ocorm'
+import { ViewModelMapper, Repository } from '@offlinecat/ocorm'
 
 const userRepo = new Repository('User')
 const users = await userRepo.findAll()
@@ -226,7 +226,7 @@ const entityDataArray = ViewModelMapper.toEntityDataArray(
 ### EntityData → 属性 Map
 
 ```typescript
-import { ViewModelMapper } from '@aspect/ocorm'
+import { ViewModelMapper } from '@offlinecat/ocorm'
 
 const user = await userRepo.findById(1)
 if (user !== null) {
@@ -377,7 +377,7 @@ const statusConfig = new ViewModelMappingConfig<UserStatusViewModel>(
 ### 列表页面
 
 ```typescript
-import { ViewModelMapper, Repository } from '@aspect/ocorm'
+import { ViewModelMapper, Repository } from '@offlinecat/ocorm'
 
 @Entry
 @Component
@@ -472,7 +472,7 @@ struct UserFormPage {
 
 ```typescript
 // mappings/UserMapping.ets - 推荐的文件组织方式
-import { ViewModelMappingConfig } from '@aspect/ocorm'
+import { ViewModelMappingConfig } from '@offlinecat/ocorm'
 import { UserViewModel } from '../viewmodels/UserViewModel'
 
 export const userMappingConfig = new ViewModelMappingConfig<UserViewModel>(
@@ -496,3 +496,4 @@ export const userMappingConfig = new ViewModelMappingConfig<UserViewModel>(
     ['id', 'name', 'email']
   )
 ```
+

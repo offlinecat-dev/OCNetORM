@@ -60,6 +60,8 @@
 | 方法 | 参数 | 返回值 | 说明 |
 |------|------|--------|------|
 | `createQueryBuilder()` | 无 | `QueryBuilder` | 创建查询构建器 |
+| `rawQuery(sql, args?)` | `sql: string, args?: Array<ValueType>` | `Promise<Array<EntityData>>` | 执行原生查询 SQL（参数化） |
+| `rawExecute(sql, args?)` | `sql: string, args?: Array<ValueType>` | `Promise<void>` | 执行原生写操作 SQL（受安全闸限制） |
 | `getMetadata()` | 无 | `EntityMetadata` | 获取实体元数据 |
 | `getDataMapper()` | 无 | `DataMapper` | 获取数据映射器 |
 
@@ -104,8 +106,19 @@
 | `select(columns)` | `columns: Array<string>` | `QueryBuilder` | 选择指定列 |
 | `with(relationName)` | `relationName: string` | `QueryBuilder` | 预加载关联 |
 | `withLazy(relationName)` | `relationName: string` | `QueryBuilder` | 延迟加载关联 |
+| `withWhere(relationName, callback)` | `relationName: string, callback: (qb: QueryBuilder) => void` | `QueryBuilder` | 预加载关联并附加过滤条件 |
+| `withCount(relationPath, alias?)` | `relationPath: string, alias?: string` | `QueryBuilder` | 预加载关联计数 |
 | `scope(scopeName)` | `scopeName: string` | `QueryBuilder` | 应用单个查询作用域 |
 | `scopes(scopeNames)` | `scopeNames: Array<string>` | `QueryBuilder` | 批量应用查询作用域 |
+
+### 聚合与分组
+
+| 方法 | 参数 | 返回值 | 说明 |
+|------|------|--------|------|
+| `groupBy(column)` | `column: string` | `QueryBuilder` | 添加单列分组 |
+| `groupByMultiple(columns)` | `columns: Array<string>` | `QueryBuilder` | 添加多列分组 |
+| `having(clause, args?)` | `clause: string, args?: Array<ValueType>` | `QueryBuilder` | 添加 HAVING 条件 |
+| `selectRaw(expressions)` | `expressions: Array<string>` | `QueryBuilder` | 设置聚合/表达式查询列 |
 
 ### 软删除
 
@@ -122,6 +135,7 @@
 | `getQueryDescription()` | 无 | `string` | 获取查询描述（调试用） |
 | `getConditions()` | 无 | `Array<WhereCondition>` | 获取所有条件 |
 | `getAllConditions()` | 无 | `Array<WhereCondition>` | 获取所有条件（含软删除） |
+| `chunk(batchSize, callback)` | `batchSize: number, callback: (entities: Array<EntityData>, chunkIndex: number) => Promise<void> \| void` | `Promise<void>` | 分块查询并回调处理 |
 
 ---
 
@@ -153,6 +167,7 @@
 | `getOne()` | 无 | `Promise<EntityData \| null>` | 获取单条结果 |
 | `getPaginated()` | 无 | `Promise<PaginatedResult>` | 执行分页查询 |
 | `count()` | 无 | `Promise<number>` | 统计数量 |
+| `chunk(batchSize, callback)` | `batchSize: number, callback: (entities: Array<EntityData>, chunkIndex: number) => Promise<void> \| void` | `Promise<void>` | 分块执行查询 |
 
 ---
 
@@ -257,6 +272,33 @@
 | `logError(errorMessage)` | `errorMessage: string` | `void` | 记录错误日志 |
 | `logDebug(debugMessage)` | `debugMessage: string` | `void` | 记录调试日志 |
 | `logInfo(infoMessage)` | `infoMessage: string` | `void` | 记录信息日志 |
+
+---
+
+## 工具链 API（3.0）
+
+### Seeder
+
+| 方法 | 参数 | 返回值 | 说明 |
+|------|------|--------|------|
+| `SeederManager.run(seeders)` | `seeders: Array<SeederEntry>` | `Promise<SeederExecutionResult>` | 执行 Seeder 列表并返回汇总结果 |
+
+### Factory
+
+| 方法 | 参数 | 返回值 | 说明 |
+|------|------|--------|------|
+| `defineFactory(entityName, builder)` | `entityName: string, builder: FactoryBuilder` | `EntityFactory` | 定义实体工厂 |
+| `factory.make(overrides?)` | `overrides?: FactoryRecord` | `Promise<EntityData>` | 生成单条实体数据（不落库） |
+| `factory.create(overrides?)` | `overrides?: FactoryRecord` | `Promise<EntityData>` | 生成并保存单条实体数据 |
+| `factory.makeMany(count, overridesBuilder?)` | `count: number, overridesBuilder?: FactoryOverridesBuilder` | `Promise<Array<EntityData>>` | 批量生成实体数据（不落库） |
+| `factory.createMany(count, overridesBuilder?)` | `count: number, overridesBuilder?: FactoryOverridesBuilder` | `Promise<Array<EntityData>>` | 批量生成并保存实体数据 |
+
+### Migration 生成
+
+| 方法 | 参数 | 返回值 | 说明 |
+|------|------|--------|------|
+| `MigrationGenerator.generate(options?)` | `options?: MigrationGeneratorOptions` | `Promise<GeneratedMigration>` | 根据当前 Schema 差异生成迁移内容 |
+| `MigrationGenerator.generateWithStore(store, options?)` | `store: relationalStore.RdbStore, options?: MigrationGeneratorOptions` | `Promise<GeneratedMigration>` | 使用指定 store 生成迁移 |
 
 ---
 ## ViewModelMapper API
@@ -370,3 +412,6 @@ await DatabaseManager.getInstance().close(): Promise<void>
 | `enableQueryCache` | `boolean` | 是否启用查询缓存（默认 false） |
 | `queryCacheMaxSize` | `number` | 查询缓存最大条目数（默认 100） |
 | `queryCacheTtlMs` | `number` | 查询缓存 TTL（毫秒，默认 60000） |
+| `queryTimeoutMs` | `number` | 查询超时（毫秒，0 表示禁用） |
+| `maxConcurrentQueries` | `number` | 最大并发查询数（0 表示不限制） |
+| `relationInClauseLimit` | `number` | 关联加载 IN 条件单批上限（默认 500） |

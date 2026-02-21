@@ -7,3 +7,6 @@
 /docs/*
 !/docs/developer-guide/
 !/docs/developer-guide/**
+/docs/99-功能增强路线图.md
+/docs/developer-guide/26-兼容发布版的重构拆分方案.md
+/docs/developer-guide/27-安全审查与加固建议.md

@@ -11,7 +11,7 @@ OCORM 提供完整的数据库 Schema 迁移功能，支持手动迁移脚本和
 ### 生成建表 SQL
 
 ```typescript
-import { SchemaBuilder, MetadataStorage } from '@aspect/ocorm'
+import { SchemaBuilder, MetadataStorage } from '@offlinecat/ocorm'
 
 const builder = new SchemaBuilder()
 
@@ -32,7 +32,7 @@ const allSql = builder.generateAllCreateTableSql(true)  // true = 包含多对�
 ### 执行建表操作
 
 ```typescript
-import { SchemaBuilder, DatabaseManager } from '@aspect/ocorm'
+import { SchemaBuilder, DatabaseManager } from '@offlinecat/ocorm'
 
 const builder = new SchemaBuilder()
 
@@ -87,7 +87,7 @@ class CreateAllTablesResult {
 每个迁移脚本必须实现 `Migration` 接口：
 
 ```typescript
-import { Migration } from '@aspect/ocorm'
+import { Migration } from '@offlinecat/ocorm'
 import { relationalStore } from '@kit.ArkData'
 
 class Migration_001_CreateUsersTable implements Migration {
@@ -113,7 +113,7 @@ class Migration_001_CreateUsersTable implements Migration {
 ### 注册迁移脚本
 
 ```typescript
-import { MigrationManager } from '@aspect/ocorm'
+import { MigrationManager } from '@offlinecat/ocorm'
 
 const migrationManager = new MigrationManager()
 
@@ -132,7 +132,7 @@ migrationManager.registerAll([
 ### 执行迁移
 
 ```typescript
-import { MigrationManager, DatabaseManager } from '@aspect/ocorm'
+import { MigrationManager, DatabaseManager } from '@offlinecat/ocorm'
 
 const migrationManager = new MigrationManager()
 // ... 注册迁移脚本
@@ -230,7 +230,7 @@ const rollbackMigrations = migrationManager.getRollbackMigrations(currentVersion
 ### 启用自动迁移
 
 ```typescript
-import { OCORMInit, DatabaseConfig, AutoMigrationMode } from '@aspect/ocorm'
+import { OCORMInit, DatabaseConfig, AutoMigrationMode } from '@offlinecat/ocorm'
 
 // 在初始化时启用自动迁移
 await OCORMInit(this.context, {
@@ -267,7 +267,7 @@ enum AutoMigrationMode {
 ### 手动执行自动迁移
 
 ```typescript
-import { MigrationManager, AutoMigrationMode } from '@aspect/ocorm'
+import { MigrationManager, AutoMigrationMode } from '@offlinecat/ocorm'
 
 const migrationManager = new MigrationManager()
 
@@ -300,7 +300,7 @@ for (const change of result.skippedChanges) {
 `SchemaDiffer` 用于比较实体元数据与数据库实际结构的差异：
 
 ```typescript
-import { SchemaDiffer, DatabaseManager } from '@aspect/ocorm'
+import { SchemaDiffer, DatabaseManager } from '@offlinecat/ocorm'
 
 const differ = new SchemaDiffer()
 const store = DatabaseManager.getInstance().getStore()
@@ -381,7 +381,7 @@ interface MigrationLogRecord {
 
 ```typescript
 // migrations/index.ets
-import { Migration } from '@aspect/ocorm'
+import { Migration } from '@offlinecat/ocorm'
 import { relationalStore } from '@kit.ArkData'
 
 export class Migration_001_InitialSchema implements Migration {
@@ -433,7 +433,7 @@ export const allMigrations: Array<Migration> = [
 
 ```typescript
 // EntryAbility.ets
-import { OCORMInit, DatabaseConfig, MigrationManager } from '@aspect/ocorm'
+import { OCORMInit, DatabaseConfig, MigrationManager } from '@offlinecat/ocorm'
 import { allMigrations } from './migrations'
 
 export default class EntryAbility extends UIAbility {
@@ -470,3 +470,4 @@ export default class EntryAbility extends UIAbility {
 4. **测试迁移脚本** - 在开发环境充分测试后再上线
 5. **备份数据** - 执行破坏性迁移前务必备份数据
 6. **使用事务** - 迁移操作会自动在事务中执行，失败时自动回滚
+
