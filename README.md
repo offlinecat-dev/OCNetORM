@@ -64,14 +64,14 @@
 - SQL 安全增强：`HAVING` 风险关键字拦截，`ORDER BY` 方向运行时双重校验
 - 新增工具链：`SeederManager`、`defineFactory`、`MigrationGenerator`
 
-来自《功能增强路线图》的已落地能力（`docs/99-功能增强路线图.md`）：
+3.0 已落地能力：
 - 聚合与分组查询（`sum/avg/max/min`、`groupBy/having/selectRaw`）
 - 原生 SQL 能力（`rawQuery/rawExecute`，含安全约束）
 - 查询作用域（`scope/scopes`）
 - 关联增强（`withWhere`、`withCount`、MorphTo 9.4）
 - 批量更新/删除与分块查询（`update/delete/chunk`）
 
-来自《安全审查报告》的闭环修复（`docs/17-安全审查报告-2026-02-10.md`）：
+3.0 安全与一致性修复：
 - 事务一致性硬化（并发串行互斥、超时清理后释放锁、只读语义收紧）
 - SQL 安全加固（`HAVING`、`ORDER BY`、`rawExecute` 安全闸）
 - 数据正确性修复（类型转换严格化、`@Unique` 索引映射、ManyToMany 主键类型统一）
