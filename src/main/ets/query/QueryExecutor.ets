@@ -26,6 +26,8 @@ import { AggregateExecutor } from './AggregateExecutor'
 import { SubQueryExecutor } from './SubQueryExecutor'
 import { SubQueryRelationExecutor } from './SubQueryRelationExecutor'
 import { QueryExecutorRelationSupport } from './QueryExecutorRelationSupport'
+import { QueryExecutorSubQueryBatchSupport } from './QueryExecutorSubQueryBatchSupport'
+import { QueryExecutorOrderSupport } from './QueryExecutorOrderSupport'
 import {
   QueryExecutorSqlSupport,
   QueryExecutorSqlResult,
@@ -38,7 +40,6 @@ import { sanitizeErrorMessage, sanitizeSqlPreview } from '../errors/ErrorSanitiz
 import {
   applyLimitOffset as applyLimitOffsetUtil,
   buildIdSetFromValues,
-  compareOrderValues as compareOrderValuesUtil,
   filterEntitiesByIdSet,
   hasOrConditions,
   normalizeSubQueryIds,
@@ -64,11 +65,6 @@ class SubQueryExecutionContext {
   }
 }
 
-interface OrderDefinition {
-  propertyName: string
-  direction: string
-}
-
 type QueryObserver = (operation: string) => void
 type LateResultSetObserver = () => void
 type RelationPathObserver = (phase: string, relationPath: string) => Promise<void> | void
@@ -87,6 +83,10 @@ export class QueryExecutor {
   private relationLoader: RelationLoader
   /** 查询关系路径加载支持 */
   private relationSupport: QueryExecutorRelationSupport
+  /** 子查询批处理执行支持 */
+  private subQueryBatchSupport: QueryExecutorSubQueryBatchSupport
+  /** 查询排序与列补齐支持 */
+  private orderSupport: QueryExecutorOrderSupport
   /** 查询 SQL 构建支持 */
   private sqlSupport: QueryExecutorSqlSupport
   /** 日志记录器 */
@@ -122,6 +122,7 @@ export class QueryExecutor {
     this.queryBuilder = queryBuilder.clone()
     this.dataMapper = new DataMapper(queryBuilder.getEntityName())
     this.relationLoader = new RelationLoader(this.queryBuilder.getEntityName(), () => this.getStore())
+    this.orderSupport = new QueryExecutorOrderSupport(this.queryBuilder)
     this.sqlSupport = new QueryExecutorSqlSupport(
       this.queryBuilder,
       (value: ValueType | Array<ValueType> | null): relationalStore.ValueType => this.toRdbValue(value)
@@ -140,6 +141,35 @@ export class QueryExecutor {
       this.logger,
       (resultSet: relationalStore.ResultSet) => this.resultSetToRow(resultSet)
     )
+    this.subQueryBatchSupport = new QueryExecutorSubQueryBatchSupport({
+      taskPoolThreshold: QueryExecutor.TASKPOOL_THRESHOLD,
+      applySubQueryFilter: (sourceIds: Array<ValueType>): boolean => this.applySubQueryFilter(sourceIds),
+      buildPredicatesOrThrow: (operation: string): relationalStore.RdbPredicates => this.buildPredicatesOrThrow(operation),
+      queryEntities: async (
+        store: relationalStore.RdbStore,
+        predicates: relationalStore.RdbPredicates,
+        selectedColumns: Array<string>
+      ): Promise<Array<EntityData>> => await this.queryEntities(store, predicates, selectedColumns),
+      queryResultSet: async (
+        store: relationalStore.RdbStore,
+        predicates: relationalStore.RdbPredicates,
+        selectedColumns: Array<string>,
+        operation: string
+      ): Promise<relationalStore.ResultSet> => await this.queryResultSet(store, predicates, selectedColumns, operation),
+      transformWithTaskPool: async (resultSet: relationalStore.ResultSet): Promise<Array<EntityData>> =>
+        await this.queryResultTransformer.transformWithTaskPool(resultSet),
+      transformInMainThread: (resultSet: relationalStore.ResultSet): Array<EntityData> =>
+        this.queryResultTransformer.transformInMainThread(resultSet),
+      closeResultSet: (resultSet: relationalStore.ResultSet | null): void => this.closeResultSet(resultSet),
+      restoreConditions: (originalCount: number): void => this.restoreConditions(originalCount),
+      countByPredicates: async (store: relationalStore.RdbStore): Promise<number> => await this.countByPredicates(store),
+      buildSelectSql: (): QueryExecutorSqlResult => this.buildSelectSql(),
+      withQueryTimeout: async (
+        task: Promise<relationalStore.ResultSet>,
+        operation: string
+      ): Promise<relationalStore.ResultSet> => await this.withQueryTimeout(task, operation),
+      resultSetToRawRow: (resultSet: relationalStore.ResultSet): ResultSetRow => this.resultSetToRawRow(resultSet)
+    })
     this.aggregateExecutor = new AggregateExecutor({
       queryBuilder: this.queryBuilder,
       acquireQuerySlot: async (): Promise<void> => await DatabaseManager.getInstance().acquireQuerySlot(),
@@ -1531,113 +1561,23 @@ export class QueryExecutor {
   }
 
   private ensurePrimaryKeySelected(selectedColumns: Array<string>): Array<string> {
-    if (selectedColumns.length === 0) {
-      return selectedColumns
-    }
-    const metadata = this.queryBuilder.getEntityMetadata()
-    const pkColumn = metadata.getPrimaryKeyColumn()
-    if (pkColumn === null) {
-      return selectedColumns
-    }
-    if (selectedColumns.includes(pkColumn.columnName)) {
-      return selectedColumns
-    }
-    const columns: Array<string> = []
-    for (let i = 0; i < selectedColumns.length; i++) {
-      columns.push(selectedColumns[i])
-    }
-    columns.push(pkColumn.columnName)
-    return columns
+    return this.orderSupport.ensurePrimaryKeySelected(selectedColumns)
   }
 
   private ensureOrderBySelected(selectedColumns: Array<string>): Array<string> {
-    if (selectedColumns.length === 0) {
-      return selectedColumns
-    }
-    const orderByColumns = this.queryBuilder.getOrderByColumns()
-    if (orderByColumns.length === 0) {
-      return selectedColumns
-    }
-    const columns: Array<string> = []
-    for (let i = 0; i < selectedColumns.length; i++) {
-      columns.push(selectedColumns[i])
-    }
-    for (let i = 0; i < orderByColumns.length; i++) {
-      const columnName = orderByColumns[i].column
-      if (!columns.includes(columnName)) {
-        columns.push(columnName)
-      }
-    }
-    return columns
+    return this.orderSupport.ensureOrderBySelected(selectedColumns)
   }
 
   private sortResultsByOrder(results: Array<EntityData>): Array<EntityData> {
-    const orderByColumns = this.queryBuilder.getOrderByColumns()
-    if (orderByColumns.length === 0 || results.length <= 1) {
-      return results
-    }
-    const metadata = this.queryBuilder.getEntityMetadata()
-    const orderDefs: Array<OrderDefinition> = []
-    for (let i = 0; i < orderByColumns.length; i++) {
-      const columnName = orderByColumns[i].column
-      const columnMeta = metadata.getColumnByName(columnName) ?? metadata.getColumnByProperty(columnName)
-      const propertyName = columnMeta ? columnMeta.propertyName : columnName
-      const orderDef: OrderDefinition = {
-        propertyName,
-        direction: String(orderByColumns[i].direction)
-      }
-      orderDefs.push(orderDef)
-    }
-    results.sort((left, right) => {
-      for (let i = 0; i < orderDefs.length; i++) {
-        const def = orderDefs[i]
-        const aValue = left.getPropertyValue(def.propertyName)
-        const bValue = right.getPropertyValue(def.propertyName)
-        const cmp = compareOrderValuesUtil(aValue, bValue, def.direction)
-        if (cmp !== 0) {
-          return cmp
-        }
-      }
-      return 0
-    })
-    return results
+    return this.orderSupport.sortResultsByOrder(results)
   }
 
   private sortRowsByOrder(rows: Array<ResultSetRow>): Array<ResultSetRow> {
-    const orderByColumns = this.queryBuilder.getOrderByColumns()
-    if (orderByColumns.length === 0 || rows.length <= 1) {
-      return rows
-    }
-    rows.sort((left, right) => {
-      for (let i = 0; i < orderByColumns.length; i++) {
-        const columnName = orderByColumns[i].column
-        const aValue = left.get(columnName) as ValueType
-        const bValue = right.get(columnName) as ValueType
-        const cmp = compareOrderValuesUtil(aValue, bValue, String(orderByColumns[i].direction))
-        if (cmp !== 0) {
-          return cmp
-        }
-      }
-      return 0
-    })
-    return rows
+    return this.orderSupport.sortRowsByOrder(rows)
   }
 
   private canSortRawByOrder(): boolean {
-    const orderByColumns = this.queryBuilder.getOrderByColumns()
-    if (orderByColumns.length === 0) {
-      return true
-    }
-    const selectedColumns = this.queryBuilder.getSelectedColumns()
-    if (selectedColumns.length === 0) {
-      return true
-    }
-    for (let i = 0; i < orderByColumns.length; i++) {
-      if (!selectedColumns.includes(orderByColumns[i].column)) {
-        return false
-      }
-    }
-    return true
+    return this.orderSupport.canSortRawByOrder()
   }
 
   private restoreConditions(originalCount: number): void {
@@ -1650,23 +1590,12 @@ export class QueryExecutor {
     batches: Array<Array<ValueType>>,
     originalConditionCount: number
   ): Promise<Array<EntityData>> {
-    const results: Array<EntityData> = []
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i]
-      try {
-        if (!this.applySubQueryFilter(batch)) {
-          return []
-        }
-        const predicates = this.buildPredicatesOrThrow('SELECT')
-        const batchResults = await this.queryEntities(store, predicates, selectedColumns)
-        for (let j = 0; j < batchResults.length; j++) {
-          results.push(batchResults[j])
-        }
-      } finally {
-        this.restoreConditions(originalConditionCount)
-      }
-    }
-    return results
+    return await this.subQueryBatchSupport.queryEntitiesBySubQueryBatches(
+      store,
+      selectedColumns,
+      batches,
+      originalConditionCount
+    )
   }
 
   private async queryEntitiesBySubQueryBatchesAsync(
@@ -1675,33 +1604,12 @@ export class QueryExecutor {
     batches: Array<Array<ValueType>>,
     originalConditionCount: number
   ): Promise<Array<EntityData>> {
-    const results: Array<EntityData> = []
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i]
-      let resultSet: relationalStore.ResultSet | null = null
-      try {
-        if (!this.applySubQueryFilter(batch)) {
-          return []
-        }
-        const predicates = this.buildPredicatesOrThrow('SELECT')
-        const queriedResultSet = await this.queryResultSet(store, predicates, selectedColumns, 'SELECT')
-        resultSet = queriedResultSet
-        const rowCount = queriedResultSet.rowCount
-        let batchResults: Array<EntityData> = []
-        if (rowCount > QueryExecutor.TASKPOOL_THRESHOLD) {
-          batchResults = await this.queryResultTransformer.transformWithTaskPool(queriedResultSet)
-        } else {
-          batchResults = this.queryResultTransformer.transformInMainThread(queriedResultSet)
-        }
-        for (let j = 0; j < batchResults.length; j++) {
-          results.push(batchResults[j])
-        }
-      } finally {
-        this.closeResultSet(resultSet)
-        this.restoreConditions(originalConditionCount)
-      }
-    }
-    return results
+    return await this.subQueryBatchSupport.queryEntitiesBySubQueryBatchesAsync(
+      store,
+      selectedColumns,
+      batches,
+      originalConditionCount
+    )
   }
 
   private async countBySubQueryBatches(
@@ -1709,19 +1617,7 @@ export class QueryExecutor {
     batches: Array<Array<ValueType>>,
     originalConditionCount: number
   ): Promise<number> {
-    let total = 0
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i]
-      try {
-        if (!this.applySubQueryFilter(batch)) {
-          return 0
-        }
-        total += await this.countByPredicates(store)
-      } finally {
-        this.restoreConditions(originalConditionCount)
-      }
-    }
-    return total
+    return await this.subQueryBatchSupport.countBySubQueryBatches(store, batches, originalConditionCount)
   }
 
   private async queryRawBySubQueryBatches(
@@ -1729,35 +1625,7 @@ export class QueryExecutor {
     batches: Array<Array<ValueType>>,
     originalConditionCount: number
   ): Promise<Array<ResultSetRow>> {
-    const rows: Array<ResultSetRow> = []
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i]
-      let resultSet: relationalStore.ResultSet | null = null
-      try {
-        if (!this.applySubQueryFilter(batch)) {
-          return []
-        }
-        const sqlResult = this.buildSelectSql()
-        try {
-          resultSet = await this.withQueryTimeout(store.querySql(sqlResult.sql, sqlResult.args), 'RAW_SELECT')
-        } catch (e) {
-          const error = e instanceof Error ? e : new Error(String(e))
-          throw error
-        }
-        try {
-          while (resultSet.goToNextRow()) {
-            rows.push(this.resultSetToRawRow(resultSet))
-          }
-        } catch (e) {
-          const error = e instanceof Error ? e : new Error(String(e))
-          throw error
-        }
-      } finally {
-        this.closeResultSet(resultSet)
-        this.restoreConditions(originalConditionCount)
-      }
-    }
-    return rows
+    return await this.subQueryBatchSupport.queryRawBySubQueryBatches(store, batches, originalConditionCount)
   }
 
   private async countWithInMemoryFilter(

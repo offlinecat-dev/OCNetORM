@@ -20,7 +20,6 @@ import { ExecutionError } from '../errors/DatabaseError'
 import { OrmError } from '../errors/OrmError'
 import { sanitizeErrorMessage } from '../errors/ErrorSanitizer'
 import { ColumnType } from '../types/ColumnType'
-import { RelationLoadResult, ParallelRelationLoadResult } from './RelationLoadResult'
 import { Logger } from '../logging/Logger'
 import { ResultSetUtils } from '../mapping/ResultSetUtils'
 import { RelationLoadStrategy } from './RelationLoadStrategy'
@@ -28,6 +27,7 @@ import { OneToOneRelationLoadStrategy } from './OneToOneRelationLoadStrategy'
 import { OneToManyRelationLoadStrategy } from './OneToManyRelationLoadStrategy'
 import { ManyToOneRelationLoadStrategy } from './ManyToOneRelationLoadStrategy'
 import { ManyToManyRelationLoadStrategy } from './ManyToManyRelationLoadStrategy'
+import { RelationLoaderParallelSupport } from './RelationLoaderParallelSupport'
 import { OrderByClause } from '../types/ValueTypes'
 import { WhereCondition } from './WhereCondition'
 import { RelationQueryOptions } from './RelationQueryOptions'
@@ -46,6 +46,8 @@ export class RelationLoader {
   private sourceEntityName: string
   /** 关系加载策略映射 */
   private relationStrategies: Map<RelationType, RelationLoadStrategy>
+  /** 并行加载支持 */
+  private parallelSupport: RelationLoaderParallelSupport
   /** 可选的 Store 提供者（用于复用外部租约连接） */
   private storeProvider: (() => relationalStore.RdbStore) | null
 
@@ -89,6 +91,13 @@ export class RelationLoader {
         entities: Array<EntityData>,
         relation: ManyToManyMetadata
       ): Promise<Array<EntityData>> => await this.loadManyToMany(entities, relation))
+    )
+    this.parallelSupport = new RelationLoaderParallelSupport(
+      this.sourceEntityName,
+      async (entities: Array<EntityData>, relationName: string): Promise<Array<EntityData>> =>
+        await this.loadRelation(entities, relationName),
+      (error: AsyncFailure): string => this.resolveErrorMessage(error),
+      (context: string, message: string): void => this.logRelationWarnMessage(context, message)
     )
   }
 
@@ -261,109 +270,7 @@ export class RelationLoader {
     entities: Array<EntityData>,
     relationNames: Array<string>
   ): Promise<Array<EntityData>> {
-    if (entities.length === 0 || relationNames.length === 0) {
-      return entities
-    }
-
-    const startTime = Date.now()
-    const logger = Logger.getInstance()
-
-    // 如果只有一个关联，直接调用单个加载方法
-    if (relationNames.length === 1) {
-      try {
-        const result = await this.loadRelation(entities, relationNames[0])
-        const duration = Date.now() - startTime
-        logger.logDebug(`并行关联加载完成: 1 个关联, 耗时 ${duration}ms`)
-        return result
-      } catch (e) {
-        this.logRelationWarn(`关联 '${relationNames[0]}' 加载失败`, e)
-        return entities
-      }
-    }
-
-    // 创建并行加载任务
-    const loadTasks: Array<Promise<RelationLoadResult>> = []
-
-    for (let i = 0; i < relationNames.length; i++) {
-      const relationName = relationNames[i]
-      const task = this.loadRelationWithResult(entities, relationName)
-      loadTasks.push(task)
-    }
-
-    // 并行执行所有加载任务
-    const results = await Promise.all(loadTasks)
-
-    // 统计结果
-    const parallelResult = new ParallelRelationLoadResult()
-    parallelResult.totalDuration = Date.now() - startTime
-
-    let successCount = 0
-    let failureCount = 0
-
-    for (let i = 0; i < results.length; i++) {
-      parallelResult.addResult(results[i])
-      if (results[i].success) {
-        successCount++
-      } else {
-        failureCount++
-        // 记录失败的关联
-        this.logRelationWarnMessage(`关联 '${results[i].relationName}' 加载失败`, results[i].errorMessage)
-      }
-    }
-
-    // 记录并行加载日志
-    logger.logDebug(`并行关联加载完成: ${relationNames.length} 个关联, 成功 ${successCount}, 失败 ${failureCount}, 总耗时 ${parallelResult.totalDuration}ms`)
-
-    return entities
-  }
-
-  /**
-   * 加载单个关联并返回结果对象
-   * 用于并行加载时收集每个关联的加载结果
-   * @param entities 主实体数据数组
-   * @param relationName 关联属性名
-   * @returns 关联加载结果
-   */
-  private async loadRelationWithResult(
-    entities: Array<EntityData>,
-    relationName: string
-  ): Promise<RelationLoadResult> {
-    const startTime = Date.now()
-
-    try {
-      // 获取关联关系元数据
-      const relation = MetadataStorage.getInstance().getRelation(this.sourceEntityName, relationName)
-      if (relation === null) {
-        const duration = Date.now() - startTime
-        return RelationLoadResult.createFailure(relationName, `关联 '${relationName}' 未注册`, duration)
-      }
-
-      await this.loadRelation(entities, relationName)
-
-      let loadedCount = 0
-      if (relation.type === RelationType.ONE_TO_MANY || relation.type === RelationType.MANY_TO_MANY) {
-        for (let i = 0; i < entities.length; i++) {
-          const relatedData = entities[i].getRelatedArray(relationName)
-          if (relatedData !== null) {
-            loadedCount += relatedData.length
-          }
-        }
-      } else {
-        for (let i = 0; i < entities.length; i++) {
-          const relatedData = entities[i].getRelatedSingle(relationName)
-          if (relatedData !== null) {
-            loadedCount++
-          }
-        }
-      }
-
-      const duration = Date.now() - startTime
-      return RelationLoadResult.createSuccess(relationName, loadedCount, duration)
-    } catch (e) {
-      const duration = Date.now() - startTime
-      const errorMessage = this.resolveErrorMessage(e)
-      return RelationLoadResult.createFailure(relationName, errorMessage, duration)
-    }
+    return await this.parallelSupport.loadRelationsParallel(entities, relationNames)
   }
 
   /**

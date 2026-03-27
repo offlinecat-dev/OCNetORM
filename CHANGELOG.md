@@ -20,6 +20,9 @@
 - `QueryExecutor` 关联路径加载逻辑拆分到 `QueryExecutorRelationSupport`，主执行器改为职责委托
 - `RelationLoader` 关系查询谓词拼装逻辑拆分到 `RelationPredicateUtils`，减少加载器核心类的职责聚合
 - `QueryExecutor` 的 SQL 组装与 WHERE 条件参数化转换拆分到 `QueryExecutorSqlSupport`，主执行器改为委托实现
+- `QueryExecutor` 的子查询批处理执行路径拆分到 `QueryExecutorSubQueryBatchSupport`，降低主执行器复杂度并收敛重复流程
+- `QueryExecutor` 的排序与列补齐逻辑拆分到 `QueryExecutorOrderSupport`，继续降低主执行器复杂度
+- `RelationLoader` 的并行关联加载与结果统计逻辑拆分到 `RelationLoaderParallelSupport`，主加载器改为委托
 
 ### 测试
 - `entry/src/main/ets/suites/QuerySuite.ets` 新增：
