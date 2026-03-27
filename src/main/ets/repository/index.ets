@@ -7,6 +7,7 @@ export { Repository, TransactionCallback } from './Repository'
 export { SaveResult } from './SaveResult'
 export { DeleteResult } from './DeleteResult'
 export { TransactionResult } from './TransactionResult'
+export { TransactionManager } from './TransactionManager'
 
 // 批量插入相关
 export { BatchInsertOptions } from './BatchInsertOptions'

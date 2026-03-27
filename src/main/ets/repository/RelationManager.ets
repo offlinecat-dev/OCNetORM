@@ -5,22 +5,21 @@ import { ValueType } from '../types/ValueTypes'
 import { RelationNotFoundError } from '../errors/RelationError'
 import { SaveResult } from './SaveResult'
 import { DeleteResult } from './DeleteResult'
+import { TransactionManager } from './TransactionManager'
 
 type StoreProvider = () => relationalStore.RdbStore
 type ValueConverter = (value: ValueType) => relationalStore.ValueType
 type ResultSetCloser = (resultSet: relationalStore.ResultSet | null) => void
 
-interface SavepointExecutor {
-  executeSql(sql: string): Promise<void>
-}
+class WriteScopeState {
+  savepointName: string
+  useSavepoint: boolean
+  useTransaction: boolean
 
-class SavepointState {
-  name: string
-  started: boolean
-
-  constructor(name: string, started: boolean) {
-    this.name = name
-    this.started = started
+  constructor(savepointName: string, useSavepoint: boolean, useTransaction: boolean) {
+    this.savepointName = savepointName
+    this.useSavepoint = useSavepoint
+    this.useTransaction = useTransaction
   }
 }
 
@@ -54,9 +53,7 @@ export class RelationManager {
         throw new RelationNotFoundError(this.entityName, relationName)
       }
       const store = this.getStore()
-      let committed = false
-      store.beginTransaction()
-      this.logger.logTransaction('BEGIN (attach)')
+      const scope = await this.beginWriteScope(store, 'attach')
       try {
         const sourceRdbValue = this.toRdbValue(sourceId)
         const targetRdbValue = this.toRdbValue(targetId)
@@ -68,9 +65,7 @@ export class RelationManager {
         try {
           checkResult = await store.query(checkPredicates)
           if (checkResult.rowCount > 0) {
-            store.commit()
-            committed = true
-            this.logger.logTransaction('COMMIT (attach)')
+            await this.completeWriteScope(store, scope, 'attach')
             return SaveResult.createSuccess(0)
           }
         } finally {
@@ -80,21 +75,16 @@ export class RelationManager {
         rdbValuesBucket[relation.joinSourceKey] = sourceRdbValue
         rdbValuesBucket[relation.joinTargetKey] = targetRdbValue
         const rowId = await store.insert(relation.joinTable, rdbValuesBucket)
-        store.commit()
-        committed = true
-        this.logger.logTransaction('COMMIT (attach)')
+        await this.completeWriteScope(store, scope, 'attach')
         const duration = Date.now() - startTime
         this.logger.logQuery(
-          `INSERT INTO ${relation.joinTable} (${relation.joinSourceKey}=${sourceRdbValue}, ${relation.joinTargetKey}=${targetRdbValue})`,
+          `INSERT INTO ${relation.joinTable} (${relation.joinSourceKey}, ${relation.joinTargetKey}) VALUES (?, ?)`,
           duration
         )
         return SaveResult.createSuccess(1, rowId)
       } catch (attachError) {
+        await this.rollbackWriteScope(store, scope, 'attach')
         const attachErrorMessage = attachError instanceof Error ? attachError.message : String(attachError)
-        if (!committed) {
-          store.rollBack()
-          this.logger.logTransaction('ROLLBACK (attach)')
-        }
         if (this.isUniqueConstraintError(attachErrorMessage)) {
           return SaveResult.createSuccess(0)
         }
@@ -127,7 +117,7 @@ export class RelationManager {
       const affectedRows = await store.delete(predicates)
       const duration = Date.now() - startTime
       this.logger.logQuery(
-        `DELETE FROM ${relation.joinTable} WHERE ${relation.joinSourceKey}=${sourceRdbValue} AND ${relation.joinTargetKey}=${targetRdbValue}`,
+        `DELETE FROM ${relation.joinTable} WHERE ${relation.joinSourceKey} = ? AND ${relation.joinTargetKey} = ?`,
         duration
       )
       return DeleteResult.createSuccess(affectedRows)
@@ -149,13 +139,7 @@ export class RelationManager {
         throw new RelationNotFoundError(this.entityName, relationName)
       }
       const store = this.getStore()
-      const savepoint = await this.beginSavepointIfPossible(store, 'sync')
-      let transactionStarted = false
-      if (!savepoint.started) {
-        store.beginTransaction()
-        transactionStarted = true
-        this.logger.logTransaction('BEGIN (sync)')
-      }
+      const scope = await this.beginWriteScope(store, 'sync')
       try {
         const deletePredicates = new relationalStore.RdbPredicates(relation.joinTable)
         deletePredicates.equalTo(relation.joinSourceKey, this.toRdbValue(sourceId))
@@ -169,22 +153,12 @@ export class RelationManager {
           await store.insert(relation.joinTable, rdbValuesBucket)
           insertedCount++
         }
-        if (savepoint.started) {
-          await this.releaseSavepoint(store, savepoint.name)
-        } else {
-          store.commit()
-          this.logger.logTransaction('COMMIT (sync)')
-        }
+        await this.completeWriteScope(store, scope, 'sync')
         const duration = Date.now() - startTime
         this.logger.logQuery(`SYNC ${relation.joinTable}: 删除 ${deletedCount} 条, 插入 ${insertedCount} 条`, duration)
         return SaveResult.createSuccess(insertedCount)
       } catch (syncError) {
-        if (savepoint.started) {
-          await this.rollbackToSavepoint(store, savepoint.name)
-        } else if (transactionStarted) {
-          store.rollBack()
-          this.logger.logTransaction('ROLLBACK (sync)')
-        }
+        await this.rollbackWriteScope(store, scope, 'sync')
         if (syncError instanceof Error) {
           throw syncError
         }
@@ -205,45 +179,96 @@ export class RelationManager {
     return `ocorm_${prefix}_${RelationManager.savepointCounter}`
   }
 
-  private async beginSavepointIfPossible(store: relationalStore.RdbStore, prefix: string): Promise<SavepointState> {
-    const executor = this.getSavepointExecutor(store)
+  private async beginWriteScope(store: relationalStore.RdbStore, prefix: string): Promise<WriteScopeState> {
     const savepointName = this.nextSavepointName(prefix)
-    if (executor === null) {
-      return new SavepointState(savepointName, false)
-    }
     try {
-      await executor.executeSql(`SAVEPOINT ${savepointName}`)
-      return new SavepointState(savepointName, true)
+      await store.executeSql(`SAVEPOINT ${savepointName}`)
+      return new WriteScopeState(savepointName, true, false)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      this.logger.logWarn(`SYNC 无法使用 SAVEPOINT，回退事务模式: ${message}`)
-      return new SavepointState(savepointName, false)
+      return this.beginFallbackTransactionOrThrow(store, prefix, savepointName, `创建 SAVEPOINT 失败: ${message}`)
     }
   }
 
-  private getSavepointExecutor(store: relationalStore.RdbStore): SavepointExecutor | null {
-    const executor = store as SavepointExecutor
-    if (typeof executor.executeSql !== 'function') {
-      return null
+  private beginFallbackTransactionOrThrow(
+    store: relationalStore.RdbStore,
+    prefix: string,
+    savepointName: string,
+    reason: string
+  ): WriteScopeState {
+    if (TransactionManager.isConnectionTransactionActive(store)) {
+      throw new Error(`${reason}，且当前已在事务中，无法回退 beginTransaction`)
     }
-    return executor
+    try {
+      store.beginTransaction()
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e
+      }
+      throw new Error(String(e))
+    }
+    TransactionManager.markExternalTransactionBegin(store)
+    this.logger.logTransaction(`BEGIN (${prefix})`)
+    return new WriteScopeState(savepointName, false, true)
+  }
+
+  private async completeWriteScope(
+    store: relationalStore.RdbStore,
+    scope: WriteScopeState,
+    prefix: string
+  ): Promise<void> {
+    if (scope.useSavepoint) {
+      await this.releaseSavepoint(store, scope.savepointName)
+      return
+    }
+    if (!scope.useTransaction) {
+      return
+    }
+    try {
+      store.commit()
+      this.logger.logTransaction(`COMMIT (${prefix})`)
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e
+      }
+      throw new Error(String(e))
+    } finally {
+      TransactionManager.markExternalTransactionEnd(store)
+    }
+  }
+
+  private async rollbackWriteScope(
+    store: relationalStore.RdbStore,
+    scope: WriteScopeState,
+    prefix: string
+  ): Promise<void> {
+    if (scope.useSavepoint) {
+      await this.rollbackToSavepoint(store, scope.savepointName)
+      return
+    }
+    if (!scope.useTransaction) {
+      return
+    }
+    try {
+      store.rollBack()
+      this.logger.logTransaction(`ROLLBACK (${prefix})`)
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e
+      }
+      throw new Error(String(e))
+    } finally {
+      TransactionManager.markExternalTransactionEnd(store)
+    }
   }
 
   private async releaseSavepoint(store: relationalStore.RdbStore, savepointName: string): Promise<void> {
-    const executor = this.getSavepointExecutor(store)
-    if (executor === null) {
-      throw new Error('当前数据库不支持 SAVEPOINT，无法释放保存点')
-    }
-    await executor.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
+    await store.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
   }
 
   private async rollbackToSavepoint(store: relationalStore.RdbStore, savepointName: string): Promise<void> {
-    const executor = this.getSavepointExecutor(store)
-    if (executor === null) {
-      throw new Error('当前数据库不支持 SAVEPOINT，无法回滚保存点')
-    }
-    await executor.executeSql(`ROLLBACK TO SAVEPOINT ${savepointName}`)
-    await executor.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
+    await store.executeSql(`ROLLBACK TO SAVEPOINT ${savepointName}`)
+    await store.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
   }
 
   private isUniqueConstraintError(message: string): boolean {

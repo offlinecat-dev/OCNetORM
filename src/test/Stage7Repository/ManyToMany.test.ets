@@ -9,6 +9,9 @@ import { Repository } from '../../main/ets/repository/index';
 import { RelationNotFoundError } from '../../main/ets/errors/RelationError';
 import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
+import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { DatabaseManagerTestHooks } from '../../main/ets/database/testing/DatabaseManagerTestHooks';
+import { relationalStore } from '@kit.ArkData';
 
 const setupPostEntity = (): void => {
   const storage = MetadataStorage.getInstance();
@@ -58,6 +61,7 @@ export default function manyToManyTest() {
     beforeEach(() => {
       MetadataStorage.resetInstance();
       HooksProcessor.resetInstance();
+      DatabaseManagerTestHooks.resetInstance();
     });
 
     it('ManyToManyMetadata should store correct values', 0, () => {
@@ -230,6 +234,76 @@ export default function manyToManyTest() {
 
       const result = await repo.sync(1, [], 'tags');
       expect(result.success).assertEqual(false);
+    });
+
+    it('attach should fallback to transaction when SAVEPOINT is not supported outside transaction', 0, async () => {
+      setupPostEntity();
+      setupTagEntity();
+      setupManyToManyRelation();
+      const repo = new Repository('Post');
+
+      let beginCount = 0;
+      let commitCount = 0;
+      const fakeStore = {
+        beginTransaction: () => {
+          beginCount++;
+        },
+        commit: () => {
+          commitCount++;
+        },
+        query: async () => ({ rowCount: 0, close: () => {} }) as relationalStore.ResultSet,
+        insert: async () => 1
+      } as unknown as relationalStore.RdbStore;
+
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      const result = await repo.attach(1, 1, 'tags');
+      expect(result.success).assertEqual(true);
+      expect(result.affectedRows).assertEqual(1);
+      expect(beginCount).assertEqual(1);
+      expect(commitCount).assertEqual(1);
+    });
+
+    it('sync should fallback to transaction when SAVEPOINT is not supported outside transaction', 0, async () => {
+      setupPostEntity();
+      setupTagEntity();
+      setupManyToManyRelation();
+      const repo = new Repository('Post');
+
+      let beginCount = 0;
+      let commitCount = 0;
+      const fakeStore = {
+        beginTransaction: () => {
+          beginCount++;
+        },
+        commit: () => {
+          commitCount++;
+        },
+        delete: async () => 1,
+        insert: async () => 1
+      } as unknown as relationalStore.RdbStore;
+
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      const result = await repo.sync(1, [1, 2], 'tags');
+      expect(result.success).assertEqual(true);
+      expect(result.affectedRows).assertEqual(2);
+      expect(beginCount).assertEqual(1);
+      expect(commitCount).assertEqual(1);
     });
 
     it('getManyToManyRelation should return null for non-existent relation', 0, () => {

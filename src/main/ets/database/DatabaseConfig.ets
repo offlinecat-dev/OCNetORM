@@ -5,6 +5,18 @@
 
 import { relationalStore } from '@kit.ArkData'
 import { LogLevel } from '../logging/LogLevel'
+import { PoolConfig } from './pool/PoolConfig'
+
+export interface ConnectionPoolOptions {
+  enabled?: boolean
+  minSize?: number
+  maxSize?: number
+  acquireTimeoutMs?: number
+  idleTimeoutMs?: number
+  healthCheckIntervalMs?: number
+}
+
+export type PooledWriteGuardMode = 'global' | 'off'
 
 /**
  * 数据库配置类
@@ -35,6 +47,12 @@ export class DatabaseConfig {
   maxConcurrentQueries: number = 0
   /** 关联加载 IN 条件单批上限 */
   relationInClauseLimit: number = 500
+  /** 关联加载并发上限（0 或 1 表示串行） */
+  relationLoadConcurrency: number = 1
+  /** 连接池配置 */
+  connectionPool: PoolConfig = new PoolConfig()
+  /** 连接池下未绑定事务写入保护模式 */
+  pooledWriteGuardMode: PooledWriteGuardMode = 'off'
 
   constructor(
     name: string,
@@ -98,6 +116,50 @@ export class DatabaseConfig {
 
   setRelationInClauseLimit(limit: number): DatabaseConfig {
     this.relationInClauseLimit = limit > 0 ? Math.floor(limit) : 1
+    return this
+  }
+
+  setRelationLoadConcurrency(limit: number): DatabaseConfig {
+    this.relationLoadConcurrency = limit > 0 ? Math.floor(limit) : 1
+    return this
+  }
+
+  setConnectionPool(options: ConnectionPoolOptions): DatabaseConfig {
+    const pool = this.connectionPool.clone()
+    if (options.enabled !== undefined) {
+      pool.enabled = options.enabled
+    }
+    if (options.minSize !== undefined) {
+      pool.minSize = this.normalizePoolNumber(options.minSize, pool.minSize)
+    }
+    if (options.maxSize !== undefined) {
+      pool.maxSize = this.normalizePoolNumber(options.maxSize, pool.maxSize)
+    }
+    if (options.acquireTimeoutMs !== undefined) {
+      pool.acquireTimeoutMs = this.normalizePoolNumber(options.acquireTimeoutMs, pool.acquireTimeoutMs)
+    }
+    if (options.idleTimeoutMs !== undefined) {
+      pool.idleTimeoutMs = this.normalizePoolNumber(options.idleTimeoutMs, pool.idleTimeoutMs)
+    }
+    if (options.healthCheckIntervalMs !== undefined) {
+      pool.healthCheckIntervalMs = this.normalizePoolNumber(
+        options.healthCheckIntervalMs,
+        pool.healthCheckIntervalMs
+      )
+    }
+    this.connectionPool = pool.normalize()
+    return this
+  }
+
+  private normalizePoolNumber(input: number, fallback: number): number {
+    if (!Number.isFinite(input)) {
+      return fallback
+    }
+    return Math.floor(input)
+  }
+
+  setPooledWriteGuardMode(mode: PooledWriteGuardMode): DatabaseConfig {
+    this.pooledWriteGuardMode = mode
     return this
   }
 }

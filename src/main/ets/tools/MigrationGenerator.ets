@@ -22,7 +22,15 @@ export class GeneratedMigration {
 
 export class MigrationGenerator {
   static async generate(options?: MigrationGeneratorOptions): Promise<GeneratedMigration> {
-    const store = DatabaseManager.getInstance().getStore()
+    let store: relationalStore.RdbStore
+    try {
+      store = DatabaseManager.getInstance().getStore()
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e
+      }
+      throw new Error(String(e))
+    }
     return await MigrationGenerator.generateWithStore(store, options)
   }
 

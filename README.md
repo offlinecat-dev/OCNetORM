@@ -1,7 +1,7 @@
-# OCORM
+# ocorm
 
 > **QQ 交流群：`1012852504`**  
-> 欢迎加入交流 OCORM 使用经验、问题反馈与最佳实践。
+> 欢迎加入交流 ocorm 使用经验、问题反馈与最佳实践。
 
 **轻量级 HarmonyOS SQLite ORM 框架**
 
@@ -11,7 +11,7 @@
 [![OpenHarmony](https://img.shields.io/badge/OpenHarmony-5.0+-purple.svg)](https://www.openharmony.cn)
 
 基于 `@ohos.data.relationalStore` 构建，提供类型安全的数据库操作 API。  
-当前文档对应 **OCORM 3.0.0**。
+当前文档对应 **ocorm 3.0.0**。
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-black?style=for-the-badge&logo=github)](https://github.com/offlinecat-dev/OCNetORM)
 [![Report Bug](https://img.shields.io/badge/Issues-Report_Bug-red?style=for-the-badge&logo=github)](https://github.com/offlinecat-dev/OCNetORM/issues)
@@ -55,7 +55,7 @@
 
 ## 3.0 版本说明
 
-- OCORM 3.0 是在 2.4.x 稳定线基础上的主版本升级，重点是安全策略统一与模块化重构收敛。
+- ocorm 3.0 是在 2.4.x 稳定线基础上的主版本升级，重点是安全策略统一与模块化重构收敛。
 - 对日常开发最直接的变化是默认行为更安全、事务语义更严格、工具链能力更完整。
 
 3.0 重点变化：
@@ -103,7 +103,7 @@
 ```json5
 {
   "dependencies": {
-    "@offlinecat/ocorm": "3.0.0"
+    "ocorm": "3.0.0"
   }
 }
 ```
@@ -111,7 +111,7 @@
 或使用命令行安装：
 
 ```bash
-ohpm install @offlinecat/ocorm
+ohpm install ocorm
 ```
 
 ## 快速开始
@@ -121,7 +121,7 @@ ohpm install @offlinecat/ocorm
 推荐使用 `defineEntity` 简洁方式：
 
 ```typescript
-import { defineEntity, ColumnType } from '@offlinecat/ocorm'
+import { defineEntity, ColumnType } from 'ocorm'
 
 defineEntity('User', {
   tableName: 'users',
@@ -140,16 +140,21 @@ defineEntity('User', {
 ### 2. 初始化数据库
 
 ```typescript
-import { OCORMInit, DatabaseConfig } from '@offlinecat/ocorm'
+import { OCORMInit, DatabaseConfig } from 'ocorm'
 
 const config = new DatabaseConfig('app.db')
 await OCORMInit(context, { config })
 ```
 
+初始化要点：
+- `context` 建议使用应用启动阶段可获得的 `UIAbility`/应用级上下文。
+- 建议在应用启动入口统一调用 `defineEntity` 与 `OCORMInit`，避免页面懒初始化导致的时序问题。
+- 若设置 `autoMigrate: true`，初始化将优先执行自动迁移并返回迁移结果，不再执行 `autoCreateTables` 分支。
+
 ### 3. CRUD 操作
 
 ```typescript
-import { Repository, EntityData } from '@offlinecat/ocorm'
+import { Repository, EntityData } from 'ocorm'
 
 const repo = new Repository('User')
 
@@ -178,7 +183,7 @@ await repo.restore(1)
 ### 4. 链式查询
 
 ```typescript
-import { QueryExecutor, ConditionOperator } from '@offlinecat/ocorm'
+import { QueryExecutor, ConditionOperator } from 'ocorm'
 
 const qb = repo.createQueryBuilder()
   .where('age', ConditionOperator.GREATER, 18)
@@ -207,7 +212,7 @@ const paginatedResult = await new QueryExecutor(qb).getPaginated()
 ### 6. 事务处理
 
 ```typescript
-import { TransactionOptions, IsolationLevel } from '@offlinecat/ocorm'
+import { TransactionOptions, IsolationLevel } from 'ocorm'
 
 // 基础事务
 await repo.transaction(async (txRepo) => {
@@ -237,7 +242,7 @@ await repo.transactionWithOptions(async (txRepo) => {
 ### 7. 批量插入
 
 ```typescript
-import { BatchInsertOptions } from '@offlinecat/ocorm'
+import { BatchInsertOptions } from 'ocorm'
 
 const users: Array<EntityData> = []
 for (let i = 0; i < 1000; i++) {
@@ -256,7 +261,7 @@ await repo.batchInsert(users, BatchInsertOptions.createFast())
 ### 8. 关联查询
 
 ```typescript
-import { MetadataStorage, RelationMetadata, RelationType } from '@offlinecat/ocorm'
+import { MetadataStorage, RelationMetadata, RelationType } from 'ocorm'
 
 // 注册一对多关系
 const storage = MetadataStorage.getInstance()
@@ -275,7 +280,7 @@ const posts = usersWithPosts[0]?.getRelatedArray('posts')
 ### 9. 数据验证
 
 ```typescript
-import { ValidationMetadataStorage } from '@offlinecat/ocorm'
+import { ValidationMetadataStorage } from 'ocorm'
 
 const storage = ValidationMetadataStorage.getInstance()
 storage.registerRule('User', 'name', { type: 'required' })
@@ -289,7 +294,7 @@ await repo.save(user)
 ### 10. ViewModel 映射
 
 ```typescript
-import { ViewModelMapper } from '@offlinecat/ocorm'
+import { ViewModelMapper } from 'ocorm'
 
 class UserViewModel {
   id: number = 0
@@ -315,7 +320,7 @@ const viewModels = ViewModelMapper.toViewModelArray(entities, factory, mapper)
 ### 11. 日志与调试
 
 ```typescript
-import { Logger, LogLevel } from '@offlinecat/ocorm'
+import { Logger, LogLevel } from 'ocorm'
 
 const logger = Logger.getInstance()
 logger.configure(true, LogLevel.DEBUG)  // 开发环境
@@ -328,7 +333,7 @@ logger.configure(true, LogLevel.ERROR)  // 生产环境
 ### 12. 查询缓存
 
 ```typescript
-import { QueryCache } from '@offlinecat/ocorm'
+import { QueryCache } from 'ocorm'
 
 const cache = QueryCache.getInstance()
 cache.configure({
@@ -347,70 +352,75 @@ cache.configure({
 # 安装依赖
 ohpm install
 
-# 构建 HAR（OCORM 模块）
+# 构建 HAR（ocorm 模块）
 hvigor assembleHar
 
-# 运行 OCORM 测试
+# 运行 ocorm 测试
 hvigor test
 ```
 
 - 示例代码：`../entry/src/main/ets/example`
-- 开发文档：`./docs/developer-guide`
+- 开发文档：`./docs/开发者指南`
 - 变更记录：`./CHANGELOG.md`
 
 ## 文档
 
-📚 **[完整开发文档](./docs/developer-guide/00-目录索引.md)**
+📚 **[完整开发文档](./docs/开发者指南/00-目录索引.md)**
 📍 **[文档入口导航](./docs/README.md)**
+
+高频入口：
+- [15分钟落地清单](./docs/01-入门指南/04-15分钟落地清单.md)
+- [故障排查决策树](./docs/04-运维安全/04-故障排查决策树.md)
+- [文档一致性检查表](./docs/06-参考速查/05-文档一致性检查表.md)
 
 ### 入门基础
 | 文档 | 说明 |
 |------|------|
-| [初始化配置](./docs/developer-guide/01-初始化配置.md) | DatabaseConfig、OCORMInit、自动建表 |
-| [实体定义](./docs/developer-guide/02-实体定义.md) | Schema 方式、装饰器方式、EntitySchema |
-| [列类型与选项](./docs/developer-guide/03-列类型与选项.md) | ColumnType、列选项、主键定义 |
+| [初始化配置](./docs/开发者指南/01-核心能力/01-初始化配置.md) | DatabaseConfig、OCORMInit、自动建表 |
+| [实体定义](./docs/开发者指南/01-核心能力/02-实体定义.md) | Schema 方式、装饰器方式、EntitySchema |
+| [列类型与选项](./docs/开发者指南/01-核心能力/03-列类型与选项.md) | ColumnType、列选项、主键定义 |
 
 ### 数据操作
 | 文档 | 说明 |
 |------|------|
-| [Repository操作](./docs/developer-guide/04-Repository基础操作.md) | CRUD、EntityData、SaveResult |
-| [QueryBuilder查询](./docs/developer-guide/05-QueryBuilder查询.md) | 链式 API、ConditionOperator |
-| [分页与排序](./docs/developer-guide/06-分页与排序.md) | PaginatedResult、orderBy |
-| [批量操作](./docs/developer-guide/07-批量操作.md) | batchInsert、BatchInsertOptions |
-| [事务处理](./docs/developer-guide/08-事务处理.md) | TransactionOptions、隔离级别 |
+| [Repository操作](./docs/开发者指南/01-核心能力/04-Repository基础操作.md) | CRUD、EntityData、SaveResult |
+| [QueryBuilder查询](./docs/开发者指南/01-核心能力/05-QueryBuilder查询.md) | 链式 API、ConditionOperator |
+| [分页与排序](./docs/开发者指南/01-核心能力/06-分页与排序.md) | PaginatedResult、orderBy |
+| [批量操作](./docs/开发者指南/01-核心能力/07-批量操作.md) | batchInsert、BatchInsertOptions |
+| [事务处理](./docs/开发者指南/01-核心能力/08-事务处理.md) | TransactionOptions、隔离级别 |
 
 ### 关系映射
 | 文档 | 说明 |
 |------|------|
-| [一对一关系](./docs/developer-guide/09-一对一关系.md) | RelationMetadata、外键位置 |
-| [一对多关系](./docs/developer-guide/10-一对多关系.md) | ONE_TO_MANY、MANY_TO_ONE |
-| [多对多关系](./docs/developer-guide/11-多对多关系.md) | 中间表、attach/detach/sync |
-| [关联加载策略](./docs/developer-guide/12-关联加载策略.md) | with 预加载、withLazy 延迟加载 |
+| [一对一关系](./docs/开发者指南/01-核心能力/09-一对一关系.md) | RelationMetadata、外键位置 |
+| [一对多关系](./docs/开发者指南/01-核心能力/10-一对多关系.md) | ONE_TO_MANY、MANY_TO_ONE |
+| [多对多关系](./docs/开发者指南/01-核心能力/11-多对多关系.md) | 中间表、attach/detach/sync |
+| [关联加载策略](./docs/开发者指南/01-核心能力/12-关联加载策略.md) | with 预加载、withLazy 延迟加载 |
 
 ### 高级功能
 | 文档 | 说明 |
 |------|------|
-| [软删除](./docs/developer-guide/13-软删除.md) | 软删除配置、restore、withDeleted |
-| [生命周期钩子](./docs/developer-guide/14-生命周期钩子.md) | beforeSave、afterLoad、beforeDelete |
-| [数据验证](./docs/developer-guide/15-数据验证.md) | required、length、email |
-| [Schema迁移](./docs/developer-guide/16-Schema迁移.md) | MigrationManager、自动迁移 |
+| [软删除](./docs/开发者指南/02-高级特性/13-软删除.md) | 软删除配置、restore、withDeleted |
+| [生命周期钩子](./docs/开发者指南/02-高级特性/14-生命周期钩子.md) | beforeSave、afterLoad、beforeDelete |
+| [数据验证](./docs/开发者指南/02-高级特性/15-数据验证.md) | required、length、email |
+| [Schema迁移](./docs/开发者指南/02-高级特性/16-Schema迁移.md) | MigrationManager、自动迁移 |
 
 ### 数据处理与运维
 | 文档 | 说明 |
 |------|------|
-| [数据映射](./docs/developer-guide/17-数据映射.md) | EntityData、DataMapper、TypeConverter |
-| [ViewModel映射](./docs/developer-guide/18-ViewModel映射.md) | ViewModelMapper、双向转换 |
-| [日志系统](./docs/developer-guide/19-日志系统.md) | Logger、LogLevel、敏感数据脱敏 |
-| [错误处理](./docs/developer-guide/20-错误处理.md) | OrmError、错误码、国际化 |
-| [查询缓存](./docs/developer-guide/21-查询缓存.md) | QueryCache、TTL、缓存失效 |
+| [数据映射](./docs/开发者指南/02-高级特性/17-数据映射.md) | EntityData、DataMapper、TypeConverter |
+| [ViewModel映射](./docs/开发者指南/02-高级特性/18-ViewModel映射.md) | ViewModelMapper、双向转换 |
+| [日志系统](./docs/开发者指南/02-高级特性/19-日志系统.md) | Logger、LogLevel、敏感数据脱敏 |
+| [错误处理](./docs/开发者指南/02-高级特性/20-错误处理.md) | OrmError、错误码、国际化 |
+| [查询缓存](./docs/开发者指南/02-高级特性/21-查询缓存.md) | QueryCache、TTL、缓存失效 |
 
 ### 参考资料
 | 文档 | 说明 |
 |------|------|
-| [API速查表](./docs/developer-guide/22-API速查表.md) | Repository、QueryBuilder、EntityData API |
-| [类型定义速查](./docs/developer-guide/23-类型定义速查.md) | 枚举、接口、结果类型 |
-| [最佳实践](./docs/developer-guide/24-最佳实践.md) | 项目结构、性能优化、常见问题 |
-| [代码示例集](./docs/developer-guide/25-代码示例集.md) | 完整场景代码示例 |
+| [API速查表](./docs/开发者指南/03-参考速查/22-API速查表.md) | Repository、QueryBuilder、EntityData API |
+| [类型定义速查](./docs/开发者指南/03-参考速查/23-类型定义速查.md) | 枚举、接口、结果类型 |
+| [最佳实践](./docs/开发者指南/03-参考速查/24-最佳实践.md) | 项目结构、性能优化、常见问题 |
+| [代码示例集](./docs/开发者指南/03-参考速查/25-代码示例集.md) | 完整场景代码示例 |
 
 ## 兼容性
 
@@ -425,7 +435,7 @@ hvigor test
 保持兼容（通常无需改动）：
 - `Repository` / `QueryBuilder` / `EntityData` 核心用法
 - 关系映射、分页、缓存、迁移、验证的主调用路径
-- 包入口导入方式：`import { ... } from '@offlinecat/ocorm'`
+- 包入口导入方式：`import { ... } from 'ocorm'`
 
 需要关注（可能影响旧行为）：
 - `DatabaseConfig.encrypt` 默认值改为 `true`
@@ -463,3 +473,5 @@ hvigor test
 ## License
 
 MIT License - Copyright (c) 2026 offlinecat-dev
+
+

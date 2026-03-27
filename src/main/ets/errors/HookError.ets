@@ -5,6 +5,7 @@
 
 import { OrmError, ErrorContext } from './OrmError'
 import { ERROR_HOOK_EXECUTION_FAILED } from './ErrorCodes'
+import { sanitizeErrorMessage } from './ErrorSanitizer'
 
 /**
  * 钩子执行错误
@@ -18,11 +19,12 @@ export class HookExecutionError extends OrmError {
    * @param originalError 原始错误信息
    */
   constructor(entityName: string, hookName: string, originalError: string) {
+    const sanitizedError = sanitizeErrorMessage(originalError)
     const context = new ErrorContext()
     context.entityName = entityName
     context.operation = hookName
-    context.details = originalError
-    super(`实体 '${entityName}' 的 '${hookName}' 钩子执行失败: ${originalError}`, ERROR_HOOK_EXECUTION_FAILED, context)
+    context.details = sanitizedError
+    super(`实体 '${entityName}' 的 '${hookName}' 钩子执行失败: ${sanitizedError}`, ERROR_HOOK_EXECUTION_FAILED, context)
     this.name = 'HookExecutionError'
   }
 }

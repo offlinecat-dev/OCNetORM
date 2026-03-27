@@ -1,5 +1,5 @@
 /**
- * OCORM 统一初始化入口
+ * ocorm 统一初始化入口
  * 简化 DatabaseManager + SchemaBuilder 的初始化流程
  */
 
@@ -17,7 +17,7 @@ import {
 } from '../schema/MigrationManager'
 
 /**
- * OCORM 初始化选项
+ * ocorm 初始化选项
  */
 export interface OCORMInitOptions {
   /** 数据库配置 */

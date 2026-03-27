@@ -22,10 +22,6 @@ type StoreProvider = () => relationalStore.RdbStore
 type UpdatedAtResolver = () => string | null; type ValueConverter = (value: ValueType) => relationalStore.ValueType
 type SourceRepoProvider = () => CascadeRepository
 
-interface SavepointExecutor {
-  executeSql(sql: string): Promise<void>
-}
-
 class SavepointState {
   name: string
   started: boolean
@@ -216,14 +212,18 @@ export class CrudOperations {
       if (updatedAtColumn !== null) {
         rdbValuesBucket[updatedAtColumn] = Date.now()
       }
+      const updatedColumns = Object.keys(rdbValuesBucket)
+      if (updatedColumns.length === 0) {
+        this.logger.logWarn(`[W_UPDATE_NO_COLUMNS] UPDATE skipped: no updatable columns for ${this.entityName}`)
+        return SaveResult.createSuccess(0)
+      }
       const predicates = new relationalStore.RdbPredicates(this.entityMetadata.tableName)
       predicates.equalTo(pkColumn.columnName, this.toRdbValue(pkValue))
       const affectedRows = await store.update(rdbValuesBucket, predicates)
-      const updatedColumns = Object.keys(rdbValuesBucket)
       const setClause = updatedColumns.length > 0
         ? updatedColumns.map((column) => `${column} = ?`).join(', ')
         : '(no columns)'
-      const updateSql = `UPDATE ${this.entityMetadata.tableName} SET ${setClause} WHERE ${pkColumn.columnName} = ${String(pkValue)}`
+      const updateSql = `UPDATE ${this.entityMetadata.tableName} SET ${setClause} WHERE ${pkColumn.columnName} = ?`
       const updateDuration = Date.now() - startTime
       this.logger.logQuery(updateSql, updateDuration)
       await OrmContext.emitSlowQuery('UPDATE', updateSql, updateDuration, this.entityName)
@@ -371,6 +371,11 @@ export class CrudOperations {
       if (resultSet.rowCount > 0) {
         throw new UniqueValidationError(this.entityName, column.columnName)
       }
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e
+      }
+      throw new Error(String(e))
     } finally {
       this.closeResultSet(resultSet)
     }
@@ -425,13 +430,9 @@ export class CrudOperations {
     store: relationalStore.RdbStore,
     prefix: string
   ): Promise<SavepointState> {
-    const executor = this.getSavepointExecutor(store)
     const savepointName = this.nextSavepointName(prefix)
-    if (executor === null) {
-      throw new ExecutionError('SAVEPOINT', '当前数据库不支持 SAVEPOINT，无法保证级联保存原子性')
-    }
     try {
-      await executor.executeSql(`SAVEPOINT ${savepointName}`)
+      await store.executeSql(`SAVEPOINT ${savepointName}`)
       return new SavepointState(savepointName, true)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
@@ -440,12 +441,8 @@ export class CrudOperations {
   }
 
   private async releaseSavepoint(store: relationalStore.RdbStore, savepointName: string): Promise<void> {
-    const executor = this.getSavepointExecutor(store)
-    if (executor === null) {
-      throw new ExecutionError('SAVEPOINT', '当前数据库不支持 SAVEPOINT，无法释放保存点')
-    }
     try {
-      await executor.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
+      await store.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       throw new ExecutionError('SAVEPOINT', `释放保存点失败: ${message}`)
@@ -453,25 +450,13 @@ export class CrudOperations {
   }
 
   private async rollbackToSavepointSafely(store: relationalStore.RdbStore, savepointName: string): Promise<void> {
-    const executor = this.getSavepointExecutor(store)
-    if (executor === null) {
-      throw new ExecutionError('SAVEPOINT', '当前数据库不支持 SAVEPOINT，无法回滚保存点')
-    }
     try {
-      await executor.executeSql(`ROLLBACK TO SAVEPOINT ${savepointName}`)
-      await executor.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
+      await store.executeSql(`ROLLBACK TO SAVEPOINT ${savepointName}`)
+      await store.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       throw new ExecutionError('SAVEPOINT', `回滚保存点失败: ${message}`)
     }
-  }
-
-  private getSavepointExecutor(store: relationalStore.RdbStore): SavepointExecutor | null {
-    const executor = store as SavepointExecutor
-    if (typeof executor.executeSql !== 'function') {
-      return null
-    }
-    return executor
   }
 
   private closeResultSet(resultSet: relationalStore.ResultSet | null): void {

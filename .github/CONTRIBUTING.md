@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢你对 OCORM 的关注！我们欢迎各种形式的贡献。
+感谢你对 ocorm 的关注！我们欢迎各种形式的贡献。
 
 ## 如何贡献
 
@@ -22,7 +22,7 @@
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/OCNetORM.git
-cd OCORM
+cd ocorm
 ```
 
 #### 2. 创建分支
@@ -117,7 +117,7 @@ hvigorw test
 ## 项目结构
 
 ```
-OCORM/
+ocorm/
 ├── src/main/ets/
 │   ├── core/           # 核心功能
 │   ├── decorators/     # 装饰器相关

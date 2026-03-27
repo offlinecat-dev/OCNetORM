@@ -10,6 +10,10 @@ import { IndexMetadata } from './IndexMetadata'
 import { ScopeRegistry, ScopeFunction } from './ScopeRegistry'
 import { ColumnOptions, createColumnOptions, registerColumn, registerPrimaryKey, registerAutoIncrementPrimaryKey } from '../decorators/ColumnDecorator'
 import { registerEntity, createEntityOptions } from '../decorators/EntityDecorator'
+import { OrmError } from '../errors/OrmError'
+import { sanitizeErrorMessage } from '../errors/ErrorSanitizer'
+
+type SchemaFailure = Error | object | string | number | boolean | null | undefined
 
 /**
  * 列定义
@@ -133,7 +137,7 @@ export function defineEntity(entityName: string, schema: EntitySchema): EntityMe
       const options = buildColumnOptions(columnSchema)
       registerColumn(entityName, columnSchema.property, options)
     } catch (e) {
-      throw new Error(`注册列 ${columnSchema.property} 失败: ${e instanceof Error ? e.message : String(e)}`)
+      throw new Error(`注册列 ${columnSchema.property} 失败: ${describeOriginalError(e)}`)
     }
   }
 
@@ -150,7 +154,7 @@ export function defineEntity(entityName: string, schema: EntitySchema): EntityMe
         softDeleteOptions.nullable = true
         registerColumn(entityName, config.propertyName, softDeleteOptions)
       } catch (e) {
-        throw new Error(`注册软删除列失败: ${e instanceof Error ? e.message : String(e)}`)
+        throw new Error(`注册软删除列失败: ${describeOriginalError(e)}`)
       }
     }
   }
@@ -209,6 +213,24 @@ function normalizeSoftDelete(config: boolean | SoftDeleteSchema): Required<SoftD
     propertyName: config.propertyName ? config.propertyName : 'deletedAt',
     columnName: config.columnName ? config.columnName : 'deleted_at'
   }
+}
+
+function describeOriginalError(error: SchemaFailure): string {
+  if (error instanceof OrmError) {
+    return sanitizeErrorMessage(error.getFullMessage())
+  }
+  if (error instanceof Error) {
+    const message = sanitizeErrorMessage(error.message)
+    const stack = error.stack
+    if (stack !== undefined && stack !== null && stack.length > 0) {
+      const firstLine = sanitizeErrorMessage(stack.split('\n')[0])
+      if (firstLine.length > 0) {
+        return `${message} | stack=${firstLine}`
+      }
+    }
+    return message
+  }
+  return sanitizeErrorMessage(String(error))
 }
 
 function registerMorphToRelations(

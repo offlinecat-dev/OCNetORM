@@ -36,13 +36,22 @@ export class MigrationVersionStore {
 
   async updateVersionInDb(store: relationalStore.RdbStore, version: number): Promise<void> {
     try {
+      await this.ensureVersionTable(store)
       const predicates = new relationalStore.RdbPredicates(MigrationVersionStore.VERSION_TABLE)
       predicates.equalTo('id', 1)
       const updateValues: relationalStore.ValuesBucket = {
         'version': version,
         'updated_at': Date.now()
       }
-      await store.update(updateValues, predicates)
+      const affected = await store.update(updateValues, predicates)
+      if (affected === 0) {
+        const insertValues: relationalStore.ValuesBucket = {
+          'id': 1,
+          'version': version,
+          'updated_at': Date.now()
+        }
+        await store.insert(MigrationVersionStore.VERSION_TABLE, insertValues)
+      }
       this.setVersion(version)
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)

@@ -70,7 +70,7 @@
 
 ## 安全最佳实践
 
-使用 OCORM 时，请遵循以下安全建议：
+使用 ocorm 时，请遵循以下安全建议：
 
 ### 数据库安全
 
@@ -80,7 +80,7 @@ const users = await repo.createQueryBuilder()
   .where('email', ConditionOperator.EQUAL, userInput)
   .getMany()
 
-// ❌ 避免：直接拼接 SQL（OCORM 已内置防护）
+// ❌ 避免：直接拼接 SQL（ocorm 已内置防护）
 ```
 
 ### 敏感数据
@@ -96,7 +96,7 @@ const config = new DatabaseConfig(
 
 ## 致谢
 
-感谢所有帮助提高 OCORM 安全性的安全研究人员。
+感谢所有帮助提高 ocorm 安全性的安全研究人员。
 
 ---
 

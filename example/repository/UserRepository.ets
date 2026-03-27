@@ -1,6 +1,6 @@
 /**
  * 用户仓库示例
- * 演示如何使用 OCORM Repository 进行数据操作
+ * 演示如何使用 ocorm Repository 进行数据操作
  */
 
 import {

@@ -9,12 +9,27 @@ import { EntityMetadata } from '../core/EntityMetadata'
 import { ResultSetRow } from './ResultSetRow'
 import { ColumnType } from '../types/ColumnType'
 import { DbValueType } from '../types/ValueTypes'
+import { Logger } from '../logging/Logger'
+import { OrmError } from '../errors/OrmError'
+import { sanitizeErrorMessage } from '../errors/ErrorSanitizer'
+
+type ResultSetFailure = Error | object | string | number | boolean | null | undefined
 
 /**
  * ResultSet 工具类
  * 提供静态方法处理 ResultSet 数据转换
  */
 export class ResultSetUtils {
+  private static resolveErrorMessage(error: ResultSetFailure): string {
+    if (error instanceof OrmError) {
+      return sanitizeErrorMessage(error.getFullMessage())
+    }
+    if (error instanceof Error) {
+      return sanitizeErrorMessage(error.message)
+    }
+    return sanitizeErrorMessage(String(error))
+  }
+
   /**
    * 将 ResultSet 当前行转换为 ResultSetRow
    * @param resultSet 查询结果集
@@ -24,6 +39,7 @@ export class ResultSetUtils {
   static toRow(resultSet: relationalStore.ResultSet, metadata: EntityMetadata): ResultSetRow {
     const row = new ResultSetRow()
     const columnNames = resultSet.columnNames
+    let loggedError = false
 
     for (let i = 0; i < columnNames.length; i++) {
       const columnName = columnNames[i]
@@ -47,6 +63,13 @@ export class ResultSetUtils {
       } catch (e) {
         // 忽略单个列的读取错误，继续处理其他列
         row.set(columnName, null)
+        if (!loggedError) {
+          loggedError = true
+          const message = ResultSetUtils.resolveErrorMessage(e)
+          Logger.getInstance().logWarn(
+            `结果集列读取失败: entity=${metadata.entityName}, column=${columnName}, reason=${message}`
+          )
+        }
       }
     }
 
@@ -104,6 +127,8 @@ export class ResultSetUtils {
       }
     } catch (e) {
       // 遍历结果集失败，返回已处理的行
+      const message = ResultSetUtils.resolveErrorMessage(e)
+      Logger.getInstance().logWarn(`遍历结果集失败: entity=${metadata.entityName}, reason=${message}`)
     }
 
     return rows
@@ -137,7 +162,8 @@ export class ResultSetUtils {
         }
       }
     } catch (e) {
-      // 忽略错误
+      const message = ResultSetUtils.resolveErrorMessage(e)
+      Logger.getInstance().logWarn(`读取列值失败: column=${columnName}, reason=${message}`)
     }
 
     return values
@@ -158,28 +184,17 @@ export class ResultSetUtils {
         return null
       }
       const columnType = resultSet.getColumnTypeSync(columnIndex)
-      const readBlobValue = (): Uint8Array | null => {
-        try {
-          const blobValue = resultSet.getBlob(columnIndex)
-          return blobValue instanceof Uint8Array ? blobValue : null
-        } catch (e) {
-          return null
-        }
-      }
-
       switch (columnType) {
         case relationalStore.ColumnType.INTEGER:
           const longValue = resultSet.getLong(columnIndex) as number
           if (Number.isNaN(longValue)) {
-            const blobValue = readBlobValue()
-            return blobValue !== null ? blobValue : resultSet.getString(columnIndex)
+            return resultSet.getString(columnIndex)
           }
           return longValue
         case relationalStore.ColumnType.REAL:
           const doubleValue = resultSet.getDouble(columnIndex)
           if (Number.isNaN(doubleValue)) {
-            const blobValue = readBlobValue()
-            return blobValue !== null ? blobValue : resultSet.getString(columnIndex)
+            return resultSet.getString(columnIndex)
           }
           return doubleValue
         case relationalStore.ColumnType.BLOB:
@@ -188,8 +203,7 @@ export class ResultSetUtils {
           return null
         case relationalStore.ColumnType.TEXT:
         default:
-          const blobValue = readBlobValue()
-          return blobValue !== null ? blobValue : resultSet.getString(columnIndex)
+          return resultSet.getString(columnIndex)
       }
     } catch (e) {
       return null

@@ -9,6 +9,10 @@ import { ValueType } from '../types/ValueTypes'
 import { ConditionOperator } from '../types/ConditionOperator'
 import { WhereCondition, LogicalOperator } from './WhereCondition'
 import { ResultSetUtils } from '../mapping/ResultSetUtils'
+import { OrmError } from '../errors/OrmError'
+import { sanitizeErrorMessage } from '../errors/ErrorSanitizer'
+
+type SubQueryFailure = Error | object | string | number | boolean | null | undefined
 
 export interface SubQueryRelationExecutorOptions {
   logger: Logger
@@ -21,10 +25,46 @@ export interface SubQueryRelationExecutorOptions {
 }
 
 export class SubQueryRelationExecutor {
+  private static readonly IN_CLAUSE_LIMIT: number = 500
   private options: SubQueryRelationExecutorOptions
 
   constructor(options: SubQueryRelationExecutorOptions) {
     this.options = options
+  }
+
+  private resolveErrorMessage(error: SubQueryFailure): string {
+    if (error instanceof OrmError) {
+      return sanitizeErrorMessage(error.getFullMessage())
+    }
+    if (error instanceof Error) {
+      return sanitizeErrorMessage(error.message)
+    }
+    return sanitizeErrorMessage(String(error))
+  }
+
+  private logErrorWithFailure(context: string, error: SubQueryFailure): void {
+    this.options.logger.logError(`${context}: ${this.resolveErrorMessage(error)}`)
+  }
+
+  private logWarnWithFailure(context: string, error: SubQueryFailure): void {
+    this.options.logger.logWarn(`${context}: ${this.resolveErrorMessage(error)}`)
+  }
+
+  private resolveInClauseLimit(): number {
+    return SubQueryRelationExecutor.IN_CLAUSE_LIMIT
+  }
+
+  private splitIntoBatches<T>(values: Array<T>, batchSize: number): Array<Array<T>> {
+    const batches: Array<Array<T>> = []
+    const effectiveSize = batchSize > 0 ? Math.floor(batchSize) : 1
+    for (let i = 0; i < values.length; i += effectiveSize) {
+      const batch: Array<T> = []
+      for (let j = i; j < Math.min(i + effectiveSize, values.length); j++) {
+        batch.push(values[j])
+      }
+      batches.push(batch)
+    }
+    return batches
   }
 
   async executeOneSubQuery(
@@ -128,7 +168,7 @@ export class SubQueryRelationExecutor {
     try {
       resultSet = await this.options.withQueryTimeout(store.query(predicates, [inverseKey]), 'SUBQUERY')
     } catch (e) {
-      this.options.logger.logError(`子查询执行失败: ${e instanceof Error ? e.message : String(e)}`)
+      this.logErrorWithFailure('子查询执行失败', e)
       return []
     }
 
@@ -146,7 +186,10 @@ export class SubQueryRelationExecutor {
         }
       }
     } catch (e) {
-      // 忽略遍历错误
+      this.logWarnWithFailure(
+        `子查询结果集遍历失败: relation=${subQuery.getRelationName()}, stage=ONE_TO_MANY`,
+        e
+      )
     } finally {
       this.options.closeResultSet(resultSet)
     }
@@ -194,7 +237,7 @@ export class SubQueryRelationExecutor {
     try {
       targetResultSet = await this.options.withQueryTimeout(store.query(targetPredicates, [targetPkColumn.columnName]), 'SUBQUERY')
     } catch (e) {
-      this.options.logger.logError(`子查询目标表查询失败: ${e instanceof Error ? e.message : String(e)}`)
+      this.logErrorWithFailure('子查询目标表查询失败', e)
       return []
     }
 
@@ -211,7 +254,10 @@ export class SubQueryRelationExecutor {
         }
       }
     } catch (e) {
-      // 忽略遍历错误
+      this.logWarnWithFailure(
+        `子查询结果集遍历失败: relation=${subQuery.getRelationName()}, stage=MANY_TO_ONE_TARGET`,
+        e
+      )
     } finally {
       this.options.closeResultSet(targetResultSet)
     }
@@ -226,40 +272,53 @@ export class SubQueryRelationExecutor {
       return []
     }
 
-    const sourcePredicates = new relationalStore.RdbPredicates(sourceMetadata.tableName)
     const sourceConditions = this.buildConditionsWithSoftDelete(sourceMetadata, [])
-    if (!this.applyConditionsToPredicates(sourcePredicates, sourceConditions, sourceMetadata, sourceEntityName)) {
-      return []
-    }
-    if (sourceConditions.length > 0) {
-      sourcePredicates.and()
-    }
-    sourcePredicates.in(inverseKey, targetPkValues)
-
-    let sourceResultSet: relationalStore.ResultSet | null = null
-    try {
-      sourceResultSet = await this.options.withQueryTimeout(store.query(sourcePredicates, [sourcePkColumn]), 'SUBQUERY')
-    } catch (e) {
-      this.options.logger.logError(`子查询源表查询失败: ${e instanceof Error ? e.message : String(e)}`)
-      return []
-    }
-
-    // 收集源实体 ID
     const sourceIds: Array<ValueType> = []
-    try {
-      while (sourceResultSet !== null && sourceResultSet.goToNextRow()) {
-        const columnIndex = sourceResultSet.getColumnIndex(sourcePkColumn)
-        if (!sourceResultSet.isColumnNull(columnIndex)) {
-          const pkValue = ResultSetUtils.getValueByRuntimeType(sourceResultSet, columnIndex)
-          if (pkValue !== null) {
-            sourceIds.push(pkValue as ValueType)
+
+    const batches = this.splitIntoBatches(targetPkValues, this.resolveInClauseLimit())
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex]
+      const sourcePredicates = new relationalStore.RdbPredicates(sourceMetadata.tableName)
+      if (!this.applyConditionsToPredicates(sourcePredicates, sourceConditions, sourceMetadata, sourceEntityName)) {
+        return []
+      }
+      if (sourceConditions.length > 0) {
+        sourcePredicates.and()
+      }
+      try {
+        sourcePredicates.in(inverseKey, batch)
+      } catch (e) {
+        this.logErrorWithFailure('子查询源表条件构建失败', e)
+        return []
+      }
+
+      let sourceResultSet: relationalStore.ResultSet | null = null
+      try {
+        sourceResultSet = await this.options.withQueryTimeout(store.query(sourcePredicates, [sourcePkColumn]), 'SUBQUERY')
+      } catch (e) {
+        this.logErrorWithFailure('子查询源表查询失败', e)
+        return []
+      }
+
+      // 收集源实体 ID
+      try {
+        while (sourceResultSet !== null && sourceResultSet.goToNextRow()) {
+          const columnIndex = sourceResultSet.getColumnIndex(sourcePkColumn)
+          if (!sourceResultSet.isColumnNull(columnIndex)) {
+            const pkValue = ResultSetUtils.getValueByRuntimeType(sourceResultSet, columnIndex)
+            if (pkValue !== null) {
+              sourceIds.push(pkValue as ValueType)
+            }
           }
         }
+      } catch (e) {
+        this.logWarnWithFailure(
+          `子查询结果集遍历失败: relation=${subQuery.getRelationName()}, stage=MANY_TO_ONE_SOURCE, batch=${batchIndex + 1}/${batches.length}`,
+          e
+        )
+      } finally {
+        this.options.closeResultSet(sourceResultSet)
       }
-    } catch (e) {
-      // 忽略遍历错误
-    } finally {
-      this.options.closeResultSet(sourceResultSet)
     }
 
     return sourceIds
@@ -303,7 +362,7 @@ export class SubQueryRelationExecutor {
     try {
       targetResultSet = await this.options.withQueryTimeout(store.query(targetPredicates, [targetPkColumn.columnName]), 'SUBQUERY')
     } catch (e) {
-      this.options.logger.logError(`子查询目标表查询失败: ${e instanceof Error ? e.message : String(e)}`)
+      this.logErrorWithFailure('子查询目标表查询失败', e)
       return []
     }
 
@@ -320,7 +379,10 @@ export class SubQueryRelationExecutor {
         }
       }
     } catch (e) {
-      // 忽略遍历错误
+      this.logWarnWithFailure(
+        `子查询结果集遍历失败: relation=${subQuery.getRelationName()}, stage=MANY_TO_MANY_TARGET`,
+        e
+      )
     } finally {
       this.options.closeResultSet(targetResultSet)
     }
@@ -330,34 +392,47 @@ export class SubQueryRelationExecutor {
     }
 
     // 第二步：查询中间表，获取关联的源实体 ID
-    const joinPredicates = new relationalStore.RdbPredicates(relation.joinTable)
-    joinPredicates.in(relation.joinTargetKey, targetPkValues)
-
-    let joinResultSet: relationalStore.ResultSet | null = null
-    try {
-      joinResultSet = await this.options.withQueryTimeout(store.query(joinPredicates, [relation.joinSourceKey]), 'SUBQUERY')
-    } catch (e) {
-      this.options.logger.logError(`子查询中间表查询失败: ${e instanceof Error ? e.message : String(e)}`)
-      return []
-    }
-
     // 收集源实体 ID（去重）
     const sourceIds: Map<string, ValueType> = new Map()
-    try {
-      while (joinResultSet !== null && joinResultSet.goToNextRow()) {
-        const columnIndex = joinResultSet.getColumnIndex(relation.joinSourceKey)
-        if (!joinResultSet.isColumnNull(columnIndex)) {
-          const sourceId = ResultSetUtils.getValueByRuntimeType(joinResultSet, columnIndex)
-          const normalized = this.normalizeIdValue(sourceId)
-          if (normalized !== null) {
-            this.collectUniqueId(sourceIds, normalized)
+    const batches = this.splitIntoBatches(targetPkValues, this.resolveInClauseLimit())
+
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex]
+      const joinPredicates = new relationalStore.RdbPredicates(relation.joinTable)
+      try {
+        joinPredicates.in(relation.joinTargetKey, batch)
+      } catch (e) {
+        this.logErrorWithFailure('子查询中间表条件构建失败', e)
+        return []
+      }
+
+      let joinResultSet: relationalStore.ResultSet | null = null
+      try {
+        joinResultSet = await this.options.withQueryTimeout(store.query(joinPredicates, [relation.joinSourceKey]), 'SUBQUERY')
+      } catch (e) {
+        this.logErrorWithFailure('子查询中间表查询失败', e)
+        return []
+      }
+
+      try {
+        while (joinResultSet !== null && joinResultSet.goToNextRow()) {
+          const columnIndex = joinResultSet.getColumnIndex(relation.joinSourceKey)
+          if (!joinResultSet.isColumnNull(columnIndex)) {
+            const sourceId = ResultSetUtils.getValueByRuntimeType(joinResultSet, columnIndex)
+            const normalized = this.normalizeIdValue(sourceId)
+            if (normalized !== null) {
+              this.collectUniqueId(sourceIds, normalized)
+            }
           }
         }
+      } catch (e) {
+        this.logWarnWithFailure(
+          `子查询结果集遍历失败: relation=${subQuery.getRelationName()}, stage=MANY_TO_MANY_JOIN, batch=${batchIndex + 1}/${batches.length}`,
+          e
+        )
+      } finally {
+        this.options.closeResultSet(joinResultSet)
       }
-    } catch (e) {
-      // 忽略遍历错误
-    } finally {
-      this.options.closeResultSet(joinResultSet)
     }
 
     return this.toValueArray(sourceIds)

@@ -351,12 +351,35 @@ export class SchemaDiffer {
     }
 
     const desiredNotNull = !column.isNullable || column.isPrimaryKey
-    if (desiredNotNull !== existing.notNull) {
+    const existingNotNull = existing.notNull || existing.primaryKey
+    if (desiredNotNull !== existingNotNull) {
       return false
     }
 
     if (column.isPrimaryKey !== existing.primaryKey) {
       return false
+    }
+
+    if (!column.isPrimaryKey) {
+      const desiredUnique = column.isUnique
+      const existingUnique = existing.unique === true
+      if (desiredUnique !== existingUnique) {
+        return false
+      }
+    }
+
+    if (column.isPrimaryKey && existing.autoIncrement !== undefined) {
+      const desiredAutoIncrement = column.isAutoIncrement === true
+      if (desiredAutoIncrement !== existing.autoIncrement) {
+        return false
+      }
+    }
+
+    if (column.length > 0) {
+      const existingLength = this.extractLength(existing.type)
+      if (existingLength === null || existingLength !== column.length) {
+        return false
+      }
     }
 
     const desiredDefault = column.defaultValue === null
@@ -380,15 +403,16 @@ export class SchemaDiffer {
   }
 
   private normalizeDefaultValue(value: string): string {
-    const trimmed = value.trim()
-    if (trimmed.length >= 2) {
-      const first = trimmed[0]
-      const last = trimmed[trimmed.length - 1]
-      if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
-        return trimmed.substring(1, trimmed.length - 1)
-      }
+    return value.trim()
+  }
+
+  private extractLength(typeDef: string): number | null {
+    const match = typeDef.match(/\((\d+)\)/)
+    if (!match) {
+      return null
     }
-    return trimmed
+    const parsed = Number(match[1])
+    return Number.isFinite(parsed) ? parsed : null
   }
 
   private buildDesiredTables(includeJoinTables: boolean): Array<DesiredTable> {
@@ -511,7 +535,7 @@ export class SchemaDiffer {
   private generateColumnDefinition(column: ColumnMetadata): string {
     const parts: Array<string> = []
     parts.push(this.escapeIdentifier(column.columnName))
-    parts.push(column.columnType)
+    parts.push(this.buildColumnType(column))
 
     if (column.isPrimaryKey) {
       parts.push('PRIMARY KEY')
@@ -535,6 +559,13 @@ export class SchemaDiffer {
     }
 
     return parts.join(' ')
+  }
+
+  private buildColumnType(column: ColumnMetadata): string {
+    if (column.columnType === ColumnType.TEXT && column.length > 0) {
+      return `${column.columnType}(${column.length})`
+    }
+    return column.columnType
   }
 
   private formatDefaultValue(value: string | number | boolean, columnType: ColumnType): string {

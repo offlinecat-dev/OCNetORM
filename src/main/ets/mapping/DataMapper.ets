@@ -13,6 +13,7 @@ import { EntityMappingError, NullValueError } from '../errors/MappingError'
 import { ValuesBucket } from './ValuesBucket'
 import { EntityData } from './EntityData'
 import { ResultSetRow } from './ResultSetRow'
+import { ValidationMetadataStorage } from '../validation/ValidationMetadataStorage'
 
 /**
  * 数据映射器类
@@ -65,36 +66,45 @@ export class DataMapper {
       let propValue: ValueType = null
       let propType: string = 'string'
 
+      let hasValue = false
       if (prop !== null) {
         // 从 properties 数组获取
         propValue = prop.value
         propType = prop.propertyType
+        hasValue = true
       } else {
         // 尝试从 propertyMap 获取（支持 setPropertyValue 设置的值）
-        const mapValue = entityData.getPropertyValue(column.propertyName)
-        if (mapValue !== null) {
+        if (entityData.hasProperty(column.propertyName)) {
+          const mapValue = entityData.getPropertyValue(column.propertyName)
           propValue = mapValue
-          propType = this.inferPropertyType(column)
-        } else {
-          // 属性不存在，检查是否允许为空
-          if (!column.isNullable && column.defaultValue === null) {
-            throw new NullValueError(this.entityMetadata.entityName, column.columnName)
-          }
-          // 使用默认值或 null
-          if (column.defaultValue !== null) {
-            const defaultDbValue = TypeConverter.toDbValue(
-              column.defaultValue,
-              column.columnType,
-              this.inferPropertyType(column),
-              undefined,
-              column.columnName
-            )
-            bucket.set(column.columnName, defaultDbValue)
+          if (mapValue !== null) {
+            propType = this.inferValueType(mapValue)
           } else {
-            bucket.set(column.columnName, null)
+            propType = this.inferPropertyType(column)
           }
-          continue
+          hasValue = true
         }
+      }
+
+      if (!hasValue) {
+        // 属性不存在，检查是否允许为空
+        if (!column.isNullable && column.defaultValue === null) {
+          throw new NullValueError(this.entityMetadata.entityName, column.columnName)
+        }
+        // 使用默认值或 null
+        if (column.defaultValue !== null) {
+          const defaultDbValue = TypeConverter.toDbValue(
+            column.defaultValue,
+            column.columnType,
+            this.inferPropertyType(column),
+            undefined,
+            column.columnName
+          )
+          bucket.set(column.columnName, defaultDbValue)
+        } else {
+          bucket.set(column.columnName, null)
+        }
+        continue
       }
 
       // 转换值
@@ -138,6 +148,9 @@ export class DataMapper {
       let value: ValueType = null
       if (dbValue !== null) {
         value = TypeConverter.fromDbValue(dbValue, propertyType, column.columnName)
+        if (propertyType === 'Date' && typeof value === 'number') {
+          value = TypeConverter.timestampToDate(value)
+        }
       } else if (!column.isNullable && column.defaultValue !== null) {
         // 使用默认值
         value = column.defaultValue
@@ -218,8 +231,12 @@ export class DataMapper {
       case ColumnType.TEXT:
         return 'string'
       case ColumnType.INTEGER:
-        // INTEGER 可能是 number、boolean 或 Date
-        // 这里默认返回 number，具体类型需要在实体定义时指定
+        if (this.isDateColumn(column)) {
+          return 'Date'
+        }
+        if (this.isBooleanColumn(column)) {
+          return 'boolean'
+        }
         return 'number'
       case ColumnType.REAL:
         return 'number'
@@ -228,6 +245,81 @@ export class DataMapper {
       default:
         return 'string'
     }
+  }
+
+  private inferValueType(value: ValueType): string {
+    if (value instanceof Date) {
+      return 'Date'
+    }
+    if (typeof value === 'boolean') {
+      return 'boolean'
+    }
+    if (typeof value === 'number') {
+      return 'number'
+    }
+    if (typeof value === 'string') {
+      return 'string'
+    }
+    return 'object'
+  }
+
+  private isDateColumn(column: ColumnMetadata): boolean {
+    const rules = ValidationMetadataStorage.getInstance()
+      .getRules(this.entityMetadata.entityName)
+      .get(column.propertyName)
+    if (rules) {
+      for (let i = 0; i < rules.length; i++) {
+        if (rules[i].type === 'date') {
+          return true
+        }
+      }
+    }
+    const propName = column.propertyName
+    const columnName = column.columnName
+    if (this.endsWithToken(propName, 'At') || this.endsWithToken(propName, 'Date') || this.endsWithToken(propName, 'Time')) {
+      return true
+    }
+    const lower = columnName.toLowerCase()
+    return lower.endsWith('_at') || lower.endsWith('_date') || lower.endsWith('_time')
+  }
+
+  private isBooleanColumn(column: ColumnMetadata): boolean {
+    if (typeof column.defaultValue === 'boolean') {
+      return true
+    }
+    const propName = column.propertyName
+    return this.startsWithBooleanPrefix(propName) || this.startsWithBooleanPrefix(column.columnName)
+  }
+
+  private endsWithToken(value: string, token: string): boolean {
+    if (value.length <= token.length) {
+      return false
+    }
+    return value.endsWith(token)
+  }
+
+  private startsWithBooleanPrefix(value: string): boolean {
+    const lower = value.toLowerCase()
+    if (lower.startsWith('is_') || lower.startsWith('has_') || lower.startsWith('can_') || lower.startsWith('should_')) {
+      return true
+    }
+    if (lower.startsWith('enable_') || lower.startsWith('enabled_')) {
+      return true
+    }
+    return this.isCamelBooleanPrefix(value, 'is') ||
+      this.isCamelBooleanPrefix(value, 'has') ||
+      this.isCamelBooleanPrefix(value, 'can') ||
+      this.isCamelBooleanPrefix(value, 'should') ||
+      this.isCamelBooleanPrefix(value, 'enable') ||
+      this.isCamelBooleanPrefix(value, 'enabled')
+  }
+
+  private isCamelBooleanPrefix(value: string, prefix: string): boolean {
+    if (!value.startsWith(prefix) || value.length <= prefix.length) {
+      return false
+    }
+    const nextChar = value[prefix.length]
+    return nextChar >= 'A' && nextChar <= 'Z'
   }
 
   /**

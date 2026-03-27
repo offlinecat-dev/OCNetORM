@@ -10,7 +10,8 @@ import { Logger } from '../logging/Logger'
 import { LogLevel } from '../logging/LogLevel'
 import { HooksProcessor } from './HooksProcessor'
 import { HookName, GlobalHookCallback } from '../types/EntityHooks'
-import { sanitizeSqlPreview } from '../errors/ErrorSanitizer'
+import { OrmError } from '../errors/OrmError'
+import { sanitizeErrorMessage, sanitizeSqlPreview } from '../errors/ErrorSanitizer'
 
 /**
  * ORM 上下文配置选项
@@ -51,6 +52,7 @@ export class OrmEvent {
 }
 
 export type OrmEventListener = (event: OrmEvent) => void | Promise<void>
+export type OrmEventListenerErrorMode = 'log' | 'throw'
 
 /**
  * ORM 上下文类
@@ -63,6 +65,8 @@ export class OrmContext {
   private static eventListeners: Map<string, Array<OrmEventListener>> = new Map()
   /** 慢查询阈值（毫秒） */
   private static slowQueryThresholdMs: number = 1000
+  /** 事件监听器错误处理模式 */
+  private static eventListenerErrorMode: OrmEventListenerErrorMode = 'log'
 
   /** 元数据存储实例 */
   private metadataStorage: MetadataStorage
@@ -144,6 +148,14 @@ export class OrmContext {
     return OrmContext.slowQueryThresholdMs
   }
 
+  static setEventListenerErrorMode(mode: OrmEventListenerErrorMode): void {
+    OrmContext.eventListenerErrorMode = mode
+  }
+
+  static getEventListenerErrorMode(): OrmEventListenerErrorMode {
+    return OrmContext.eventListenerErrorMode
+  }
+
   static on(eventName: string, listener: OrmEventListener): void {
     const normalized = eventName.trim()
     if (normalized.length === 0) {
@@ -202,6 +214,7 @@ export class OrmContext {
       payload.timestamp = Date.now()
     }
     const snapshot = listeners.slice()
+    let firstFailure: Error | null = null
     for (let i = 0; i < snapshot.length; i++) {
       try {
         const result = snapshot[i](payload)
@@ -209,9 +222,15 @@ export class OrmContext {
           await result
         }
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e)
+        const message = OrmContext.resolveEventListenerErrorMessage(e)
         Logger.getInstance().logError(`事件监听器执行失败: ${normalized}, ${message}`)
+        if (OrmContext.eventListenerErrorMode === 'throw' && firstFailure === null) {
+          firstFailure = e instanceof Error ? e : new Error(String(e))
+        }
       }
+    }
+    if (OrmContext.eventListenerErrorMode === 'throw' && firstFailure !== null) {
+      throw firstFailure
     }
   }
 
@@ -277,6 +296,7 @@ export class OrmContext {
     OrmContext.clearGlobalHooks()
     OrmContext.clearEventListeners()
     OrmContext.slowQueryThresholdMs = 1000
+    OrmContext.eventListenerErrorMode = 'log'
   }
 
   /**
@@ -287,5 +307,15 @@ export class OrmContext {
       OrmContext.instance.reset()
       OrmContext.instance = null
     }
+  }
+
+  private static resolveEventListenerErrorMessage(error: Error | object | string | number | boolean | null | undefined): string {
+    if (error instanceof OrmError) {
+      return sanitizeErrorMessage(error.getFullMessage())
+    }
+    if (error instanceof Error) {
+      return sanitizeErrorMessage(error.message)
+    }
+    return sanitizeErrorMessage(String(error))
   }
 }

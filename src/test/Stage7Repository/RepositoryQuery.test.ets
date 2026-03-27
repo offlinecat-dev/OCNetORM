@@ -8,6 +8,7 @@ import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { QueryCache } from '../../main/ets/query/QueryCache';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
 import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { DatabaseManagerTestHooks } from '../../main/ets/database/testing/DatabaseManagerTestHooks';
 import { relationalStore } from '@kit.ArkData';
 
 const setupUserEntity = (): void => {
@@ -70,7 +71,7 @@ export default function repositoryQueryTest() {
       MetadataStorage.resetInstance();
       QueryCache.resetInstance();
       HooksProcessor.resetInstance();
-      DatabaseManager.resetInstance();
+      DatabaseManagerTestHooks.resetInstance();
     });
 
     it('findById should throw ExecutionError when database not initialized', 0, async () => {

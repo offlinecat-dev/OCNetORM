@@ -1,5 +1,5 @@
 /**
- * OCORM 使用示例页面
+ * ocorm 使用示例页面
  * ArkUI 图形界面演示 ORM 框架的各种功能
  * 符合 ArkTS 严格类型规范
  */
@@ -131,7 +131,7 @@ struct UsageExamplePage {
         LogLevel.DEBUG
       )
 
-      // 初始化 OCORM
+      // 初始化 ocorm
       const initOptions = new InitOptions(config)
       await OCORMInit(getContext(this), initOptions)
 
@@ -301,7 +301,7 @@ struct UsageExamplePage {
   build() {
     Column() {
       // 标题
-      Text('OCORM 示例')
+      Text('ocorm 示例')
         .fontSize(24)
         .fontWeight(FontWeight.Bold)
         .margin({ bottom: 16 })

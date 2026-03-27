@@ -33,6 +33,11 @@ const setupUserMetadata = (): void => {
     .setType(ColumnType.INTEGER)
     .setNullable(true);
   storage.registerColumn('User', ageColumn);
+
+  const createdAtColumn = new ColumnMetadata('createdAt', 'created_at')
+    .setType(ColumnType.INTEGER)
+    .setNullable(true);
+  storage.registerColumn('User', createdAtColumn);
 };
 
 const setupNoKeyMetadata = (): void => {
@@ -144,6 +149,26 @@ export default function dataMapperTest() {
       expect(statusProp !== null).assertEqual(true);
       if (statusProp) {
         expect(statusProp.value).assertEqual('active');
+      }
+    });
+
+    it('fromResultSetRow should restore INTEGER-backed Date columns as Date', 0, () => {
+      setupUserMetadata();
+      const mapper = new DataMapper('User');
+      const timestamp = 1710825600000;
+      const row = new ResultSetRow();
+      row.set('id', 8);
+      row.set('name', 'DateUser');
+      row.set('created_at', timestamp);
+
+      const data = mapper.fromResultSetRow(row);
+      const createdAtProp = data.getProperty('createdAt');
+
+      expect(createdAtProp !== null).assertEqual(true);
+      if (createdAtProp) {
+        expect(createdAtProp.value instanceof Date).assertEqual(true);
+        const createdAt = createdAtProp.value as Date;
+        expect(createdAt.getTime()).assertEqual(timestamp);
       }
     });
 

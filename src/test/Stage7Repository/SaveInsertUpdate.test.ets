@@ -9,7 +9,8 @@ import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { UniqueValidationError } from '../../main/ets/errors/ValidationError';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
 import { ValidationMetadataStorage } from '../../main/ets/validation/ValidationMetadataStorage';
-import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { DatabaseManagerTestHooks } from '../../main/ets/database/testing/DatabaseManagerTestHooks';
 import { relationalStore } from '@kit.ArkData';
 
 const setupUserEntity = (): void => {
@@ -80,7 +81,7 @@ export default function saveInsertUpdateTest() {
       MetadataStorage.resetInstance();
       HooksProcessor.resetInstance();
       ValidationMetadataStorage.resetInstance();
-      DatabaseManager.resetInstance();
+      DatabaseManagerTestHooks.resetInstance();
     });
 
     it('should create Repository with registered entity', 0, () => {

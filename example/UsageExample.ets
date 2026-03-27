@@ -1,5 +1,5 @@
 /**
- * OCORM 完整使用示例
+ * ocorm 完整使用示例
  * 演示 ORM 框架的各种功能
  * 符合 ArkTS 严格类型规范
  */
@@ -129,7 +129,7 @@ function registerArticleEntity(): void {
 // ============================================
 
 /**
- * 初始化 OCORM
+ * 初始化 ocorm
  * @param context 应用上下文
  */
 async function initializeORM(context: Context): Promise<void> {

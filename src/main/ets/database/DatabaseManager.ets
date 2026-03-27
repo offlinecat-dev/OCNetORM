@@ -12,6 +12,11 @@ import {
 } from '../errors/DatabaseError'
 import { QueryCache } from '../query/QueryCache'
 import { Logger } from '../logging/Logger'
+import { StorePool } from './pool/StorePool'
+import { StoreLease } from './pool/StoreLease'
+import { PoolMetrics } from './pool/PoolMetrics'
+import { QuerySlotGate } from './manager/QuerySlotGate'
+import { StorePoolFactory } from './manager/StorePoolFactory'
 
 /**
  * 数据库管理器适配接口（用于测试注入）
@@ -24,6 +29,17 @@ export interface DatabaseManagerAdapter {
 }
 
 /**
+ * DatabaseManager 测试桥接状态
+ */
+export interface DatabaseManagerTestingState {
+  store: relationalStore.RdbStore | null
+  storePool: StorePool | null
+  config: DatabaseConfig | null
+  initialized: boolean
+  healthy: boolean
+}
+
+/**
  * 数据库管理器单例类
  * 负责数据库连接的创建、获取和关闭
  */
@@ -32,6 +48,8 @@ export class DatabaseManager implements DatabaseManagerAdapter {
   private static instance: DatabaseManager = new DatabaseManager()
   /** RdbStore 实例 */
   private store: relationalStore.RdbStore | null = null
+  /** 可选连接池实例 */
+  private storePool: StorePool | null = null
   /** 数据库配置 */
   private config: DatabaseConfig | null = null
   /** 是否已初始化 */
@@ -40,14 +58,8 @@ export class DatabaseManager implements DatabaseManagerAdapter {
   private healthCheckIntervalId: number = 0
   /** 连接是否健康 */
   private healthy: boolean = false
-  /** 查询超时（毫秒），0 表示禁用 */
-  private queryTimeoutMs: number = 0
-  /** 最大并发查询数，0 表示不限制 */
-  private maxConcurrentQueries: number = 0
-  /** 当前已占用的查询槽位 */
-  private activeQuerySlots: number = 0
-  /** 等待查询槽位的队列 */
-  private pendingQueryResolvers: Array<() => void> = []
+  /** 查询并发控制 */
+  private querySlotGate: QuerySlotGate = new QuerySlotGate()
 
   /**
    * 私有构造函数，防止外部实例化
@@ -81,7 +93,8 @@ export class DatabaseManager implements DatabaseManagerAdapter {
     // 如果已经初始化且连接参数一致，重用连接并刷新运行时配置
     if (this.initialized && this.store !== null && this.config !== null) {
       const sameConnection = this.isSameConnectionConfig(this.config, config)
-      if (sameConnection) {
+      const samePool = this.isSamePoolConfig(this.config, config)
+      if (sameConnection && samePool) {
         this.config = config
         this.applyRuntimeConfig(config)
         return
@@ -89,7 +102,7 @@ export class DatabaseManager implements DatabaseManagerAdapter {
     }
 
     // 如果已有连接但配置不同，先关闭
-    if (this.store !== null) {
+    if (this.store !== null || this.storePool !== null) {
       await this.close()
     }
 
@@ -103,14 +116,16 @@ export class DatabaseManager implements DatabaseManagerAdapter {
     }
 
     try {
-      // 创建或打开数据库
+      // 创建主连接，保持旧 getStore() 行为兼容
       this.store = await relationalStore.getRdbStore(context, storeConfig)
+      await this.setupPool(context, config, storeConfig)
       this.initialized = true
       this.healthy = true
 
       // 应用运行时配置（缓存/健康检查等）
       this.applyRuntimeConfig(config)
     } catch (error) {
+      await this.close()
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new ConnectionError(config.name, errorMessage)
     }
@@ -128,6 +143,55 @@ export class DatabaseManager implements DatabaseManagerAdapter {
     return this.store
   }
 
+  async acquireStoreLease(timeoutMs?: number): Promise<StoreLease> {
+    if (this.storePool !== null) {
+      return await this.storePool.acquire(timeoutMs)
+    }
+    let store: relationalStore.RdbStore
+    try {
+      store = this.getStore()
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e
+      }
+      throw new Error(String(e))
+    }
+    return new StoreLease('singleton-store', store, null)
+  }
+
+  releaseStoreLease(lease: StoreLease): void {
+    if (this.storePool === null) {
+      return
+    }
+    this.storePool.release(lease)
+  }
+
+  async withStoreLease<T>(
+    fn: (lease: StoreLease) => Promise<T>,
+    timeoutMs?: number
+  ): Promise<T> {
+    if (this.storePool !== null) {
+      return await this.storePool.withLease(fn, timeoutMs)
+    }
+    const lease = await this.acquireStoreLease(timeoutMs)
+    try {
+      return await fn(lease)
+    } finally {
+      lease.release()
+    }
+  }
+
+  getPoolMetrics(): PoolMetrics | null {
+    if (this.storePool === null) {
+      return null
+    }
+    return this.storePool.metrics()
+  }
+
+  isPoolEnabled(): boolean {
+    return this.storePool !== null
+  }
+
   /**
    * 关闭数据库连接
    * @returns Promise<void>
@@ -135,6 +199,17 @@ export class DatabaseManager implements DatabaseManagerAdapter {
   async close(): Promise<void> {
     // 停止健康检查
     this.stopHealthCheck()
+
+    const currentPool = this.storePool
+    if (currentPool !== null) {
+      try {
+        await currentPool.close()
+      } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : String(e)
+        this.getLogger().logError(`关闭连接池失败: ${errorMessage}`)
+      }
+      this.storePool = null
+    }
 
     const currentStore = this.store
     if (currentStore !== null) {
@@ -149,8 +224,7 @@ export class DatabaseManager implements DatabaseManagerAdapter {
     this.store = null
     this.initialized = false
     this.healthy = false
-    this.activeQuerySlots = 0
-    this.releaseAllWaitingQueries()
+    this.querySlotGate.reset()
   }
 
   /**
@@ -235,57 +309,76 @@ export class DatabaseManager implements DatabaseManagerAdapter {
   }
 
   getQueryTimeoutMs(): number {
-    return this.queryTimeoutMs
+    return this.querySlotGate.getQueryTimeoutMs()
   }
 
   getMaxConcurrentQueries(): number {
-    return this.maxConcurrentQueries
+    return this.querySlotGate.getMaxConcurrentQueries()
   }
 
   getActiveQuerySlots(): number {
-    return this.activeQuerySlots
+    return this.querySlotGate.getActiveQuerySlots()
   }
 
   async acquireQuerySlot(): Promise<void> {
-    if (this.maxConcurrentQueries <= 0) {
-      return
-    }
-    while (this.maxConcurrentQueries > 0 && this.activeQuerySlots >= this.maxConcurrentQueries) {
-      await new Promise<void>((resolve) => {
-        this.pendingQueryResolvers.push(resolve)
-      })
-    }
-    if (this.maxConcurrentQueries <= 0) {
-      return
-    }
-    this.activeQuerySlots++
+    await this.querySlotGate.acquire()
   }
 
   releaseQuerySlot(): void {
-    if (this.activeQuerySlots > 0) {
-      this.activeQuerySlots--
-    }
-    if (this.maxConcurrentQueries <= 0) {
-      this.releaseAllWaitingQueries()
-      return
-    }
-    this.resolveWaitingQuery()
+    this.querySlotGate.release()
   }
 
   /**
-   * 重置单例实例（仅用于测试）
+   * 获取内部状态（测试桥接）
    */
-  static resetInstance(): void {
+  getTestingState(): DatabaseManagerTestingState {
+    return {
+      store: this.store,
+      storePool: this.storePool,
+      config: this.config,
+      initialized: this.initialized,
+      healthy: this.healthy
+    }
+  }
+
+  /**
+   * 写入内部状态（测试桥接）
+   */
+  setTestingState(state: DatabaseManagerTestingState): void {
+    this.store = state.store
+    this.storePool = state.storePool
+    this.config = state.config
+    this.initialized = state.initialized
+    this.healthy = state.healthy
+  }
+
+  /**
+   * 应用运行时配置（测试桥接）
+   */
+  applyRuntimeConfigForTesting(config: DatabaseConfig): void {
+    this.config = config
+    this.applyRuntimeConfig(config)
+  }
+
+  /**
+   * 重置单例实例（测试桥接）
+   */
+  static resetInstanceForTesting(): void {
     const current = DatabaseManager.instance
     current.stopHealthCheck()
-    current.releaseAllWaitingQueries()
+    current.querySlotGate.reset()
+
+    const currentPool = current.storePool
+    if (currentPool !== null) {
+      currentPool.close().catch(() => {
+      })
+    }
+
     current.store = null
+    current.storePool = null
     current.config = null
     current.initialized = false
     current.healthy = false
-    current.queryTimeoutMs = 0
-    current.maxConcurrentQueries = 0
-    current.activeQuerySlots = 0
     DatabaseManager.instance = new DatabaseManager()
   }
 
@@ -297,32 +390,22 @@ export class DatabaseManager implements DatabaseManagerAdapter {
     return QueryCache.getInstance()
   }
 
-  private resolveWaitingQuery(): void {
-    if (this.pendingQueryResolvers.length === 0) {
-      return
-    }
-    if (this.maxConcurrentQueries > 0 && this.activeQuerySlots >= this.maxConcurrentQueries) {
-      return
-    }
-    const resolver = this.pendingQueryResolvers.shift()
-    if (resolver !== undefined) {
-      resolver()
-    }
-  }
-
-  private releaseAllWaitingQueries(): void {
-    while (this.pendingQueryResolvers.length > 0) {
-      const resolver = this.pendingQueryResolvers.shift()
-      if (resolver !== undefined) {
-        resolver()
-      }
-    }
-  }
-
   private isSameConnectionConfig(current: DatabaseConfig, next: DatabaseConfig): boolean {
     return current.name === next.name &&
       current.securityLevel === next.securityLevel &&
       current.encrypt === next.encrypt
+  }
+
+  private isSamePoolConfig(current: DatabaseConfig, next: DatabaseConfig): boolean {
+    return StorePoolFactory.isSamePoolConfig(current, next)
+  }
+
+  private async setupPool(
+    context: Context,
+    config: DatabaseConfig,
+    storeConfig: relationalStore.StoreConfig
+  ): Promise<void> {
+    this.storePool = await StorePoolFactory.createPool(context, config, storeConfig)
   }
 
   private handleQueryCacheForConfigChange(
@@ -356,13 +439,7 @@ export class DatabaseManager implements DatabaseManagerAdapter {
       })
     }
 
-    this.queryTimeoutMs = config.queryTimeoutMs > 0 ? config.queryTimeoutMs : 0
-    this.maxConcurrentQueries = config.maxConcurrentQueries > 0 ? config.maxConcurrentQueries : 0
-    if (this.maxConcurrentQueries === 0) {
-      this.releaseAllWaitingQueries()
-    } else {
-      this.resolveWaitingQuery()
-    }
+    this.querySlotGate.configure(config)
 
     if (config.healthCheckIntervalMs > 0) {
       this.startHealthCheck(config.healthCheckIntervalMs)

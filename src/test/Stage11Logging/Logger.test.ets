@@ -690,13 +690,13 @@ export default function loggerTest() {
     });
 
     // ==================== formatMessage 测试 ====================
-    it('formatMessage should include OCORM prefix', 0, () => {
+    it('formatMessage should include ocorm prefix', 0, () => {
       const logger = Logger.getInstance();
       logger.configure(true, LogLevel.DEBUG);
       logger.setRecordHistory(true);
       logger.logDebug('test');
       const history = logger.getLogHistory();
-      expect(history[0].indexOf('[OCORM]') >= 0).assertEqual(true);
+      expect(history[0].indexOf('[ocorm]') >= 0).assertEqual(true);
     });
 
     it('formatMessage should include log type', 0, () => {

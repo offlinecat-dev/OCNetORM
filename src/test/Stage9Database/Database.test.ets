@@ -1,5 +1,6 @@
 import { describe, beforeEach, it, expect } from '@ohos/hypium';
-import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { DatabaseManagerTestHooks } from '../../main/ets/database/testing/DatabaseManagerTestHooks';
 import { DatabaseConfig } from '../../main/ets/database/DatabaseConfig';
 import { DatabaseNotInitializedError } from '../../main/ets/errors/DatabaseError';
 import { QueryCache } from '../../main/ets/query/QueryCache';
@@ -12,7 +13,7 @@ import { Context } from '@kit.AbilityKit';
 export default function databaseTest() {
   describe('databaseTest', () => {
     beforeEach(() => {
-      DatabaseManager.resetInstance();
+      DatabaseManagerTestHooks.resetInstance();
       QueryCache.resetInstance();
       Logger.resetInstance();
     });
@@ -185,14 +186,14 @@ export default function databaseTest() {
     // 9.1 DatabaseManager - close / resetInstance
     it('resetInstance should reset manager state', 0, () => {
       const manager1 = DatabaseManager.getInstance();
-      DatabaseManager.resetInstance();
+      DatabaseManagerTestHooks.resetInstance();
       const manager2 = DatabaseManager.getInstance();
       expect(manager1 === manager2).assertEqual(false);
     });
 
     it('resetInstance should clear initialization state', 0, () => {
       const manager = DatabaseManager.getInstance();
-      DatabaseManager.resetInstance();
+      DatabaseManagerTestHooks.resetInstance();
       const newManager = DatabaseManager.getInstance();
       expect(newManager.isInitialized()).assertEqual(false);
       expect(newManager.isHealthy()).assertEqual(false);
@@ -351,9 +352,9 @@ export default function databaseTest() {
     it('multiple resetInstance calls should not throw', 0, () => {
       let threw = false;
       try {
-        DatabaseManager.resetInstance();
-        DatabaseManager.resetInstance();
-        DatabaseManager.resetInstance();
+        DatabaseManagerTestHooks.resetInstance();
+        DatabaseManagerTestHooks.resetInstance();
+        DatabaseManagerTestHooks.resetInstance();
       } catch (e) {
         threw = true;
       }
@@ -362,7 +363,7 @@ export default function databaseTest() {
 
     it('getInstance after resetInstance should return fresh instance', 0, () => {
       DatabaseManager.getInstance();
-      DatabaseManager.resetInstance();
+      DatabaseManagerTestHooks.resetInstance();
       const manager = DatabaseManager.getInstance();
       expect(manager.isInitialized()).assertEqual(false);
     });

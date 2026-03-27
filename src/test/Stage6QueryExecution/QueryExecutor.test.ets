@@ -9,6 +9,7 @@ import { QueryBuilder, BatchUpdateValues } from '../../main/ets/query/QueryBuild
 import { QueryExecutor } from '../../main/ets/query/QueryExecutor';
 import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { DatabaseManagerTestHooks } from '../../main/ets/database/testing/DatabaseManagerTestHooks';
 import { relationalStore } from '@kit.ArkData';
 
 class FakeResultSet {
@@ -164,7 +165,8 @@ export default function queryExecutorTest() {
   describe('queryExecutorTest', () => {
     beforeEach(() => {
       MetadataStorage.resetInstance();
-      DatabaseManager.resetInstance();
+      DatabaseManagerTestHooks.resetInstance();
+      QueryExecutor.resetTestHooks();
     });
 
     it('should create QueryExecutor with valid QueryBuilder', 0, () => {
@@ -310,8 +312,14 @@ export default function queryExecutorTest() {
       setupUserEntity();
       const builder = new QueryBuilder('User').timeout(5);
       const executor = new QueryExecutor(builder);
+      QueryExecutor.setResultSetDelayMsForTest(30);
 
       let closed = false;
+      const lateClosed = new Promise<void>((resolve) => {
+        QueryExecutor.setLateResultSetObserverForTest(() => {
+          resolve();
+        });
+      });
       const fakeResultSet = {
         rowCount: 0,
         columnNames: ['id', 'user_name', 'user_email'],
@@ -327,10 +335,7 @@ export default function queryExecutorTest() {
       } as unknown as relationalStore.ResultSet;
 
       const fakeStore = {
-        query: async () => {
-          await new Promise<void>((resolve) => setTimeout(resolve, 30));
-          return fakeResultSet;
-        }
+        query: async () => fakeResultSet
       } as unknown as relationalStore.RdbStore;
 
       const manager = DatabaseManager.getInstance() as unknown as { store: relationalStore.RdbStore | null, initialized: boolean, healthy: boolean };
@@ -340,7 +345,7 @@ export default function queryExecutorTest() {
 
       await executor.get().catch(() => {
       });
-      await new Promise<void>((resolve) => setTimeout(resolve, 40));
+      await lateClosed;
       expect(closed).assertEqual(true);
     });
 

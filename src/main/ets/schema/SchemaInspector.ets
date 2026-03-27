@@ -15,6 +15,8 @@ export interface ColumnInfo {
   notNull: boolean
   defaultValue: string | null
   primaryKey: boolean
+  unique?: boolean
+  autoIncrement?: boolean
 }
 
 /**
@@ -123,6 +125,8 @@ export class SchemaInspector {
       }
 
       const indexes = await this.getTableIndexes(store, tableName)
+      const tableSql = await this.getTableSql(store, tableName)
+      this.applyColumnExtras(columns, indexes, tableSql)
       return { name: tableName, columns, indexes }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -146,9 +150,6 @@ export class SchemaInspector {
           continue
         }
         const indexName = resultSet.getString(nameIndex)
-        if (indexName.startsWith('sqlite_autoindex_')) {
-          continue
-        }
         const uniqueIndex = resultSet.getColumnIndex('unique')
         const unique = uniqueIndex >= 0 && !resultSet.isColumnNull(uniqueIndex)
           ? resultSet.getLong(uniqueIndex) === 1
@@ -192,6 +193,66 @@ export class SchemaInspector {
       this.closeResultSetSafely(resultSet)
     }
     return columns
+  }
+
+  private normalizeIdentifier(value: string): string {
+    return value.trim().toLowerCase()
+  }
+
+  private escapeSqlLiteral(value: string): string {
+    return value.replace(/'/g, "''")
+  }
+
+  private async getTableSql(store: relationalStore.RdbStore, tableName: string): Promise<string | null> {
+    const sql = `SELECT sql FROM sqlite_master WHERE type='table' AND name='${this.escapeSqlLiteral(tableName)}'`
+    let resultSet: relationalStore.ResultSet | null = null
+    try {
+      resultSet = await store.querySql(sql)
+      if (resultSet.goToFirstRow()) {
+        const sqlIndex = resultSet.getColumnIndex('sql')
+        if (sqlIndex >= 0 && !resultSet.isColumnNull(sqlIndex)) {
+          return resultSet.getString(sqlIndex)
+        }
+      }
+      return null
+    } catch (e) {
+      return null
+    } finally {
+      this.closeResultSetSafely(resultSet)
+    }
+  }
+
+  private applyColumnExtras(columns: Array<ColumnInfo>, indexes: Array<IndexInfo>, tableSql: string | null): void {
+    const uniqueColumns = new Set<string>()
+    for (let i = 0; i < indexes.length; i++) {
+      const index = indexes[i]
+      if (!index.unique || index.columns.length !== 1) {
+        continue
+      }
+      uniqueColumns.add(this.normalizeIdentifier(index.columns[0]))
+    }
+
+    for (let i = 0; i < columns.length; i++) {
+      const column = columns[i]
+      const normalized = this.normalizeIdentifier(column.name)
+      column.unique = column.primaryKey || uniqueColumns.has(normalized)
+      if (tableSql) {
+        column.autoIncrement = this.isAutoIncrementColumn(tableSql, column)
+      }
+    }
+  }
+
+  private isAutoIncrementColumn(tableSql: string, column: ColumnInfo): boolean {
+    if (!column.primaryKey) {
+      return false
+    }
+    const typeUpper = column.type.toUpperCase()
+    if (typeUpper.indexOf('INT') < 0) {
+      return false
+    }
+    const escapedName = column.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const pattern = new RegExp(`(?:\"${escapedName}\"|\\b${escapedName}\\b)[^,]*\\bAUTOINCREMENT\\b`, 'i')
+    return pattern.test(tableSql)
   }
 
   private closeResultSetSafely(resultSet: relationalStore.ResultSet | null): void {

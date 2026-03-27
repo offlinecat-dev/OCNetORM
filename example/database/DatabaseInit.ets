@@ -1,6 +1,6 @@
 /**
  * 数据库初始化示例
- * 演示如何使用 OCORM 初始化数据库
+ * 演示如何使用 ocorm 初始化数据库
  */
 
 import { Context } from '@kit.AbilityKit'
@@ -70,7 +70,7 @@ export class DatabaseInitializer {
     // 可选：配置查询缓存
     config.setQueryCache(true, 100, 60000)  // 启用缓存，最大100条，TTL 60秒
 
-    // 3. 初始化 OCORM
+    // 3. 初始化 ocorm
     const options = new InitOptions(config)
     options.autoCreateTables = true
 

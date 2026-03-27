@@ -31,7 +31,7 @@ const SENSITIVE_KEY_VALUE_PATTERN: RegExp =
 
 /**
  * Logger 类
- * 单例模式，用于记录 OCORM 的 SQL 执行日志
+ * 单例模式，用于记录 ocorm 的 SQL 执行日志
  *
  * 使用示例：
  * ```
@@ -50,7 +50,7 @@ export class Logger {
   /** hilog domain */
   private domain: number = 0x0000
   /** hilog tag */
-  private tag: string = 'OCORM'
+  private tag: string = 'ocorm'
   /** 记录的日志历史（用于测试） */
   private logHistory: Array<string> = []
   /** 是否记录日志历史（用于测试） */
@@ -265,7 +265,7 @@ export class Logger {
 
   /**
    * 格式化日志消息
-   * 格式: [OCORM][类型][耗时] 消息
+   * 格式: [ocorm][类型][耗时] 消息
    *
    * @param logType 日志类型
    * @param duration 耗时
@@ -274,7 +274,7 @@ export class Logger {
    */
   formatMessage(logType: string, duration: string, content: string, redactSensitive: boolean = false): string {
     const sanitized = this.sanitizeLogMessage(content, redactSensitive)
-    return `[OCORM][${logType}][${duration}] ${sanitized}`
+    return `[ocorm][${logType}][${duration}] ${sanitized}`
   }
 
   private sanitizeLogMessage(content: string, redactSensitive: boolean): string {
@@ -284,6 +284,8 @@ export class Logger {
       sanitized = sanitized.replace(/'[^']*'/g, "'[***]'")
       sanitized = sanitized.replace(/\"[^\"]*\"/g, '"[***]"')
       sanitized = this.maskNumericTokens(sanitized)
+      sanitized = sanitized.replace(/[A-Za-z]:\\[^\s]+/g, '[path]')
+      sanitized = sanitized.replace(/\/[^\s]{3,}/g, '[path]')
     }
     if (sanitized.length > MAX_LOG_MESSAGE_LENGTH) {
       return `${sanitized.slice(0, MAX_LOG_MESSAGE_LENGTH)}...`

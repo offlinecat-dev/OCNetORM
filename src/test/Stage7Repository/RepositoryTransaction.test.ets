@@ -2,10 +2,11 @@ import { describe, beforeEach, it, expect } from '@ohos/hypium';
 import { MetadataStorage } from '../../main/ets/core/MetadataStorage';
 import { ColumnMetadata } from '../../main/ets/core/ColumnMetadata';
 import { ColumnType } from '../../main/ets/types/ColumnType';
-import { Repository, TransactionResult, TransactionOptions, IsolationLevel } from '../../main/ets/repository/index';
+import { Repository, TransactionResult, TransactionOptions, IsolationLevel, TransactionManager } from '../../main/ets/repository/index';
 import { TransactionRollbackError } from '../../main/ets/errors/TransactionError';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
 import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { DatabaseManagerTestHooks } from '../../main/ets/database/testing/DatabaseManagerTestHooks';
 import { relationalStore } from '@kit.ArkData';
 
 const setupUserEntity = (): void => {
@@ -28,7 +29,8 @@ export default function repositoryTransactionTest() {
     beforeEach(() => {
       MetadataStorage.resetInstance();
       HooksProcessor.resetInstance();
-      DatabaseManager.resetInstance();
+      DatabaseManagerTestHooks.resetInstance();
+      TransactionManager.resetTestHooks();
     });
 
     it('TransactionResult.createSuccess should create success result', 0, () => {
@@ -173,6 +175,14 @@ export default function repositoryTransactionTest() {
       let beginCount = 0;
       let commitCount = 0;
       let rollbackCount = 0;
+      let releaseAction: (() => void) | null = null;
+      const rollbackObserved = new Promise<void>((resolve) => {
+        TransactionManager.setTransactionPhaseObserverForTest((phase: string) => {
+          if (phase === 'ROLLBACK') {
+            resolve();
+          }
+        });
+      });
 
       const fakeStore = {
         beginTransaction: () => {
@@ -200,16 +210,82 @@ export default function repositoryTransactionTest() {
       let threw = false;
       try {
         await repo.transactionWithOptions(async () => {
-          await new Promise<void>((resolve) => setTimeout(resolve, 30));
+          await new Promise<void>((resolve) => {
+            releaseAction = resolve;
+          });
         }, options);
       } catch (error) {
         threw = error instanceof TransactionRollbackError;
       }
 
       expect(threw).assertEqual(true);
+      expect(rollbackCount).assertEqual(0);
+      if (releaseAction !== null) {
+        releaseAction();
+      }
+      await rollbackObserved;
       expect(beginCount).assertEqual(1);
       expect(commitCount).assertEqual(0);
       expect(rollbackCount).assertEqual(1);
+    });
+
+    it('transactionWithOptions timeout should return before action completes', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+      const options = TransactionOptions.withTimeout(10);
+
+      let rollbackCount = 0;
+      let actionCompleted = false;
+      let releaseAction: (() => void) | null = null;
+      const rollbackObserved = new Promise<void>((resolve) => {
+        TransactionManager.setTransactionPhaseObserverForTest((phase: string) => {
+          if (phase === 'ROLLBACK') {
+            resolve();
+          }
+        });
+      });
+      const fakeStore = {
+        beginTransaction: () => {
+        },
+        commit: () => {
+        },
+        rollBack: () => {
+          rollbackCount++;
+        },
+        executeSql: async () => {
+        }
+      } as unknown as relationalStore.RdbStore;
+
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      let threw = false;
+      try {
+        await repo.transactionWithOptions(async () => {
+          await new Promise<void>((resolve) => {
+            releaseAction = resolve;
+          });
+          actionCompleted = true;
+        }, options);
+      } catch (error) {
+        threw = error instanceof TransactionRollbackError;
+      }
+
+      expect(threw).assertEqual(true);
+      expect(actionCompleted).assertEqual(false);
+      expect(rollbackCount).assertEqual(0);
+      if (releaseAction !== null) {
+        releaseAction();
+      }
+      await rollbackObserved;
+      expect(rollbackCount).assertEqual(1);
+      expect(actionCompleted).assertEqual(true);
     });
 
     it('transactionWithOptions timeout should not retry', 0, async () => {
@@ -218,6 +294,14 @@ export default function repositoryTransactionTest() {
       const options = TransactionOptions.fromConfig({ timeout: 10, retries: 2, retryDelay: 5 });
 
       let beginCount = 0;
+      let releaseAction: (() => void) | null = null;
+      const rollbackObserved = new Promise<void>((resolve) => {
+        TransactionManager.setTransactionPhaseObserverForTest((phase: string) => {
+          if (phase === 'ROLLBACK') {
+            resolve();
+          }
+        });
+      });
       const fakeStore = {
         beginTransaction: () => {
           beginCount++;
@@ -242,13 +326,19 @@ export default function repositoryTransactionTest() {
       let threw = false;
       try {
         await repo.transactionWithOptions(async () => {
-          await new Promise<void>((resolve) => setTimeout(resolve, 30));
+          await new Promise<void>((resolve) => {
+            releaseAction = resolve;
+          });
         }, options);
       } catch (error) {
         threw = error instanceof TransactionRollbackError;
       }
 
       expect(threw).assertEqual(true);
+      if (releaseAction !== null) {
+        releaseAction();
+      }
+      await rollbackObserved;
       expect(beginCount).assertEqual(1);
     });
 
@@ -367,6 +457,108 @@ export default function repositoryTransactionTest() {
       }
 
       expect(threw).assertEqual(true);
+    });
+
+    it('transaction should reject nested transaction on same repository', 0, async () => {
+      setupUserEntity();
+      const repo = new Repository('User');
+
+      let beginCount = 0;
+      let rollbackCount = 0;
+      const fakeStore = {
+        beginTransaction: () => {
+          beginCount++;
+        },
+        commit: () => {
+        },
+        rollBack: () => {
+          rollbackCount++;
+        },
+        executeSql: async () => {
+        }
+      } as unknown as relationalStore.RdbStore;
+
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      let nestedRejected = false;
+      try {
+        await repo.transaction(async () => {
+          await repo.transaction(async () => {
+          });
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        nestedRejected = error instanceof TransactionRollbackError && message.includes('嵌套调用');
+      }
+
+      expect(nestedRejected).assertEqual(true);
+      expect(beginCount).assertEqual(1);
+      expect(rollbackCount).assertEqual(1);
+    });
+
+    it('transaction should reject concurrent call when connection transaction is active', 0, async () => {
+      setupUserEntity();
+      const repoA = new Repository('User');
+      const repoB = new Repository('User');
+
+      let beginCount = 0;
+      let rollbackCount = 0;
+      const fakeStore = {
+        beginTransaction: () => {
+          beginCount++;
+        },
+        commit: () => {
+        },
+        rollBack: () => {
+          rollbackCount++;
+        },
+        executeSql: async () => {
+        }
+      } as unknown as relationalStore.RdbStore;
+
+      const manager = DatabaseManager.getInstance() as unknown as {
+        store: relationalStore.RdbStore | null,
+        initialized: boolean,
+        healthy: boolean
+      };
+      manager.store = fakeStore;
+      manager.initialized = true;
+      manager.healthy = true;
+
+      const began = new Promise<void>((resolve) => {
+        TransactionManager.setBeginObserverForTest(() => {
+          resolve();
+        });
+      });
+      let releaseFirst: (() => void) | null = null;
+      const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+      const tx1 = repoA.transaction(async () => {
+        await gate;
+      });
+      await began;
+      let rejected = false;
+      try {
+        await repoB.transaction(async () => {
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        rejected = error instanceof TransactionRollbackError && message.includes('跨 Repository');
+      }
+
+      expect(rejected).assertEqual(true);
+      expect(beginCount).assertEqual(1);
+      expect(rollbackCount).assertEqual(0);
+      if (releaseFirst !== null) {
+        releaseFirst();
+      }
+      await tx1;
     });
   });
 }

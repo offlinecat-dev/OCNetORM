@@ -11,8 +11,9 @@ export interface FactoryNumberOptions {
 }
 
 export type FactoryRecord = Record<string, ValueType>
-export type FactoryBuilder = (faker: FactoryFaker, index: number) => EntityDataInput | FactoryRecord
-export type FactoryOverridesBuilder = (index: number) => FactoryRecord
+export type FactoryDataSource = EntityDataInput | FactoryRecord
+export type FactoryBuilder = (faker: FactoryFaker, index: number) => FactoryDataSource
+export type FactoryOverridesBuilder = (index: number) => FactoryDataSource
 
 export class FactoryFaker {
   private static readonly FIRST_NAMES: Array<string> = ['Alex', 'Chris', 'Jordan', 'Taylor', 'Morgan']
@@ -66,7 +67,7 @@ export class EntityFactory {
     this.builder = builder
   }
 
-  async make(overrides?: FactoryRecord): Promise<EntityData> {
+  async make(overrides?: FactoryDataSource): Promise<EntityData> {
     return this.buildEntity(0, overrides)
   }
 
@@ -80,7 +81,7 @@ export class EntityFactory {
     return result
   }
 
-  async create(overrides?: FactoryRecord): Promise<EntityData> {
+  async create(overrides?: FactoryDataSource): Promise<EntityData> {
     const entity = this.buildEntity(0, overrides)
     const repo = new Repository(this.entityName)
     const result = await repo.save(entity)
@@ -104,20 +105,28 @@ export class EntityFactory {
     return saved
   }
 
-  private buildEntity(index: number, overrides?: FactoryRecord): EntityData {
+  private buildEntity(index: number, overrides?: FactoryDataSource): EntityData {
     const built = this.builder(this.faker, index)
     const input = this.toInput(built)
     if (overrides !== undefined) {
-      const overrideKeys = Object.keys(overrides)
+      const overrideInput = this.toInput(overrides)
+      const overrideKeys = overrideInput.keys()
       for (let i = 0; i < overrideKeys.length; i++) {
         const key = overrideKeys[i]
-        input.set(key, overrides[key])
+        input.set(key, overrideInput.get(key))
       }
     }
-    return EntityData.from(this.entityName, input)
+    try {
+      return EntityData.from(this.entityName, input)
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e
+      }
+      throw new Error(String(e))
+    }
   }
 
-  private toInput(source: EntityDataInput | FactoryRecord): EntityDataInput {
+  private toInput(source: FactoryDataSource): EntityDataInput {
     if (source instanceof EntityDataInput) {
       return source
     }

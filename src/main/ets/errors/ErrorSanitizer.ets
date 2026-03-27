@@ -4,12 +4,18 @@
  */
 
 const MAX_ERROR_MESSAGE_LENGTH: number = 256
+const NUMERIC_TOKEN_PATTERN: RegExp = /\b\d{4,}\b/g
+const SENSITIVE_KEY_VALUE_PATTERN: RegExp =
+  /\b(patient(?:_?id)?|medical(?:_?record)?|mrn|id_?card|identity(?:_?no)?|cert(?:ificate)?(?:_?no)?|card(?:_?no)?|visit(?:_?no)?|case(?:_?no)?|phone|mobile|contact(?:_?no)?|ssn|passport|insur(?:ance)?(?:_?no)?)\b\s*([:=])\s*(\"[^\"]*\"|'[^']*'|[^\s,;)\]}]+)/ig
 
 export function sanitizeErrorMessage(rawMessage: string): string {
   let message = rawMessage.replace(/[\x00-\x1F\x7F]/g, ' ')
+  message = message.replace(SENSITIVE_KEY_VALUE_PATTERN, (_matched: string, key: string, separator: string) => {
+    return `${key}${separator}[***]`
+  })
   message = message.replace(/'[^']*'/g, "'[***]'")
   message = message.replace(/\"[^\"]*\"/g, '"[***]"')
-  message = message.replace(/\b\d{7,}\b/g, '[***]')
+  message = message.replace(NUMERIC_TOKEN_PATTERN, '[***]')
   message = message.replace(/[A-Za-z]:\\[^\s]+/g, '[path]')
   message = message.replace(/\/[^\s]{3,}/g, '[path]')
   message = message.replace(/\s+/g, ' ').trim()

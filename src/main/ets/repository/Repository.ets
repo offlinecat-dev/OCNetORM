@@ -21,6 +21,7 @@ import { ColumnType } from '../types/ColumnType'
 import { EntityNotRegisteredError, PrimaryKeyNotDefinedError } from '../errors/MetadataError'
 import { ExecutionError } from '../errors/DatabaseError'
 import { HookExecutionError } from '../errors/HookError'
+import { TransactionRollbackError } from '../errors/TransactionError'
 import { BatchInsertResult } from './BatchInsertResult'
 import { BatchInsertOptions } from './BatchInsertOptions'
 import { TransactionOptions } from './TransactionOptions'
@@ -35,12 +36,50 @@ import { TransactionManager } from './TransactionManager'
 import { BatchOperations } from './BatchOperations'
 import { CrudOperations } from './CrudOperations'
 import { DeleteOperations } from './DeleteOperations'
+import { StoreLease } from '../database/pool/StoreLease'
+import {
+  countSqlPlaceholders,
+  isExpectedRawExecuteGuardError,
+  isExpectedRawQueryGuardError,
+  validateRawExecuteSql,
+  validateRawQuerySql
+} from './rawsql/RawSqlGuards'
+
+class RepositoryExecutionScope {
+  strictDepth: number
+  transactionStore: relationalStore.RdbStore | null
+  scopedStore: relationalStore.RdbStore | null
+
+  constructor(
+    strictDepth: number = 0,
+    transactionStore: relationalStore.RdbStore | null = null,
+    scopedStore: relationalStore.RdbStore | null = null
+  ) {
+    this.strictDepth = strictDepth
+    this.transactionStore = transactionStore
+    this.scopedStore = scopedStore
+  }
+}
 
 /**
  * 泛型仓库类
  * 提供实体的基本 CRUD 操作
  */
 export class Repository {
+  static setBatchUniqueQueryObserverForTest(
+    observer: ((propertyName: string, batchSize: number) => void) | null
+  ): void {
+    BatchOperations.setUniqueQueryObserverForTest(observer)
+  }
+
+  static setBatchInsertLocalTransactionObserverForTest(observer: (() => void) | null): void {
+    BatchOperations.setLocalTransactionObserverForTest(observer)
+  }
+
+  static resetTestHooks(): void {
+    BatchOperations.resetTestHooks()
+  }
+
   /** 实体元数据 */
   private entityMetadata: EntityMetadata
   /** 数据映射器 */
@@ -65,16 +104,17 @@ export class Repository {
   private crudOperations: CrudOperations
   /** 删除操作管理器 */
   private deleteOperations: DeleteOperations
-  /** 事务严格模式深度（>0 表示事务回调中失败结果应抛错） */
-  private strictTransactionDepth: number = 0
+  /** 当前仓库实例执行上下文（不可变） */
+  private executionScope: RepositoryExecutionScope
 
   /**
    * 构造函数
    * @param entityName 实体名称
    * @throws EntityNotRegisteredError 如果实体未注册
    */
-  constructor(entityName: string) {
+  constructor(entityName: string, executionScope: RepositoryExecutionScope | null = null) {
     this.entityName = entityName
+    this.executionScope = executionScope ?? new RepositoryExecutionScope()
     const metadata = MetadataStorage.getInstance().getEntityMetadata(entityName)
     if (metadata === null) {
       throw new EntityNotRegisteredError(entityName)
@@ -94,7 +134,8 @@ export class Repository {
     )
     this.transactionManager = new TransactionManager(
       this.logger,
-      () => this.getStore()
+      () => this.getStore(),
+      async () => await this.acquireStoreLeaseForTransaction()
     )
     this.batchOperations = new BatchOperations(
       this.entityName,
@@ -118,7 +159,7 @@ export class Repository {
       () => this.getUpdatedAtColumnName(),
       (value) => this.toRdbValue(value),
       () => this,
-      (name) => new Repository(name)
+      (name) => this.createScopedRepository(name)
     )
     this.deleteOperations = new DeleteOperations(
       this.entityName,
@@ -131,8 +172,19 @@ export class Repository {
       () => this.getStore(),
       (value) => this.toRdbValue(value),
       () => this,
-      (name) => new Repository(name)
+      (name) => this.createScopedRepository(name)
     )
+  }
+
+  private createScopedRepository(entityName: string): Repository {
+    return new Repository(entityName, this.executionScope)
+  }
+
+  private createRepositoryWithScope(
+    entityName: string,
+    scope: RepositoryExecutionScope
+  ): Repository {
+    return new Repository(entityName, scope)
   }
 
   /**
@@ -141,12 +193,22 @@ export class Repository {
    * @throws ExecutionError 如果数据库未初始化
    */
   private getStore(): relationalStore.RdbStore {
+    if (this.executionScope.transactionStore !== null) {
+      return this.executionScope.transactionStore
+    }
+    if (this.executionScope.scopedStore !== null) {
+      return this.executionScope.scopedStore
+    }
     try {
       return DatabaseManager.getInstance().getStore()
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : String(e)
       throw new ExecutionError('DATABASE', errorMessage)
     }
+  }
+
+  private async acquireStoreLeaseForTransaction(): Promise<StoreLease> {
+    return await DatabaseManager.getInstance().acquireStoreLease()
   }
 
   private closeResultSet(resultSet: relationalStore.ResultSet | null): void {
@@ -160,6 +222,35 @@ export class Repository {
     }
   }
 
+  private createScopedRepositoryWithStore(store: relationalStore.RdbStore): Repository {
+    const scope = new RepositoryExecutionScope(
+      this.executionScope.strictDepth,
+      this.executionScope.transactionStore,
+      store
+    )
+    return this.createRepositoryWithScope(this.entityName, scope)
+  }
+
+  private createTransactionScopedRepository(transactionStore: relationalStore.RdbStore): Repository {
+    const nextDepth = this.executionScope.strictDepth + 1
+    const scope = new RepositoryExecutionScope(nextDepth, transactionStore, transactionStore)
+    return this.createRepositoryWithScope(this.entityName, scope)
+  }
+
+  private async withSessionStore<T>(callback: (repo: Repository) => Promise<T>): Promise<T> {
+    if (this.executionScope.transactionStore !== null || this.executionScope.scopedStore !== null) {
+      return await callback(this)
+    }
+    const manager = DatabaseManager.getInstance()
+    if (!manager.isPoolEnabled()) {
+      return await callback(this)
+    }
+    return await manager.withStoreLease(async (lease) => {
+      const scopedRepository = this.createScopedRepositoryWithStore(lease.store)
+      return await callback(scopedRepository)
+    })
+  }
+
   /**
    * 保存实体（插入或更新）
    * 根据主键值判断是 INSERT 还是 UPDATE
@@ -168,8 +259,11 @@ export class Repository {
    * @returns Promise<SaveResult>
    */
   async save(entityData: EntityData): Promise<SaveResult> {
-    const result = await this.crudOperations.save(entityData)
-    return this.ensureSaveResultSuccess(result, 'SAVE')
+    this.ensureWritePathAllowed('SAVE')
+    return await this.withSessionStore(async (repo) => {
+      const result = await repo.crudOperations.save(entityData)
+      return repo.ensureSaveResultSuccess(result, 'SAVE')
+    })
   }
 
   /**
@@ -194,60 +288,62 @@ export class Repository {
       }
     }
 
-    try {
-      const store = this.getStore()
-      const pkColumn = this.entityMetadata.getPrimaryKeyColumn()
-
-      if (pkColumn === null) {
-        throw new PrimaryKeyNotDefinedError(this.entityName)
-      }
-
-      const predicates = new relationalStore.RdbPredicates(this.entityMetadata.tableName)
-      predicates.equalTo(pkColumn.columnName, this.toRdbValue(id))
-
-      // 如果启用软删除且不包含已删除数据，添加过滤条件
-      if (this.entityMetadata.isSoftDeleteEnabled() && !includeDeleted) {
-        const deletedAtColumn = this.entityMetadata.getDeletedAtColumn()
-        predicates.isNull(deletedAtColumn)
-      }
-
-      let resultSet: relationalStore.ResultSet | null = null
+    return await this.withSessionStore(async (repo) => {
       try {
-        resultSet = await store.query(predicates)
+        const store = repo.getStore()
+        const pkColumn = repo.entityMetadata.getPrimaryKeyColumn()
 
-        // 记录查询日志
-        const duration = Date.now() - startTime
-        this.logger.logQuery(`SELECT * FROM ${this.entityMetadata.tableName} WHERE ${pkColumn.columnName} = ${String(id)}`, duration)
-
-        if (resultSet.goToFirstRow()) {
-          const row = ResultSetUtils.toRow(resultSet, this.entityMetadata)
-          const entityData = this.dataMapper.fromResultSetRow(row)
-
-          // 执行 afterLoad 钩子
-          await this.hooksProcessor.executeAfterLoad(this.entityName, entityData)
-
-          // 缓存查询结果（仅在不包含已删除数据时缓存）
-          if (useCache && !includeDeleted && this.queryCache.isEnabled()) {
-            this.queryCache.set(this.entityName, id, entityData)
-          }
-
-          return entityData
+        if (pkColumn === null) {
+          throw new PrimaryKeyNotDefinedError(repo.entityName)
         }
 
-        return null
-      } finally {
-        this.closeResultSet(resultSet)
+        const predicates = new relationalStore.RdbPredicates(repo.entityMetadata.tableName)
+        predicates.equalTo(pkColumn.columnName, repo.toRdbValue(id))
+
+        // 如果启用软删除且不包含已删除数据，添加过滤条件
+        if (repo.entityMetadata.isSoftDeleteEnabled() && !includeDeleted) {
+          const deletedAtColumn = repo.entityMetadata.getDeletedAtColumn()
+          predicates.isNull(deletedAtColumn)
+        }
+
+        let resultSet: relationalStore.ResultSet | null = null
+        try {
+          resultSet = await store.query(predicates)
+
+          // 记录查询日志
+          const duration = Date.now() - startTime
+          repo.logger.logQuery(`SELECT * FROM ${repo.entityMetadata.tableName} WHERE ${pkColumn.columnName} = ?`, duration)
+
+          if (resultSet.goToFirstRow()) {
+            const row = ResultSetUtils.toRow(resultSet, repo.entityMetadata)
+            const entityData = repo.dataMapper.fromResultSetRow(row)
+
+            // 执行 afterLoad 钩子
+            await repo.hooksProcessor.executeAfterLoad(repo.entityName, entityData)
+
+            // 缓存查询结果（仅在不包含已删除数据时缓存）
+            if (useCache && !includeDeleted && repo.queryCache.isEnabled()) {
+              repo.queryCache.set(repo.entityName, id, entityData)
+            }
+
+            return entityData
+          }
+
+          return null
+        } finally {
+          repo.closeResultSet(resultSet)
+        }
+      } catch (error) {
+        // 如果是钩子执行错误，直接抛出
+        if (error instanceof HookExecutionError) {
+          throw error
+        }
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        // 记录错误日志
+        repo.logger.logError(`SELECT 失败: ${errorMessage}`)
+        throw new ExecutionError('SELECT', errorMessage)
       }
-    } catch (error) {
-      // 如果是钩子执行错误，直接抛出
-      if (error instanceof HookExecutionError) {
-        throw error
-      }
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      // 记录错误日志
-      this.logger.logError(`SELECT 失败: ${errorMessage}`)
-      throw new ExecutionError('SELECT', errorMessage)
-    }
+    })
   }
 
   /**
@@ -259,47 +355,49 @@ export class Repository {
    */
   async findAll(includeDeleted: boolean = false): Promise<Array<EntityData>> {
     const startTime = Date.now()
-    try {
-      const store = this.getStore()
-      const predicates = new relationalStore.RdbPredicates(this.entityMetadata.tableName)
-
-      // 如果启用软删除且不包含已删除数据，添加过滤条件
-      if (this.entityMetadata.isSoftDeleteEnabled() && !includeDeleted) {
-        const deletedAtColumn = this.entityMetadata.getDeletedAtColumn()
-        predicates.isNull(deletedAtColumn)
-      }
-
-      let resultSet: relationalStore.ResultSet | null = null
-      const results: Array<EntityData> = []
+    return await this.withSessionStore(async (repo) => {
       try {
-        resultSet = await store.query(predicates)
+        const store = repo.getStore()
+        const predicates = new relationalStore.RdbPredicates(repo.entityMetadata.tableName)
 
-        // 记录查询日志
-        const duration = Date.now() - startTime
-        this.logger.logQuery(`SELECT * FROM ${this.entityMetadata.tableName}`, duration)
-
-        while (resultSet.goToNextRow()) {
-          const row = this.resultSetToRow(resultSet)
-          results.push(this.dataMapper.fromResultSetRow(row))
+        // 如果启用软删除且不包含已删除数据，添加过滤条件
+        if (repo.entityMetadata.isSoftDeleteEnabled() && !includeDeleted) {
+          const deletedAtColumn = repo.entityMetadata.getDeletedAtColumn()
+          predicates.isNull(deletedAtColumn)
         }
-      } finally {
-        this.closeResultSet(resultSet)
-      }
 
-      // 批量执行 afterLoad 钩子
-      await this.hooksProcessor.executeAfterLoadBatch(this.entityName, results)
+        let resultSet: relationalStore.ResultSet | null = null
+        const results: Array<EntityData> = []
+        try {
+          resultSet = await store.query(predicates)
 
-      return results
-    } catch (error) {
-      // 如果是钩子执行错误，直接抛出
-      if (error instanceof HookExecutionError) {
-        throw error
+          // 记录查询日志
+          const duration = Date.now() - startTime
+          repo.logger.logQuery(`SELECT * FROM ${repo.entityMetadata.tableName}`, duration)
+
+          while (resultSet.goToNextRow()) {
+            const row = repo.resultSetToRow(resultSet)
+            results.push(repo.dataMapper.fromResultSetRow(row))
+          }
+        } finally {
+          repo.closeResultSet(resultSet)
+        }
+
+        // 批量执行 afterLoad 钩子
+        await repo.hooksProcessor.executeAfterLoadBatch(repo.entityName, results)
+
+        return results
+      } catch (error) {
+        // 如果是钩子执行错误，直接抛出
+        if (error instanceof HookExecutionError) {
+          throw error
+        }
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        // 记录错误日志
+        repo.logger.logError(`SELECT 失败: ${errorMessage}`)
+        throw new ExecutionError('SELECT', errorMessage)
       }
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      // 记录错误日志
-      this.logger.logError(`SELECT 失败: ${errorMessage}`)
-      throw new ExecutionError('SELECT', errorMessage)
-    }
+    })
   }
 
   /**
@@ -314,39 +412,41 @@ export class Repository {
    */
   async findAllAsync(includeDeleted: boolean = false): Promise<Array<EntityData>> {
     const startTime = Date.now()
-    try {
-      // 创建查询构建器
-      const queryBuilder = this.createQueryBuilder()
+    return await this.withSessionStore(async (repo) => {
+      try {
+        // 创建查询构建器
+        const queryBuilder = repo.createQueryBuilder()
 
-      // 处理软删除
-      if (includeDeleted) {
-        queryBuilder.withDeleted()
+        // 处理软删除
+        if (includeDeleted) {
+          queryBuilder.withDeleted()
+        }
+
+        // 使用 QueryExecutor 的 getAsync 方法执行异步查询
+        const executor = new QueryExecutor(queryBuilder)
+        const results = await executor.getAsync()
+
+        // 记录查询日志
+        const duration = Date.now() - startTime
+        repo.logger.logQuery(`SELECT * FROM ${repo.entityMetadata.tableName} (异步, 数据量: ${results.length})`, duration)
+
+        // 批量执行 afterLoad 钩子
+        if (results.length > 0) {
+          await repo.hooksProcessor.executeAfterLoadBatch(repo.entityName, results)
+        }
+
+        return results
+      } catch (error) {
+        // 如果是钩子执行错误，直接抛出
+        if (error instanceof HookExecutionError) {
+          throw error
+        }
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        // 记录错误日志
+        repo.logger.logError(`异步查询失败: ${errorMessage}`)
+        throw new ExecutionError('SELECT', errorMessage)
       }
-
-      // 使用 QueryExecutor 的 getAsync 方法执行异步查询
-      const executor = new QueryExecutor(queryBuilder)
-      const results = await executor.getAsync()
-
-      // 记录查询日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`SELECT * FROM ${this.entityMetadata.tableName} (异步, 数据量: ${results.length})`, duration)
-
-      // 批量执行 afterLoad 钩子
-      if (results.length > 0) {
-        await this.hooksProcessor.executeAfterLoadBatch(this.entityName, results)
-      }
-
-      return results
-    } catch (error) {
-      // 如果是钩子执行错误，直接抛出
-      if (error instanceof HookExecutionError) {
-        throw error
-      }
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      // 记录错误日志
-      this.logger.logError(`异步查询失败: ${errorMessage}`)
-      throw new ExecutionError('SELECT', errorMessage)
-    }
+    })
   }
 
   /**
@@ -358,8 +458,11 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async remove(entityData: EntityData): Promise<DeleteResult> {
-    const result = await this.deleteOperations.remove(entityData)
-    return this.ensureDeleteResultSuccess(result, 'REMOVE')
+    this.ensureWritePathAllowed('REMOVE')
+    return await this.withSessionStore(async (repo) => {
+      const result = await repo.deleteOperations.remove(entityData)
+      return repo.ensureDeleteResultSuccess(result, 'REMOVE')
+    })
   }
 
   /**
@@ -370,8 +473,11 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async removeById(id: ValueType): Promise<DeleteResult> {
-    const result = await this.deleteOperations.removeById(id)
-    return this.ensureDeleteResultSuccess(result, 'REMOVE_BY_ID')
+    this.ensureWritePathAllowed('REMOVE_BY_ID')
+    return await this.withSessionStore(async (repo) => {
+      const result = await repo.deleteOperations.removeById(id)
+      return repo.ensureDeleteResultSuccess(result, 'REMOVE_BY_ID')
+    })
   }
 
   /**
@@ -380,8 +486,11 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async forceRemove(entityData: EntityData): Promise<DeleteResult> {
-    const result = await this.deleteOperations.forceRemove(entityData)
-    return this.ensureDeleteResultSuccess(result, 'FORCE_REMOVE')
+    this.ensureWritePathAllowed('FORCE_REMOVE')
+    return await this.withSessionStore(async (repo) => {
+      const result = await repo.deleteOperations.forceRemove(entityData)
+      return repo.ensureDeleteResultSuccess(result, 'FORCE_REMOVE')
+    })
   }
 
   /**
@@ -390,8 +499,11 @@ export class Repository {
    * @returns Promise<DeleteResult>
    */
   async forceRemoveById(id: ValueType): Promise<DeleteResult> {
-    const result = await this.deleteOperations.forceRemoveById(id)
-    return this.ensureDeleteResultSuccess(result, 'FORCE_REMOVE_BY_ID')
+    this.ensureWritePathAllowed('FORCE_REMOVE_BY_ID')
+    return await this.withSessionStore(async (repo) => {
+      const result = await repo.deleteOperations.forceRemoveById(id)
+      return repo.ensureDeleteResultSuccess(result, 'FORCE_REMOVE_BY_ID')
+    })
   }
 
   /**
@@ -402,8 +514,11 @@ export class Repository {
    * @throws SoftDeleteNotEnabledError 如果实体未启用软删除
    */
   async restore(id: ValueType): Promise<SaveResult> {
-    const result = await this.deleteOperations.restore(id)
-    return this.ensureSaveResultSuccess(result, 'RESTORE')
+    this.ensureWritePathAllowed('RESTORE')
+    return await this.withSessionStore(async (repo) => {
+      const result = await repo.deleteOperations.restore(id)
+      return repo.ensureSaveResultSuccess(result, 'RESTORE')
+    })
   }
 
   /**
@@ -414,25 +529,27 @@ export class Repository {
    */
   async count(includeDeleted: boolean = false): Promise<number> {
     const startTime = Date.now()
-    try {
-      const queryBuilder = this.createQueryBuilder()
-      if (includeDeleted) {
-        queryBuilder.withDeleted()
+    return await this.withSessionStore(async (repo) => {
+      try {
+        const queryBuilder = repo.createQueryBuilder()
+        if (includeDeleted) {
+          queryBuilder.withDeleted()
+        }
+        const executor = new QueryExecutor(queryBuilder)
+        const count = await executor.count()
+
+        // 记录查询日志
+        const duration = Date.now() - startTime
+        repo.logger.logQuery(`SELECT COUNT(*) FROM ${repo.entityMetadata.tableName}`, duration)
+
+        return count
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        // 记录错误日志
+        repo.logger.logError(`COUNT 失败: ${errorMessage}`)
+        throw new ExecutionError('COUNT', errorMessage)
       }
-      const executor = new QueryExecutor(queryBuilder)
-      const count = await executor.count()
-
-      // 记录查询日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`SELECT COUNT(*) FROM ${this.entityMetadata.tableName}`, duration)
-
-      return count
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      // 记录错误日志
-      this.logger.logError(`COUNT 失败: ${errorMessage}`)
-      throw new ExecutionError('COUNT', errorMessage)
-    }
+    })
   }
 
   /**
@@ -447,42 +564,44 @@ export class Repository {
    */
   async findPaginated(page: number, pageSize: number, includeDeleted: boolean = false): Promise<PaginatedResult> {
     const startTime = Date.now()
-    try {
-      // 创建查询构建器
-      const queryBuilder = this.createQueryBuilder()
+    return await this.withSessionStore(async (repo) => {
+      try {
+        // 创建查询构建器
+        const queryBuilder = repo.createQueryBuilder()
 
-      // 设置分页参数
-      queryBuilder.paginate(page, pageSize)
+        // 设置分页参数
+        queryBuilder.paginate(page, pageSize)
 
-      // 处理软删除
-      if (includeDeleted) {
-        queryBuilder.withDeleted()
+        // 处理软删除
+        if (includeDeleted) {
+          queryBuilder.withDeleted()
+        }
+
+        // 使用 QueryExecutor 执行分页查询
+        const executor = new QueryExecutor(queryBuilder)
+        const result = await executor.getPaginated()
+
+        // 记录查询日志
+        const duration = Date.now() - startTime
+        repo.logger.logQuery(`SELECT * FROM ${repo.entityMetadata.tableName} (分页: page=${page}, pageSize=${pageSize})`, duration)
+
+        // 批量执行 afterLoad 钩子
+        if (result.data.length > 0) {
+          await repo.hooksProcessor.executeAfterLoadBatch(repo.entityName, result.data)
+        }
+
+        return result
+      } catch (error) {
+        // 如果是钩子执行错误，直接抛出
+        if (error instanceof HookExecutionError) {
+          throw error
+        }
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        // 记录错误日志
+        repo.logger.logError(`分页查询失败: ${errorMessage}`)
+        throw new ExecutionError('SELECT', errorMessage)
       }
-
-      // 使用 QueryExecutor 执行分页查询
-      const executor = new QueryExecutor(queryBuilder)
-      const result = await executor.getPaginated()
-
-      // 记录查询日志
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`SELECT * FROM ${this.entityMetadata.tableName} (分页: page=${page}, pageSize=${pageSize})`, duration)
-
-      // 批量执行 afterLoad 钩子
-      if (result.data.length > 0) {
-        await this.hooksProcessor.executeAfterLoadBatch(this.entityName, result.data)
-      }
-
-      return result
-    } catch (error) {
-      // 如果是钩子执行错误，直接抛出
-      if (error instanceof HookExecutionError) {
-        throw error
-      }
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      // 记录错误日志
-      this.logger.logError(`分页查询失败: ${errorMessage}`)
-      throw new ExecutionError('SELECT', errorMessage)
-    }
+    })
   }
 
   /**
@@ -599,17 +718,8 @@ export class Repository {
     return row
   }
 
-  private async withStrictTransactionGuard(callback: () => Promise<void>): Promise<void> {
-    this.strictTransactionDepth += 1
-    try {
-      await callback()
-    } finally {
-      this.strictTransactionDepth -= 1
-    }
-  }
-
   private inStrictTransaction(): boolean {
-    return this.strictTransactionDepth > 0
+    return this.executionScope.strictDepth > 0
   }
 
   private ensureSaveResultSuccess(result: SaveResult, operation: string): SaveResult {
@@ -650,6 +760,60 @@ export class Repository {
     return results
   }
 
+  private ensureWritePathAllowed(operation: string): void {
+    if (this.inStrictTransaction()) {
+      return
+    }
+    if (this.shouldBlockWriteUnderPooledActiveTransaction()) {
+      throw new TransactionRollbackError(
+        `检测到连接池模式下存在活动事务，禁止在未绑定事务上下文的 Repository 执行 ${operation} 写入，请复用事务回调提供的 Repository 实例`
+      )
+    }
+    let store: relationalStore.RdbStore
+    try {
+      store = this.getStore()
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e
+      }
+      throw new Error(String(e))
+    }
+    if (!TransactionManager.isConnectionTransactionActive(store)) {
+      return
+    }
+    throw new TransactionRollbackError(
+      `检测到连接级事务已激活，禁止在事务边界外执行 ${operation} 写入，请复用外层事务上下文`
+    )
+  }
+
+  private ensureNoNestedTransaction(entryName: string): void {
+    if (this.inStrictTransaction()) {
+      throw new TransactionRollbackError(
+        `不支持同一 Repository 嵌套调用 ${entryName}，请复用外层事务或改为 SAVEPOINT 语义`
+      )
+    }
+    if (this.shouldBlockWriteUnderPooledActiveTransaction()) {
+      throw new TransactionRollbackError(
+        `检测到连接池模式下存在活动事务，禁止在未绑定事务上下文的 Repository 启动 ${entryName}，请复用外层事务回调传入的 Repository`
+      )
+    }
+    let store: relationalStore.RdbStore
+    try {
+      store = this.getStore()
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e
+      }
+      throw new Error(String(e))
+    }
+    if (!TransactionManager.isConnectionTransactionActive(store)) {
+      return
+    }
+    throw new TransactionRollbackError(
+      `不支持跨 Repository 嵌套调用 ${entryName}，请复用外层事务上下文`
+    )
+  }
+
   /**
    * 在事务中执行操作
    * 如果回调函数执行成功，事务将被提交
@@ -658,10 +822,10 @@ export class Repository {
    * @returns Promise<TransactionResult>
    */
   async transaction(callback: TransactionCallback): Promise<TransactionResult> {
-    return await this.transactionManager.transaction(async () => {
-      await this.withStrictTransactionGuard(async () => {
-        await callback(this)
-      })
+    this.ensureNoNestedTransaction('transaction')
+    return await this.transactionManager.transaction(async (store) => {
+      const scopedRepository = this.createTransactionScopedRepository(store)
+      await callback(scopedRepository)
     })
   }
 
@@ -676,10 +840,10 @@ export class Repository {
     callback: TransactionCallback,
     options: TransactionOptions
   ): Promise<TransactionResult> {
-    return await this.transactionManager.transactionWithOptions(async () => {
-      await this.withStrictTransactionGuard(async () => {
-        await callback(this)
-      })
+    this.ensureNoNestedTransaction('transactionWithOptions')
+    return await this.transactionManager.transactionWithOptions(async (store) => {
+      const scopedRepository = this.createTransactionScopedRepository(store)
+      await callback(scopedRepository)
     }, options)
   }
 
@@ -690,8 +854,11 @@ export class Repository {
    * @returns Promise<Array<SaveResult>>
    */
   async saveAll(entities: Array<EntityData>): Promise<Array<SaveResult>> {
-    const results = await this.batchOperations.saveAll(entities)
-    return this.ensureSaveAllResultsSuccess(results)
+    this.ensureWritePathAllowed('SAVE_ALL')
+    return await this.withSessionStore(async (repo) => {
+      const results = await repo.batchOperations.saveAll(entities)
+      return repo.ensureSaveAllResultsSuccess(results)
+    })
   }
 
   /**
@@ -707,8 +874,11 @@ export class Repository {
     entities: Array<EntityData>,
     options: BatchInsertOptions = BatchInsertOptions.createDefault()
   ): Promise<BatchInsertResult> {
-    const result = await this.batchOperations.batchInsert(entities, options)
-    return this.ensureBatchInsertResultSuccess(result)
+    this.ensureWritePathAllowed('BATCH_INSERT')
+    return await this.withSessionStore(async (repo) => {
+      const result = await repo.batchOperations.batchInsert(entities, options)
+      return repo.ensureBatchInsertResultSuccess(result)
+    })
   }
 
   /**
@@ -722,8 +892,11 @@ export class Repository {
    * Requirements: 5.5
    */
   async attach(sourceId: ValueType, targetId: ValueType, relationName: string): Promise<SaveResult> {
-    const result = await this.relationManager.attach(sourceId, targetId, relationName)
-    return this.ensureSaveResultSuccess(result, 'ATTACH')
+    this.ensureWritePathAllowed('ATTACH')
+    return await this.withSessionStore(async (repo) => {
+      const result = await repo.relationManager.attach(sourceId, targetId, relationName)
+      return repo.ensureSaveResultSuccess(result, 'ATTACH')
+    })
   }
 
   /**
@@ -737,8 +910,11 @@ export class Repository {
    * Requirements: 5.6
    */
   async detach(sourceId: ValueType, targetId: ValueType, relationName: string): Promise<DeleteResult> {
-    const result = await this.relationManager.detach(sourceId, targetId, relationName)
-    return this.ensureDeleteResultSuccess(result, 'DETACH')
+    this.ensureWritePathAllowed('DETACH')
+    return await this.withSessionStore(async (repo) => {
+      const result = await repo.relationManager.detach(sourceId, targetId, relationName)
+      return repo.ensureDeleteResultSuccess(result, 'DETACH')
+    })
   }
 
   /**
@@ -752,8 +928,11 @@ export class Repository {
    * Requirements: 5.7
    */
   async sync(sourceId: ValueType, targetIds: Array<ValueType>, relationName: string): Promise<SaveResult> {
-    const result = await this.relationManager.sync(sourceId, targetIds, relationName)
-    return this.ensureSaveResultSuccess(result, 'SYNC')
+    this.ensureWritePathAllowed('SYNC')
+    return await this.withSessionStore(async (repo) => {
+      const result = await repo.relationManager.sync(sourceId, targetIds, relationName)
+      return repo.ensureSaveResultSuccess(result, 'SYNC')
+    })
   }
 
   // ==================== 聚合函数 ====================
@@ -764,9 +943,11 @@ export class Repository {
    * @returns Promise<number>
    */
   async sum(column: string): Promise<number> {
-    const queryBuilder = this.createQueryBuilder()
-    const executor = new QueryExecutor(queryBuilder)
-    return await executor.sum(column)
+    return await this.withSessionStore(async (repo) => {
+      const queryBuilder = repo.createQueryBuilder()
+      const executor = new QueryExecutor(queryBuilder)
+      return await executor.sum(column)
+    })
   }
 
   /**
@@ -775,9 +956,11 @@ export class Repository {
    * @returns Promise<number>
    */
   async avg(column: string): Promise<number> {
-    const queryBuilder = this.createQueryBuilder()
-    const executor = new QueryExecutor(queryBuilder)
-    return await executor.avg(column)
+    return await this.withSessionStore(async (repo) => {
+      const queryBuilder = repo.createQueryBuilder()
+      const executor = new QueryExecutor(queryBuilder)
+      return await executor.avg(column)
+    })
   }
 
   /**
@@ -786,9 +969,11 @@ export class Repository {
    * @returns Promise<ValueType>
    */
   async max(column: string): Promise<ValueType> {
-    const queryBuilder = this.createQueryBuilder()
-    const executor = new QueryExecutor(queryBuilder)
-    return await executor.max(column)
+    return await this.withSessionStore(async (repo) => {
+      const queryBuilder = repo.createQueryBuilder()
+      const executor = new QueryExecutor(queryBuilder)
+      return await executor.max(column)
+    })
   }
 
   /**
@@ -797,9 +982,11 @@ export class Repository {
    * @returns Promise<ValueType>
    */
   async min(column: string): Promise<ValueType> {
-    const queryBuilder = this.createQueryBuilder()
-    const executor = new QueryExecutor(queryBuilder)
-    return await executor.min(column)
+    return await this.withSessionStore(async (repo) => {
+      const queryBuilder = repo.createQueryBuilder()
+      const executor = new QueryExecutor(queryBuilder)
+      return await executor.min(column)
+    })
   }
 
   // ==================== 原生 SQL 查询 ====================
@@ -812,161 +999,126 @@ export class Repository {
    */
   async rawQuery(sql: string, args: Array<ValueType> = []): Promise<Array<EntityData>> {
     const startTime = Date.now()
-    try {
-      const normalizedSql = this.validateRawQuerySql(sql)
-      const store = this.getStore()
-      const rdbArgs: Array<relationalStore.ValueType> = []
-      for (let i = 0; i < args.length; i++) {
-        rdbArgs.push(this.toRdbValue(args[i]))
-      }
-
-      let resultSet: relationalStore.ResultSet | null = null
-      const results: Array<EntityData> = []
+    return await this.withSessionStore(async (repo) => {
       try {
-        resultSet = await store.querySql(normalizedSql, rdbArgs)
-
-        const duration = Date.now() - startTime
-        this.logger.logQuery(`RAW: ${normalizedSql}`, duration)
-        await OrmContext.emitSlowQuery('RAW_QUERY', normalizedSql, duration, this.entityName)
-
-        while (resultSet.goToNextRow()) {
-          const row = this.resultSetToRow(resultSet)
-          results.push(this.dataMapper.fromResultSetRow(row))
+        const normalizedSql = validateRawQuerySql(sql)
+        const placeholderCount = countSqlPlaceholders(normalizedSql)
+        if (placeholderCount <= 0) {
+          throw new ExecutionError('RAW_QUERY', 'RAW_QUERY 仅允许参数化 SQL（必须使用 ? 占位符）')
         }
-      } finally {
-        this.closeResultSet(resultSet)
-      }
+        if (placeholderCount !== args.length) {
+          throw new ExecutionError('RAW_QUERY', 'RAW_QUERY 参数数量与占位符数量不一致')
+        }
+        const store = repo.getStore()
+        const rdbArgs: Array<relationalStore.ValueType> = []
+        for (let i = 0; i < args.length; i++) {
+          rdbArgs.push(repo.toRdbValue(args[i]))
+        }
 
-      return results
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      if (this.isExpectedRawQueryGuardError(errorMessage)) {
-        this.logger.logWarn(`[W_RAW_QUERY_READONLY_GUARD] RAW QUERY 拒绝: ${errorMessage}`)
-      } else {
-        this.logger.logError(`RAW QUERY 失败: ${errorMessage}`)
+        let resultSet: relationalStore.ResultSet | null = null
+        const results: Array<EntityData> = []
+        try {
+          resultSet = await store.querySql(normalizedSql, rdbArgs)
+
+          const duration = Date.now() - startTime
+          repo.logger.logQuery(`RAW: ${normalizedSql}`, duration)
+          await OrmContext.emitSlowQuery('RAW_QUERY', normalizedSql, duration, repo.entityName)
+
+          while (resultSet.goToNextRow()) {
+            const row = repo.resultSetToRow(resultSet)
+            results.push(repo.dataMapper.fromResultSetRow(row))
+          }
+        } finally {
+          repo.closeResultSet(resultSet)
+        }
+
+        return results
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        if (isExpectedRawQueryGuardError(errorMessage)) {
+          repo.logger.logWarn(`[W_RAW_QUERY_READONLY_GUARD] RAW QUERY 拒绝: ${errorMessage}`)
+        } else {
+          repo.logger.logError(`RAW QUERY 失败: ${errorMessage}`)
+        }
+        throw new ExecutionError('RAW_QUERY', errorMessage)
       }
-      throw new ExecutionError('RAW_QUERY', errorMessage)
+    })
+  }
+
+  /**
+   * 执行原生 SQL 查询（只读，严格参数化）
+   * 要求使用 ? 占位符且参数数量严格匹配
+   * @param sql SQL 查询语句
+   * @param args 查询参数
+   * @returns Promise<Array<EntityData>>
+   */
+  async rawQuerySafe(sql: string, args: Array<ValueType> = []): Promise<Array<EntityData>> {
+    const normalizedSql = validateRawQuerySql(sql)
+    const placeholderCount = countSqlPlaceholders(normalizedSql)
+    if (placeholderCount <= 0) {
+      throw new ExecutionError('RAW_QUERY', 'RAW_QUERY_SAFE 仅允许参数化 SQL（必须使用 ? 占位符）')
     }
+    if (placeholderCount !== args.length) {
+      throw new ExecutionError('RAW_QUERY', 'RAW_QUERY_SAFE 参数数量与占位符数量不一致')
+    }
+    return await this.rawQuery(normalizedSql, args)
   }
 
   /**
    * 执行原生 SQL 语句（写操作）
    * @param sql SQL 语句
    * @param args 参数
-   * @returns Promise<number> 受影响的行数（注意：SQLite 不总是返回准确的受影响行数）
+   * @returns Promise<void>
    */
   async rawExecute(sql: string, args: Array<ValueType> = []): Promise<void> {
+    this.ensureWritePathAllowed('RAW_EXECUTE')
     const startTime = Date.now()
-    try {
-      const normalizedSql = this.validateRawExecuteSql(sql, args.length)
-      const store = this.getStore()
-      const rdbArgs: Array<relationalStore.ValueType> = []
-      for (let i = 0; i < args.length; i++) {
-        rdbArgs.push(this.toRdbValue(args[i]))
+    await this.withSessionStore(async (repo) => {
+      try {
+        const normalizedSql = validateRawExecuteSql(sql, args.length)
+        const store = repo.getStore()
+        const rdbArgs: Array<relationalStore.ValueType> = []
+        for (let i = 0; i < args.length; i++) {
+          rdbArgs.push(repo.toRdbValue(args[i]))
+        }
+
+        await store.executeSql(normalizedSql, rdbArgs)
+
+        const duration = Date.now() - startTime
+        repo.logger.logQuery(`RAW EXECUTE: ${normalizedSql}`, duration)
+        await OrmContext.emitSlowQuery('RAW_EXECUTE', normalizedSql, duration, repo.entityName)
+
+        // 原生 SQL 可能跨实体写入，保守策略：清空缓存
+        repo.queryCache.clear()
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        if (isExpectedRawExecuteGuardError(errorMessage)) {
+          repo.logger.logWarn(`[W_RAW_EXECUTE_GUARD] RAW EXECUTE 拒绝: ${errorMessage}`)
+        } else {
+          repo.logger.logError(`RAW EXECUTE 失败: ${errorMessage}`)
+        }
+        throw new ExecutionError('RAW_EXECUTE', errorMessage)
       }
-
-      await store.executeSql(normalizedSql, rdbArgs)
-
-      const duration = Date.now() - startTime
-      this.logger.logQuery(`RAW EXECUTE: ${normalizedSql}`, duration)
-      await OrmContext.emitSlowQuery('RAW_EXECUTE', normalizedSql, duration, this.entityName)
-
-      // 原生 SQL 可能跨实体写入，保守策略：清空缓存
-      this.queryCache.clear()
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      if (this.isExpectedRawExecuteGuardError(errorMessage)) {
-        this.logger.logWarn(`[W_RAW_EXECUTE_GUARD] RAW EXECUTE 拒绝: ${errorMessage}`)
-      } else {
-        this.logger.logError(`RAW EXECUTE 失败: ${errorMessage}`)
-      }
-      throw new ExecutionError('RAW_EXECUTE', errorMessage)
-    }
+    })
   }
 
-  private isExpectedRawQueryGuardError(errorMessage: string): boolean {
-    const normalized = errorMessage.toLowerCase()
-    return normalized.includes('raw_query 仅允许') ||
-      normalized.includes('raw_query 禁止写操作') ||
-      normalized.includes('raw_query 不允许执行多条 sql') ||
-      normalized.includes('sql 语句不能为空') ||
-      normalized.includes('raw_query only allows') ||
-      normalized.includes('raw_query write is not allowed')
+  private shouldBlockWriteUnderPooledActiveTransaction(): boolean {
+    const manager = DatabaseManager.getInstance()
+    if (!manager.isPoolEnabled()) {
+      return false
+    }
+    const config = manager.getConfig()
+    if (config !== null && config.pooledWriteGuardMode === 'off') {
+      return false
+    }
+    return TransactionManager.hasAnyActiveTransaction()
   }
 
-  private isExpectedRawExecuteGuardError(errorMessage: string): boolean {
-    const normalized = errorMessage.toLowerCase()
-    return normalized.includes('raw_execute 仅允许') ||
-      normalized.includes('raw_execute 不允许执行多条 sql') ||
-      normalized.includes('raw_execute 禁止') ||
-      normalized.includes('raw_execute 参数数量') ||
-      normalized.includes('sql 语句不能为空') ||
-      normalized.includes('raw_execute only allows')
-  }
-
-  private countPlaceholder(sql: string): number {
-    const matches = sql.match(/\?/g)
-    return matches ? matches.length : 0
-  }
-
-  private validateRawExecuteSql(sql: string, argsLength: number): string {
-    const trimmedSql = sql.trim()
-    if (trimmedSql.length === 0) {
-      throw new ExecutionError('RAW_EXECUTE', 'SQL 语句不能为空')
-    }
-    const normalized = trimmedSql.endsWith(';') ? trimmedSql.slice(0, trimmedSql.length - 1).trim() : trimmedSql
-    if (normalized.includes(';')) {
-      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 不允许执行多条 SQL')
-    }
-    if (normalized.includes('--') || normalized.includes('/*') || normalized.includes('*/')) {
-      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 禁止 SQL 注释片段')
-    }
-
-    const upperSql = normalized.toUpperCase()
-    const allowedWrite = upperSql.startsWith('INSERT ') || upperSql.startsWith('UPDATE ') ||
-      upperSql.startsWith('DELETE ') || upperSql.startsWith('REPLACE ')
-    if (!allowedWrite) {
-      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 仅允许 INSERT/UPDATE/DELETE/REPLACE')
-    }
-
-    const forbiddenKeywords = /\b(DROP|ALTER|CREATE|TRUNCATE|ATTACH|DETACH|VACUUM|REINDEX|PRAGMA)\b/
-    if (forbiddenKeywords.test(upperSql)) {
-      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 禁止危险 SQL 关键字')
-    }
-
-    const placeholderCount = this.countPlaceholder(normalized)
-    if (placeholderCount <= 0) {
-      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 仅允许参数化 SQL（必须使用 ? 占位符）')
-    }
-    if (placeholderCount !== argsLength) {
-      throw new ExecutionError('RAW_EXECUTE', 'RAW_EXECUTE 参数数量与占位符数量不一致')
-    }
-    return normalized
-  }
-
-  private validateRawQuerySql(sql: string): string {
-    const trimmedSql = sql.trim()
-    if (trimmedSql.length === 0) {
-      throw new ExecutionError('RAW_QUERY', 'SQL 语句不能为空')
-    }
-    const normalized = trimmedSql.endsWith(';') ? trimmedSql.slice(0, trimmedSql.length - 1).trim() : trimmedSql
-    if (normalized.includes(';')) {
-      throw new ExecutionError('RAW_QUERY', 'RAW_QUERY 不允许执行多条 SQL')
-    }
-    const upperSql = normalized.toUpperCase()
-    if (!upperSql.startsWith('SELECT ') && !upperSql.startsWith('WITH ') &&
-      !upperSql.startsWith('EXPLAIN ')) {
-      throw new ExecutionError('RAW_QUERY', 'RAW_QUERY 仅允许 SELECT/WITH/EXPLAIN 只读 SQL')
-    }
-    const hasWriteKeyword = /\b(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|TRUNCATE|ATTACH|DETACH|VACUUM|REINDEX)\b/.test(upperSql)
-    if (hasWriteKeyword) {
-      throw new ExecutionError('RAW_QUERY', 'RAW_QUERY 禁止写操作 SQL')
-    }
-    return normalized
-  }
 }
 
 /**
  * 事务回调函数类型
  */
 export type TransactionCallback = (repo: Repository) => Promise<void>
+
+

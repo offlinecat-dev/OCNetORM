@@ -7,6 +7,10 @@ import { EntityData } from '../mapping/EntityData'
 import { MetadataStorage } from './MetadataStorage'
 import { EntityHooks, HookCallback, HookName, GlobalHookCallback } from '../types/EntityHooks'
 import { HookExecutionError } from '../errors/HookError'
+import { OrmError } from '../errors/OrmError'
+import { sanitizeErrorMessage } from '../errors/ErrorSanitizer'
+
+type HookFailure = Error | object | string | number | boolean | null | undefined
 
 /**
  * 钩子处理器类
@@ -60,19 +64,18 @@ export class HooksProcessor {
       this.globalHooks.set(hookName, [callback])
       return
     }
-    callbacks.push(callback)
+    const nextCallbacks = callbacks.slice(0)
+    nextCallbacks.push(callback)
+    this.globalHooks.set(hookName, nextCallbacks)
   }
 
   clearGlobalHooks(hookName?: HookName): void {
     if (hookName !== undefined) {
-      const callbacks = this.globalHooks.get(hookName)
-      if (callbacks !== undefined) {
-        callbacks.splice(0, callbacks.length)
-      }
+      this.globalHooks.set(hookName, [])
       return
     }
-    this.globalHooks.forEach((callbacks) => {
-      callbacks.splice(0, callbacks.length)
+    this.globalHooks.forEach((_callbacks, name) => {
+      this.globalHooks.set(name, [])
     })
   }
 
@@ -89,12 +92,15 @@ export class HooksProcessor {
     return metadata.getHooks()
   }
 
-  private resolveErrorMessage(error: Error | Object | string): string {
+  private resolveErrorMessage(error: HookFailure): string {
+    if (error instanceof OrmError) {
+      return sanitizeErrorMessage(error.getFullMessage())
+    }
     if (error instanceof Error) {
-      return error.message
+      return sanitizeErrorMessage(error.message)
     }
     if (typeof error === 'string') {
-      return error
+      return sanitizeErrorMessage(error)
     }
     return '未知错误'
   }
@@ -141,9 +147,17 @@ export class HooksProcessor {
     }
   }
 
-  private async executeGlobalHooks(hookName: HookName, entityName: string, data: EntityData): Promise<void> {
+  private getGlobalHookSnapshot(hookName: HookName): Array<GlobalHookCallback> {
     const callbacks = this.globalHooks.get(hookName)
     if (callbacks === undefined || callbacks.length === 0) {
+      return []
+    }
+    return callbacks.slice(0)
+  }
+
+  private async executeGlobalHooks(hookName: HookName, entityName: string, data: EntityData): Promise<void> {
+    const callbacks = this.getGlobalHookSnapshot(hookName)
+    if (callbacks.length === 0) {
       return
     }
     for (let i = 0; i < callbacks.length; i++) {

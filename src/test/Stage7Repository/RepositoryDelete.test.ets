@@ -8,6 +8,7 @@ import { ExecutionError } from '../../main/ets/errors/DatabaseError';
 import { SoftDeleteNotEnabledError } from '../../main/ets/errors/SoftDeleteError';
 import { HooksProcessor } from '../../main/ets/core/HooksProcessor';
 import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { DatabaseManagerTestHooks } from '../../main/ets/database/testing/DatabaseManagerTestHooks';
 import { relationalStore } from '@kit.ArkData';
 
 const setupUserEntity = (): void => {
@@ -67,7 +68,7 @@ export default function repositoryDeleteTest() {
     beforeEach(() => {
       MetadataStorage.resetInstance();
       HooksProcessor.resetInstance();
-      DatabaseManager.resetInstance();
+      DatabaseManagerTestHooks.resetInstance();
     });
 
     it('DeleteResult.createSuccess should create success result', 0, () => {

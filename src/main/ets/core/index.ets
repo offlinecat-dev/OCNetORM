@@ -27,7 +27,7 @@ export { MorphToMetadata } from './MorphToMetadata'
 export { HooksProcessor } from './HooksProcessor'
 
 // ORM 上下文（依赖注入）
-export { OrmContext, OrmContextConfig, OrmEvent, OrmEventListener } from './OrmContext'
+export { OrmContext, OrmContextConfig, OrmEvent, OrmEventListener, OrmEventListenerErrorMode } from './OrmContext'
 
 // 统一初始化入口
 export { OCORMInit, OCORMInitOptions } from './OrmInit'

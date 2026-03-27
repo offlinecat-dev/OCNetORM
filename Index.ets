@@ -1,5 +1,3 @@
-export { MainPage } from './src/main/ets/components/MainPage';
-
 // 导出错误模块
 export {
   // 错误码
@@ -139,6 +137,7 @@ export {
   OrmContextConfig,
   OrmEvent,
   OrmEventListener,
+  OrmEventListenerErrorMode,
   // 统一初始化入口
   OCORMInit,
   OCORMInitOptions,
@@ -297,7 +296,26 @@ export {
   // 数据库配置
   DatabaseConfig,
   // 数据库管理器
-  DatabaseManager
+  DatabaseManager,
+  DatabaseManagerTestHooks,
+  // 连接池
+  PoolConfig,
+  PoolMetrics,
+  StoreFactory,
+  StoreLease,
+  FixedStorePool,
+  // 会话
+  DefaultDatabaseSession,
+  SessionStoreResolver
+} from './src/main/ets/database/index'
+
+export type {
+  ConnectionPoolOptions,
+  PooledWriteGuardMode,
+  StorePool,
+  DatabaseSession,
+  DatabaseManagerAdapter,
+  DatabaseManagerTestState
 } from './src/main/ets/database/index'
 
 // 导出仓库模块
@@ -307,6 +325,7 @@ export {
   SaveResult,
   DeleteResult,
   TransactionResult,
+  TransactionManager,
   TransactionCallback,
   // 批量插入相关
   BatchInsertOptions,

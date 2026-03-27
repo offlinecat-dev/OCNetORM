@@ -8,12 +8,27 @@ import { EntityValidator } from '../validation/EntityValidator'
 import { ValidationError, UniqueValidationError } from '../errors/ValidationError'
 import { ValidationMetadataStorage, ValidationRule } from '../validation/ValidationMetadataStorage'
 import { ValueType } from '../types/ValueTypes'
+import { ResultSetUtils } from '../mapping/ResultSetUtils'
 import { BatchInsertResult } from './BatchInsertResult'
 import { BatchInsertOptions } from './BatchInsertOptions'
 import { SaveResult } from './SaveResult'
+import { TransactionManager } from './TransactionManager'
 type StoreProvider = () => relationalStore.RdbStore
 type SaveAction = (entityData: EntityData) => Promise<SaveResult>
+type UniqueQueryObserver = (propertyName: string, batchSize: number) => void
+type BatchTransactionObserver = () => void
+
+interface UniqueValidationContext {
+  entities: Array<EntityData>
+  store: relationalStore.RdbStore
+  propertyNames: Array<string>
+  existingValues: Map<string, Set<string>>
+  loadedProperties: Set<string>
+}
 export class BatchOperations {
+  private static readonly IN_CLAUSE_LIMIT: number = 500
+  private static uniqueQueryObserverForTest: UniqueQueryObserver | null = null
+  private static localTransactionObserverForTest: BatchTransactionObserver | null = null
   private entityName: string
   private tableName: string
   private dataMapper: DataMapper
@@ -41,6 +56,33 @@ export class BatchOperations {
     this.getStore = getStore
     this.saveOne = saveOne
   }
+
+  static setUniqueQueryObserverForTest(observer: UniqueQueryObserver | null): void {
+    BatchOperations.uniqueQueryObserverForTest = observer
+  }
+
+  static resetTestHooks(): void {
+    BatchOperations.uniqueQueryObserverForTest = null
+    BatchOperations.localTransactionObserverForTest = null
+  }
+
+  private static notifyUniqueQueryObserverForTest(propertyName: string, batchSize: number): void {
+    const observer = BatchOperations.uniqueQueryObserverForTest
+    if (observer !== null) {
+      observer(propertyName, batchSize)
+    }
+  }
+
+  static setLocalTransactionObserverForTest(observer: (() => void) | null): void {
+    BatchOperations.localTransactionObserverForTest = observer
+  }
+
+  private static notifyLocalTransactionObserverForTest(): void {
+    const observer = BatchOperations.localTransactionObserverForTest
+    if (observer !== null) {
+      observer()
+    }
+  }
   async saveAll(entities: Array<EntityData>): Promise<Array<SaveResult>> {
     const results: Array<SaveResult> = []
     for (let i = 0; i < entities.length; i++) {
@@ -64,11 +106,12 @@ export class BatchOperations {
       return BatchInsertResult.createFailure(`获取数据库连接失败: ${errorMessage}`)
     }
     if (options.executeValidation) {
+      const uniqueContext = this.createUniqueValidationContext(entities, store)
       const batchUniqueKeys: Set<string> = new Set()
       for (let i = 0; i < entities.length; i++) {
         try {
           EntityValidator.validateOrThrow(this.entityName, entities[i])
-          await this.validateUniqueConstraints(entities[i], batchUniqueKeys)
+          await this.validateUniqueConstraints(entities[i], batchUniqueKeys, uniqueContext)
         } catch (error) {
           if (error instanceof ValidationError) {
             this.logger.logWarn(`[W_BATCH_VALIDATION] 批量插入验证失败 (索引 ${i}): ${error.message}`)
@@ -110,11 +153,14 @@ export class BatchOperations {
     }
     try {
       let insertedCount = 0
-      if (options.useTransaction) {
+      const useLocalTransaction = options.useTransaction && !TransactionManager.isConnectionTransactionActive(store)
+      if (useLocalTransaction) {
+        BatchOperations.notifyLocalTransactionObserverForTest()
         store.beginTransaction()
         this.logger.logTransaction('BEGIN (batchInsert)')
         try {
           insertedCount = await store.batchInsert(this.tableName, valueBuckets)
+          insertedCount = this.normalizeBatchInsertCount(insertedCount, totalCount)
           store.commit()
           this.logger.logTransaction('COMMIT (batchInsert)')
         } catch (insertError) {
@@ -127,6 +173,7 @@ export class BatchOperations {
         }
       } else {
         insertedCount = await store.batchInsert(this.tableName, valueBuckets)
+        insertedCount = this.normalizeBatchInsertCount(insertedCount, totalCount)
       }
       const duration = Date.now() - startTime
       this.logger.logQuery(`BATCH INSERT INTO ${this.tableName} (${insertedCount}/${totalCount} 条)`, duration)
@@ -153,15 +200,51 @@ export class BatchOperations {
     }
   }
 
-  private async validateUniqueConstraints(entityData: EntityData, batchKeys: Set<string>): Promise<void> {
+  private normalizeBatchInsertCount(insertedCount: number, totalCount: number): number {
+    if (insertedCount < 0) {
+      this.logger.logWarn(
+        `[W_BATCH_INSERT_COUNT_NEGATIVE] batchInsert 返回负数(${insertedCount})，按全部成功(${totalCount})处理`
+      )
+      return totalCount
+    }
+    if (insertedCount > totalCount) {
+      this.logger.logWarn(
+        `[W_BATCH_INSERT_COUNT_OVERFLOW] batchInsert 返回值(${insertedCount})超过请求数量(${totalCount})，按请求数量处理`
+      )
+      return totalCount
+    }
+    return insertedCount
+  }
+
+  private async validateUniqueConstraints(
+    entityData: EntityData,
+    batchKeys: Set<string>,
+    context: UniqueValidationContext | null
+  ): Promise<void> {
+    if (context === null) {
+      return
+    }
+    for (let i = 0; i < context.propertyNames.length; i++) {
+      const propertyName = context.propertyNames[i]
+      await this.ensureUniqueValue(entityData, propertyName, batchKeys, context)
+    }
+  }
+
+  private createUniqueValidationContext(
+    entities: Array<EntityData>,
+    store: relationalStore.RdbStore
+  ): UniqueValidationContext | null {
     const rules = ValidationMetadataStorage.getInstance().getRules(this.entityName)
     const propertyNames = this.collectUniquePropertyNames(rules)
     if (propertyNames.length === 0) {
-      return
+      return null
     }
-    for (let i = 0; i < propertyNames.length; i++) {
-      const propertyName = propertyNames[i]
-      await this.ensureUniqueValue(entityData, propertyName, batchKeys)
+    return {
+      entities,
+      store,
+      propertyNames,
+      existingValues: new Map(),
+      loadedProperties: new Set()
     }
   }
 
@@ -191,7 +274,12 @@ export class BatchOperations {
     return names
   }
 
-  private async ensureUniqueValue(entityData: EntityData, propertyName: string, batchKeys: Set<string>): Promise<void> {
+  private async ensureUniqueValue(
+    entityData: EntityData,
+    propertyName: string,
+    batchKeys: Set<string>,
+    context: UniqueValidationContext | null = null
+  ): Promise<void> {
     const value = entityData.getPropertyValue(propertyName)
     if (value === null || value === undefined) {
       return
@@ -207,6 +295,16 @@ export class BatchOperations {
     }
     batchKeys.add(localBatchKey)
 
+    if (context !== null) {
+      const existingValues = await this.ensureExistingValuesLoaded(propertyName, context)
+      const rdbValue = this.toRdbValue(value)
+      const rdbKey = this.toRdbKey(rdbValue)
+      if (rdbKey !== null && existingValues.has(rdbKey)) {
+        throw new UniqueValidationError(this.entityName, column.columnName)
+      }
+      return
+    }
+
     const store = this.getStore()
     const predicates = new relationalStore.RdbPredicates(this.tableName)
     predicates.equalTo(column.columnName, this.toRdbValue(value))
@@ -216,9 +314,99 @@ export class BatchOperations {
       if (resultSet.rowCount > 0) {
         throw new UniqueValidationError(this.entityName, column.columnName)
       }
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e
+      }
+      throw new Error(String(e))
     } finally {
       this.closeResultSet(resultSet)
     }
+  }
+
+  private async ensureExistingValuesLoaded(
+    propertyName: string,
+    context: UniqueValidationContext
+  ): Promise<Set<string>> {
+    if (context.loadedProperties.has(propertyName)) {
+      return context.existingValues.get(propertyName) ?? new Set<string>()
+    }
+    const existingValues = await this.loadExistingUniqueValues(propertyName, context)
+    context.existingValues.set(propertyName, existingValues)
+    context.loadedProperties.add(propertyName)
+    return existingValues
+  }
+
+  private async loadExistingUniqueValues(
+    propertyName: string,
+    context: UniqueValidationContext
+  ): Promise<Set<string>> {
+    const metadata = this.dataMapper.getMetadata()
+    const column = metadata.getColumnByProperty(propertyName)
+    if (column === null) {
+      return new Set<string>()
+    }
+
+    const valueMap: Map<string, relationalStore.ValueType> = new Map()
+    for (let i = 0; i < context.entities.length; i++) {
+      const value = context.entities[i].getPropertyValue(propertyName)
+      if (value === null || value === undefined) {
+        continue
+      }
+      const rdbValue = this.toRdbValue(value)
+      const key = this.toRdbKey(rdbValue)
+      if (key === null) {
+        continue
+      }
+      if (!valueMap.has(key)) {
+        valueMap.set(key, rdbValue)
+      }
+    }
+    if (valueMap.size === 0) {
+      return new Set<string>()
+    }
+
+    const existingValues: Set<string> = new Set()
+    const allValues = Array.from(valueMap.values())
+    const batches = this.splitIntoBatches(allValues, this.resolveInClauseLimit())
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex]
+      const predicates = new relationalStore.RdbPredicates(this.tableName)
+      try {
+        predicates.in(column.columnName, batch)
+      } catch (e) {
+        if (e instanceof Error) {
+          throw e
+        }
+        throw new Error(String(e))
+      }
+
+      let resultSet: relationalStore.ResultSet | null = null
+      try {
+        BatchOperations.notifyUniqueQueryObserverForTest(propertyName, batch.length)
+        resultSet = await context.store.query(predicates)
+        const columnIndex = resultSet.getColumnIndex(column.columnName)
+        while (resultSet.goToNextRow()) {
+          if (resultSet.isColumnNull(columnIndex)) {
+            continue
+          }
+          const rawValue = ResultSetUtils.getValueByRuntimeType(resultSet, columnIndex)
+          const key = this.toRdbKey(rawValue as relationalStore.ValueType)
+          if (key !== null) {
+            existingValues.add(key)
+          }
+        }
+      } catch (e) {
+        if (e instanceof Error) {
+          throw e
+        }
+        throw new Error(String(e))
+      } finally {
+        this.closeResultSet(resultSet)
+      }
+    }
+
+    return existingValues
   }
 
   private closeResultSet(resultSet: relationalStore.ResultSet | null): void {
@@ -246,6 +434,37 @@ export class BatchOperations {
       return value
     }
     return null
+  }
+
+  private toRdbKey(value: relationalStore.ValueType | null): string | null {
+    if (value === null || value === undefined) {
+      return null
+    }
+    if (value instanceof Uint8Array) {
+      const parts: Array<string> = []
+      for (let i = 0; i < value.length; i++) {
+        parts.push(value[i].toString(16).padStart(2, '0'))
+      }
+      return `u8:${parts.join('')}`
+    }
+    return `${typeof value}:${String(value)}`
+  }
+
+  private resolveInClauseLimit(): number {
+    return BatchOperations.IN_CLAUSE_LIMIT
+  }
+
+  private splitIntoBatches<T>(values: Array<T>, batchSize: number): Array<Array<T>> {
+    const batches: Array<Array<T>> = []
+    const effectiveSize = batchSize > 0 ? Math.floor(batchSize) : 1
+    for (let i = 0; i < values.length; i += effectiveSize) {
+      const batch: Array<T> = []
+      for (let j = i; j < Math.min(i + effectiveSize, values.length); j++) {
+        batch.push(values[j])
+      }
+      batches.push(batch)
+    }
+    return batches
   }
 
   private isExpectedReadOnlyWriteDenied(errorMessage: string): boolean {

@@ -4,6 +4,7 @@ import { OrmContext, OrmContextConfig } from '../../main/ets/core/OrmContext';
 import { OCORMInit, OCORMInitOptions } from '../../main/ets/core/OrmInit';
 import { MetadataStorage } from '../../main/ets/core/MetadataStorage';
 import { DatabaseManager, DatabaseManagerAdapter } from '../../main/ets/database/DatabaseManager';
+import { DatabaseManagerTestHooks } from '../../main/ets/database/testing/DatabaseManagerTestHooks';
 import { DatabaseConfig } from '../../main/ets/database/DatabaseConfig';
 import { Logger } from '../../main/ets/logging/Logger';
 import { LogLevel } from '../../main/ets/logging/LogLevel';
@@ -88,7 +89,7 @@ class TestMigrationManager extends MigrationManager {
 const resetCoreSingletons = (): void => {
   OrmContext.resetInstance();
   MetadataStorage.resetInstance();
-  DatabaseManager.resetInstance();
+  DatabaseManagerTestHooks.resetInstance();
   Logger.resetInstance();
 };
 
@@ -134,7 +135,7 @@ export default function coreContextInitTest() {
         expect(context.getLogger() === loggerA).assertEqual(true);
 
         MetadataStorage.resetInstance();
-        DatabaseManager.resetInstance();
+        DatabaseManagerTestHooks.resetInstance();
         Logger.resetInstance();
         const storageB = MetadataStorage.getInstance();
         const dbB = DatabaseManager.getInstance();

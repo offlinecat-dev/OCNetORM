@@ -29,7 +29,7 @@ assignees: ''
 
 ```typescript
 // 提供能复现问题的最小代码示例
-import { Repository } from '@offlinecat/ocorm'
+import { Repository } from 'ocorm'
 
 const repo = new Repository('User')
 // ...
@@ -43,7 +43,7 @@ const repo = new Repository('User')
 
 ## 环境信息
 
-- **OCORM 版本**: [如 2.4.14]
+- **ocorm 版本**: [如 2.4.14]
 - **HarmonyOS 版本**: [如 HarmonyOS NEXT]
 - **DevEco Studio 版本**: [如 5.0.0]
 - **设备**: [如 模拟器 / Mate 60]

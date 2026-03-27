@@ -181,6 +181,9 @@ export class QueryCache {
         const value = data.getPropertyValue(name)
         if (value !== null) {
           cloned.addProperty(name, value, typeof value)
+        } else {
+          // 保留“存在但为 null”的字段
+          cloned.setPropertyValue(name, null)
         }
       }
     }

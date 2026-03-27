@@ -53,6 +53,14 @@ export class PredicateBuildResult {
  * 负责将 QueryBuilder 的条件转换为 HarmonyOS RdbPredicates
  */
 export class PredicateBuilder {
+  static convertSingleValueForTest(value: ValueType | Array<ValueType> | null): relationalStore.ValueType {
+    return PredicateBuilder.singleValueToPredicateValue(value)
+  }
+
+  static convertArrayValuesForTest(values: Array<ValueType>): Array<relationalStore.ValueType> {
+    return PredicateBuilder.toPredicateArray(values)
+  }
+
   /**
    * 从 QueryBuilder 构建 RdbPredicates
    * @param queryBuilder 查询构建器

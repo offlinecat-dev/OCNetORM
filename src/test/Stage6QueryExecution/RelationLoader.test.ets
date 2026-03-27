@@ -9,6 +9,7 @@ import { RelationLoader } from '../../main/ets/query/RelationLoader';
 import { EntityData } from '../../main/ets/mapping/EntityData';
 import { RelationNotFoundError } from '../../main/ets/errors/RelationError';
 import { DatabaseManager } from '../../main/ets/database/DatabaseManager';
+import { DatabaseManagerTestHooks } from '../../main/ets/database/testing/DatabaseManagerTestHooks';
 import { relationalStore } from '@kit.ArkData';
 import { RelationQueryOptions } from '../../main/ets/query/RelationQueryOptions';
 
@@ -217,7 +218,7 @@ export default function relationLoaderTest() {
   describe('relationLoaderTest', () => {
     beforeEach(() => {
       MetadataStorage.resetInstance();
-      DatabaseManager.resetInstance();
+      DatabaseManagerTestHooks.resetInstance();
     });
 
     it('should create RelationLoader with source entity name', 0, () => {

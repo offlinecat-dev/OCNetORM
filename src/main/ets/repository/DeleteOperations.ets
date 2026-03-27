@@ -19,10 +19,6 @@ import { SaveResult } from './SaveResult'
 import { DeleteResult } from './DeleteResult'
 type StoreProvider = () => relationalStore.RdbStore; type ValueConverter = (value: ValueType) => relationalStore.ValueType; type SourceRepoProvider = () => CascadeRepository
 
-interface SavepointExecutor {
-  executeSql(sql: string): Promise<void>
-}
-
 class SavepointState {
   name: string
   started: boolean
@@ -241,7 +237,7 @@ export class DeleteOperations {
       const updateValues: relationalStore.ValuesBucket = {}
       updateValues[deletedAtColumn] = currentTimestamp
       const affectedRows = await store.update(updateValues, predicates)
-      const softDeleteSql = `UPDATE ${this.entityMetadata.tableName} SET ${deletedAtColumn} = ${currentTimestamp} WHERE ${pkColumn.columnName} = ${String(id)}`
+      const softDeleteSql = `UPDATE ${this.entityMetadata.tableName} SET ${deletedAtColumn} = ? WHERE ${pkColumn.columnName} = ?`
       const softDeleteDuration = Date.now() - startTime
       this.logger.logQuery(softDeleteSql, softDeleteDuration)
       await OrmContext.emitSlowQuery('SOFT_DELETE', softDeleteSql, softDeleteDuration, this.entityName)
@@ -264,7 +260,7 @@ export class DeleteOperations {
       const predicates = new relationalStore.RdbPredicates(this.entityMetadata.tableName)
       predicates.equalTo(pkColumn.columnName, this.toRdbValue(id))
       const affectedRows = await store.delete(predicates)
-      const deleteSql = `DELETE FROM ${this.entityMetadata.tableName} WHERE ${pkColumn.columnName} = ${String(id)}`
+      const deleteSql = `DELETE FROM ${this.entityMetadata.tableName} WHERE ${pkColumn.columnName} = ?`
       const deleteDuration = Date.now() - startTime
       this.logger.logQuery(deleteSql, deleteDuration)
       await OrmContext.emitSlowQuery('DELETE', deleteSql, deleteDuration, this.entityName)
@@ -316,13 +312,9 @@ export class DeleteOperations {
     store: relationalStore.RdbStore,
     prefix: string
   ): Promise<SavepointState> {
-    const executor = this.getSavepointExecutor(store)
     const savepointName = this.nextSavepointName(prefix)
-    if (executor === null) {
-      throw new ExecutionError('SAVEPOINT', '当前数据库不支持 SAVEPOINT，无法保证级联删除原子性')
-    }
     try {
-      await executor.executeSql(`SAVEPOINT ${savepointName}`)
+      await store.executeSql(`SAVEPOINT ${savepointName}`)
       return new SavepointState(savepointName, true)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
@@ -331,12 +323,8 @@ export class DeleteOperations {
   }
 
   private async releaseSavepoint(store: relationalStore.RdbStore, savepointName: string): Promise<void> {
-    const executor = this.getSavepointExecutor(store)
-    if (executor === null) {
-      throw new ExecutionError('SAVEPOINT', '当前数据库不支持 SAVEPOINT，无法释放保存点')
-    }
     try {
-      await executor.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
+      await store.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       throw new ExecutionError('SAVEPOINT', `释放保存点失败: ${message}`)
@@ -344,25 +332,13 @@ export class DeleteOperations {
   }
 
   private async rollbackToSavepointSafely(store: relationalStore.RdbStore, savepointName: string): Promise<void> {
-    const executor = this.getSavepointExecutor(store)
-    if (executor === null) {
-      throw new ExecutionError('SAVEPOINT', '当前数据库不支持 SAVEPOINT，无法回滚保存点')
-    }
     try {
-      await executor.executeSql(`ROLLBACK TO SAVEPOINT ${savepointName}`)
-      await executor.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
+      await store.executeSql(`ROLLBACK TO SAVEPOINT ${savepointName}`)
+      await store.executeSql(`RELEASE SAVEPOINT ${savepointName}`)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       throw new ExecutionError('SAVEPOINT', `回滚保存点失败: ${message}`)
     }
-  }
-
-  private getSavepointExecutor(store: relationalStore.RdbStore): SavepointExecutor | null {
-    const executor = store as SavepointExecutor
-    if (typeof executor.executeSql !== 'function') {
-      return null
-    }
-    return executor
   }
 
   private logWriteFailure(operation: string, errorMessage: string): void {

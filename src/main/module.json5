@@ -1,6 +1,6 @@
 {
   "module": {
-    "name": "OCORM",
+    "name": "ocorm",
     "type": "har",
     "deviceTypes": [
       "default",

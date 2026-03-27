@@ -17,6 +17,11 @@ import { SubQuery, SubQueryCallback } from './SubQuery'
 import { QueryExecutor } from './QueryExecutor'
 import { RelationQueryOptions, RelationCountOption } from './RelationQueryOptions'
 import { EntityData } from '../mapping/EntityData'
+import {
+  normalizeSortDirectionOrThrow,
+  validateAndNormalizeHavingClause,
+  validateAndNormalizeSelectRawExpressions
+} from './QueryBuilderGuards'
 
 export class BatchUpdateValues {
   private values: Map<string, ValueType> = new Map()
@@ -32,6 +37,14 @@ export class BatchUpdateValues {
       return null
     }
     return value
+  }
+
+  has(columnOrProperty: string): boolean {
+    return this.values.has(columnOrProperty)
+  }
+
+  getOptional(columnOrProperty: string): ValueType | undefined {
+    return this.values.get(columnOrProperty)
   }
 
   keys(): Array<string> {
@@ -148,7 +161,11 @@ export class QueryBuilder {
    * @returns 条件数组
    */
   getConditions(): Array<WhereCondition> {
-    return this.conditions
+    const cloned: Array<WhereCondition> = []
+    for (let i = 0; i < this.conditions.length; i++) {
+      cloned.push(this.cloneCondition(this.conditions[i]))
+    }
+    return cloned
   }
 
   /**
@@ -156,7 +173,12 @@ export class QueryBuilder {
    * @returns 排序子句数组
    */
   getOrderByColumns(): Array<OrderByClause> {
-    return this.orderByColumns
+    const cloned: Array<OrderByClause> = []
+    for (let i = 0; i < this.orderByColumns.length; i++) {
+      const item = this.orderByColumns[i]
+      cloned.push(new OrderByClause(item.column, item.direction))
+    }
+    return cloned
   }
 
   /**
@@ -180,7 +202,7 @@ export class QueryBuilder {
    * @returns 列名数组
    */
   getSelectedColumns(): Array<string> {
-    return this.selectedColumns
+    return this.selectedColumns.slice()
   }
 
   /**
@@ -355,7 +377,7 @@ export class QueryBuilder {
     if (resolvedColumn === null) {
       throw new InvalidConditionError(column, `列 '${column}' 在实体 '${this.entityName}' 中不存在`)
     }
-    const safeDirection = this.normalizeSortDirectionOrThrow(String(direction))
+    const safeDirection = normalizeSortDirectionOrThrow(String(direction))
     const orderByClause = new OrderByClause(resolvedColumn, safeDirection)
     this.orderByColumns.push(orderByClause)
     return this
@@ -456,90 +478,6 @@ export class QueryBuilder {
       default:
         return false
     }
-  }
-
-  private normalizeSortDirectionOrThrow(direction: string): SortDirection {
-    const normalized = direction.trim().toUpperCase()
-    if (normalized === 'ASC') {
-      return 'ASC'
-    }
-    if (normalized === 'DESC') {
-      return 'DESC'
-    }
-    throw new InvalidConditionError('ORDER BY', `非法排序方向: ${direction}`)
-  }
-
-  private validateAndNormalizeHavingClause(clause: string, args: Array<ValueType>): string {
-    const normalized = clause.trim()
-    if (normalized.length === 0) {
-      throw new InvalidConditionError('HAVING', 'HAVING 条件不能为空')
-    }
-    this.ensureNoDangerousSqlTokens(normalized, 'HAVING')
-    this.ensureNoDangerousSqlKeywords(normalized, 'HAVING')
-    if (!/^[A-Za-z0-9_(),.*+\-/%<>=!\s?]+$/.test(normalized)) {
-      throw new InvalidConditionError('HAVING', 'HAVING 子句包含非法字符')
-    }
-    if (args.length === 0) {
-      throw new InvalidConditionError('HAVING', 'HAVING 必须使用参数占位符')
-    }
-    if (this.countPlaceholders(normalized) !== args.length) {
-      throw new InvalidConditionError('HAVING', 'HAVING 占位符数量与参数数量不一致')
-    }
-    return normalized
-  }
-
-  private validateAndNormalizeSelectRawExpressions(expressions: Array<string>): Array<string> {
-    if (expressions.length === 0) {
-      throw new InvalidConditionError('selectRaw', 'selectRaw 表达式不能为空')
-    }
-    const normalized: Array<string> = []
-    for (let i = 0; i < expressions.length; i++) {
-      const expression = expressions[i].trim()
-      if (expression.length === 0) {
-        throw new InvalidConditionError('selectRaw', 'selectRaw 表达式不能为空字符串')
-      }
-      this.ensureNoDangerousSqlTokens(expression, 'selectRaw')
-      if (!this.isSafeSelectRawExpression(expression)) {
-        throw new InvalidConditionError('selectRaw', `不支持的 selectRaw 表达式: ${expression}`)
-      }
-      normalized.push(expression)
-    }
-    return normalized
-  }
-
-  private countPlaceholders(clause: string): number {
-    return clause.split('?').length - 1
-  }
-
-  private ensureNoDangerousSqlTokens(value: string, fieldName: string): void {
-    const hasDangerousToken = value.includes(';') ||
-      value.includes('--') ||
-      value.includes('/*') ||
-      value.includes('*/') ||
-      value.includes("'") ||
-      value.includes('"') ||
-      value.includes('`')
-    if (hasDangerousToken) {
-      throw new InvalidConditionError(fieldName, `${fieldName} 包含危险 SQL 片段`)
-    }
-  }
-
-  private ensureNoDangerousSqlKeywords(value: string, fieldName: string): void {
-    const forbiddenKeywordPattern =
-      /\b(UNION|SELECT|FROM|JOIN|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|PRAGMA|VACUUM|REINDEX)\b/i
-    if (forbiddenKeywordPattern.test(value)) {
-      throw new InvalidConditionError(fieldName, `${fieldName} 包含危险 SQL 关键字`)
-    }
-  }
-
-  private isSafeSelectRawExpression(expression: string): boolean {
-    const identifierPattern = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/
-    if (identifierPattern.test(expression)) {
-      return true
-    }
-    const aggregatePattern =
-      /^(COUNT|SUM|AVG|MIN|MAX)\(\s*(\*|[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\)(\s+AS\s+[A-Za-z_][A-Za-z0-9_]*)?$/i
-    return aggregatePattern.test(expression)
   }
 
   private normalizeRelationPath(relationPath: string): string {
@@ -653,7 +591,14 @@ export class QueryBuilder {
     if (targetEntityName.length === 0) {
       this.morphRelationQueryCallbacks.set(normalizedRelationPath, callback)
       this.relationQueryOptions.delete(normalizedRelationPath)
-      return this.with(normalizedRelationPath)
+      try {
+        return this.with(normalizedRelationPath)
+      } catch (e) {
+        if (e instanceof Error) {
+          throw e
+        }
+        throw new Error(String(e))
+      }
     }
     const relationQueryBuilder = new QueryBuilder(targetEntityName)
     try {
@@ -664,7 +609,14 @@ export class QueryBuilder {
     }
     this.morphRelationQueryCallbacks.delete(normalizedRelationPath)
     this.relationQueryOptions.set(normalizedRelationPath, this.createRelationQueryOptions(relationQueryBuilder))
-    return this.with(normalizedRelationPath)
+    try {
+      return this.with(normalizedRelationPath)
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e
+      }
+      throw new Error(String(e))
+    }
   }
 
   /**
@@ -672,7 +624,7 @@ export class QueryBuilder {
    * @returns 关联关系名称数组
    */
   getRelationNames(): Array<string> {
-    return this.relationNames
+    return this.relationNames.slice()
   }
 
   /**
@@ -700,7 +652,7 @@ export class QueryBuilder {
    * 获取延迟加载的关联关系名称列表
    */
   getLazyRelationNames(): Array<string> {
-    return this.lazyRelationNames
+    return this.lazyRelationNames.slice()
   }
 
   /**
@@ -1066,7 +1018,7 @@ export class QueryBuilder {
    * @returns 子查询数组
    */
   getSubQueries(): Array<SubQuery> {
-    return this.subQueries
+    return this.subQueries.slice()
   }
 
   /**
@@ -1114,7 +1066,7 @@ export class QueryBuilder {
    * @returns 当前实例（支持链式调用）
    */
   having(clause: string, args: Array<ValueType> = []): QueryBuilder {
-    const normalizedClause = this.validateAndNormalizeHavingClause(clause, args)
+    const normalizedClause = validateAndNormalizeHavingClause(clause, args)
     this.havingClause = normalizedClause
     this.havingArgs = args.slice()
     return this
@@ -1126,7 +1078,7 @@ export class QueryBuilder {
    * @returns 当前实例（支持链式调用）
    */
   selectRaw(expressions: Array<string>): QueryBuilder {
-    this.selectRawExpressions = this.validateAndNormalizeSelectRawExpressions(expressions)
+    this.selectRawExpressions = validateAndNormalizeSelectRawExpressions(expressions)
     return this
   }
 
@@ -1135,7 +1087,7 @@ export class QueryBuilder {
    * @returns GROUP BY 列数组
    */
   getGroupByColumns(): Array<string> {
-    return this.groupByColumns
+    return this.groupByColumns.slice()
   }
 
   /**
@@ -1151,7 +1103,7 @@ export class QueryBuilder {
    * @returns HAVING 参数数组
    */
   getHavingArgs(): Array<ValueType> {
-    return this.havingArgs
+    return this.havingArgs.slice()
   }
 
   /**
@@ -1159,7 +1111,43 @@ export class QueryBuilder {
    * @returns 表达式数组
    */
   getSelectRawExpressions(): Array<string> {
-    return this.selectRawExpressions
+    return this.selectRawExpressions.slice()
+  }
+
+  /**
+   * 克隆查询构建器
+   * 用于执行器隔离内部可变状态，避免影响外部 builder 实例
+   */
+  clone(): QueryBuilder {
+    const cloned = new QueryBuilder(this.entityName)
+    cloned.conditions = this.getConditions()
+    cloned.orderByColumns = this.getOrderByColumns()
+    cloned.limitValue = this.limitValue
+    cloned.offsetValue = this.offsetValue
+    cloned.selectedColumns = this.selectedColumns.slice()
+    cloned.relationNames = this.relationNames.slice()
+    cloned.lazyRelationNames = this.lazyRelationNames.slice()
+    cloned.includeDeleted = this.includeDeleted
+    cloned.onlyDeletedFlag = this.onlyDeletedFlag
+    cloned.pageNumber = this.pageNumber
+    cloned.pageSizeValue = this.pageSizeValue
+    cloned.subQueries = this.subQueries.slice()
+    cloned.queryTimeoutMs = this.queryTimeoutMs
+    cloned.groupByColumns = this.groupByColumns.slice()
+    cloned.havingClause = this.havingClause
+    cloned.havingArgs = this.havingArgs.slice()
+    cloned.selectRawExpressions = this.selectRawExpressions.slice()
+    this.relationQueryOptions.forEach((value, key) => {
+      cloned.relationQueryOptions.set(key, value.clone())
+    })
+    this.morphRelationQueryCallbacks.forEach((value, key) => {
+      cloned.morphRelationQueryCallbacks.set(key, value)
+    })
+    for (let i = 0; i < this.relationCountOptions.length; i++) {
+      const item = this.relationCountOptions[i]
+      cloned.relationCountOptions.push(new RelationCountOption(item.relationPath, item.alias))
+    }
+    return cloned
   }
 
   /**

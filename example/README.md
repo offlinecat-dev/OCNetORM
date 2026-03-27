@@ -1,6 +1,6 @@
-# OCORM 使用示例
+# ocorm 使用示例
 
-本目录包含 OCORM 框架的完整使用示例，帮助开发者快速上手。
+本目录包含 ocorm 框架的完整使用示例，帮助开发者快速上手。
 
 ## 目录结构
 
@@ -23,13 +23,13 @@ example/
 ### 1. 安装依赖
 
 ```bash
-ohpm install @offlinecat/ocorm
+ohpm install ocorm
 ```
 
 ### 2. 定义实体
 
 ```typescript
-import { defineEntity, ColumnType, EntitySchema } from '@offlinecat/ocorm'
+import { defineEntity, ColumnType, EntitySchema } from 'ocorm'
 
 // 定义实体类
 class UserEntity {
@@ -57,7 +57,7 @@ defineEntity('UserEntity', UserSchema)
 在 EntryAbility 的 onCreate 中初始化：
 
 ```typescript
-import { OCORMInit, DatabaseConfig } from '@offlinecat/ocorm'
+import { OCORMInit, DatabaseConfig } from 'ocorm'
 import { relationalStore } from '@kit.ArkData'
 
 async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam) {
@@ -76,7 +76,7 @@ async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam) {
 ### 4. 使用仓库进行 CRUD 操作
 
 ```typescript
-import { Repository, EntityData } from '@offlinecat/ocorm'
+import { Repository, EntityData } from 'ocorm'
 
 const repository = new Repository('UserEntity')
 
@@ -103,7 +103,7 @@ await repository.removeById(1)
 ### 5. 使用查询构建器
 
 ```typescript
-import { QueryExecutor, ConditionOperator } from '@offlinecat/ocorm'
+import { QueryExecutor, ConditionOperator } from 'ocorm'
 
 const repository = new Repository('UserEntity')
 
