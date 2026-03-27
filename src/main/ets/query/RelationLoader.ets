@@ -10,7 +10,6 @@ import { ManyToManyMetadata } from '../core/ManyToManyMetadata'
 import { MorphToMetadata } from '../core/MorphToMetadata'
 import { EntityMetadata } from '../core/EntityMetadata'
 import { RelationType } from '../types/RelationType'
-import { DataMapper } from '../mapping/DataMapper'
 import { EntityData } from '../mapping/EntityData'
 import { ResultSetRow } from '../mapping/ResultSetRow'
 import { DatabaseManager } from '../database/DatabaseManager'
@@ -30,11 +29,10 @@ import { ManyToManyRelationLoadStrategy } from './ManyToManyRelationLoadStrategy
 import { RelationLoaderParallelSupport } from './RelationLoaderParallelSupport'
 import { RelationLoaderCoreRelationSupport } from './RelationLoaderCoreRelationSupport'
 import { RelationLoaderOneToOneSupport } from './RelationLoaderOneToOneSupport'
-import { OrderByClause } from '../types/ValueTypes'
-import { WhereCondition } from './WhereCondition'
+import { RelationLoaderManyToManySupport } from './RelationLoaderManyToManySupport'
+import { RelationLoaderMorphToSupport } from './RelationLoaderMorphToSupport'
 import { RelationQueryOptions } from './RelationQueryOptions'
 import { QueryBuilder } from './QueryBuilder'
-import { splitIntoBatches as splitIntoBatchesUtil } from './QueryExecutionUtils'
 import { applyRelationQueryToPredicates as applyRelationQueryToPredicatesUtil } from './RelationPredicateUtils'
 
 type AsyncFailure = Error | object | string | number | boolean | null | undefined
@@ -54,6 +52,10 @@ export class RelationLoader {
   private coreRelationSupport: RelationLoaderCoreRelationSupport
   /** ONE_TO_ONE 关系加载支持 */
   private oneToOneSupport: RelationLoaderOneToOneSupport
+  /** MANY_TO_MANY 关系加载支持 */
+  private manyToManySupport: RelationLoaderManyToManySupport
+  /** MORPH_TO 关系加载支持 */
+  private morphToSupport: RelationLoaderMorphToSupport
   /** 可选的 Store 提供者（用于复用外部租约连接） */
   private storeProvider: (() => relationalStore.RdbStore) | null
 
@@ -144,6 +146,46 @@ export class RelationLoader {
         this.resultSetToRow(resultSet, metadata),
       (resultSet: relationalStore.ResultSet | null): void => this.closeResultSet(resultSet),
       (context: string, error: AsyncFailure): void => this.logRelationWarn(context, error)
+    )
+    this.manyToManySupport = new RelationLoaderManyToManySupport(
+      this.sourceEntityName,
+      (): relationalStore.RdbStore => this.getStore(),
+      (): number => this.resolveInClauseLimit(),
+      async (
+        task: Promise<relationalStore.ResultSet>,
+        operation: string
+      ): Promise<relationalStore.ResultSet> => await this.withQueryTimeout(task, operation),
+      (resultSet: relationalStore.ResultSet | null): void => this.closeResultSet(resultSet),
+      (context: string, error: AsyncFailure): void => this.logRelationWarn(context, error),
+      (
+        predicates: relationalStore.RdbPredicates,
+        metadata: EntityMetadata,
+        options: RelationQueryOptions | null
+      ): void => this.applyRelationQueryToPredicates(predicates, metadata, options),
+      (value: ValueType | Array<ValueType> | null): relationalStore.ValueType => this.toRdbValue(value),
+      (resultSet: relationalStore.ResultSet, metadata: EntityMetadata): ResultSetRow =>
+        this.resultSetToRow(resultSet, metadata),
+      (items: Array<EntityData>, options: RelationQueryOptions | null): Array<EntityData> =>
+        this.applyCollectionQueryOptions(items, options)
+    )
+    this.morphToSupport = new RelationLoaderMorphToSupport(
+      this.sourceEntityName,
+      (): relationalStore.RdbStore => this.getStore(),
+      (): number => this.resolveInClauseLimit(),
+      async (
+        task: Promise<relationalStore.ResultSet>,
+        operation: string
+      ): Promise<relationalStore.ResultSet> => await this.withQueryTimeout(task, operation),
+      (resultSet: relationalStore.ResultSet | null): void => this.closeResultSet(resultSet),
+      (context: string, error: AsyncFailure): void => this.logRelationWarn(context, error),
+      (
+        predicates: relationalStore.RdbPredicates,
+        metadata: EntityMetadata,
+        options: RelationQueryOptions | null
+      ): void => this.applyRelationQueryToPredicates(predicates, metadata, options),
+      (value: ValueType | Array<ValueType> | null): relationalStore.ValueType => this.toRdbValue(value),
+      (resultSet: relationalStore.ResultSet, metadata: EntityMetadata): ResultSetRow =>
+        this.resultSetToRow(resultSet, metadata)
     )
   }
 
@@ -416,331 +458,7 @@ export class RelationLoader {
     relation: ManyToManyMetadata,
     options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
-    // 获取源实体元数据
-    const sourceMetadata = MetadataStorage.getInstance().getEntityMetadata(this.sourceEntityName)
-    if (sourceMetadata === null) {
-      return entities
-    }
-
-    const sourcePkColumn = sourceMetadata.getPrimaryKeyColumn()
-    if (sourcePkColumn === null) {
-      return entities
-    }
-
-    // 获取目标实体元数据
-    const targetMetadata = MetadataStorage.getInstance().getEntityMetadata(relation.targetEntity)
-    if (targetMetadata === null) {
-      return entities
-    }
-
-    const targetPkColumn = targetMetadata.getPrimaryKeyColumn()
-    if (targetPkColumn === null) {
-      return entities
-    }
-
-    // 收集所有主实体的主键值（去重）
-    const pkValues: Array<ValueType> = []
-    const pkValueSet: Set<string> = new Set()
-
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i]
-      const pkProp = entity.getProperty(sourcePkColumn.propertyName)
-      if (pkProp !== null && pkProp.value !== null) {
-        const pkKey = String(pkProp.value)
-        if (!pkValueSet.has(pkKey)) {
-          pkValueSet.add(pkKey)
-          pkValues.push(pkProp.value)
-        }
-      }
-    }
-
-    if (pkValues.length === 0) {
-      // 没有主键值，设置所有关联为空数组
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedArray(relation.propertyName, [])
-      }
-      return entities
-    }
-
-    // 获取数据库连接
-    let store: relationalStore.RdbStore
-    try {
-      store = this.getStore()
-    } catch (e) {
-      // 数据库未初始化，设置所有关联为空数组
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedArray(relation.propertyName, [])
-      }
-      return entities
-    }
-
-    // 第一次查询：从中间表获取关联关系（分批处理）
-    // SELECT * FROM join_table WHERE joinSourceKey IN (pkValues)
-
-    // 解析中间表结果，建立源实体主键到目标实体主键的映射
-    const sourceToTargetIds: Map<string, Array<ValueType>> = new Map()
-    const allTargetIds: Array<ValueType> = []
-    const targetIdSet: Set<string> = new Set()
-
-    // 分批查询中间表
-    const pkBatches = splitIntoBatchesUtil(pkValues, this.resolveInClauseLimit())
-
-    for (let batchIndex = 0; batchIndex < pkBatches.length; batchIndex++) {
-      const batch = pkBatches[batchIndex]
-      const joinPredicates = new relationalStore.RdbPredicates(relation.joinTable)
-
-      const rdbPkValues: Array<relationalStore.ValueType> = []
-      for (let i = 0; i < batch.length; i++) {
-        rdbPkValues.push(this.toRdbValue(batch[i]))
-      }
-
-      try {
-        joinPredicates.in(relation.joinSourceKey, rdbPkValues)
-      } catch (e) {
-        this.logRelationWarn(
-          `MANY_TO_MANY(中间表) 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
-          e
-        )
-        continue
-      }
-
-      let joinResultSet: relationalStore.ResultSet | null = null
-      try {
-        joinResultSet = await this.withQueryTimeout(store.query(joinPredicates), 'RELATION_LOAD')
-      } catch (e) {
-        this.logRelationWarn(
-          `MANY_TO_MANY(中间表) 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
-          e
-        )
-        continue
-      }
-
-      try {
-        while (joinResultSet !== null && joinResultSet.goToNextRow()) {
-          // 获取源实体外键值
-          const sourceKeyIndex = joinResultSet.getColumnIndex(relation.joinSourceKey)
-          const targetKeyIndex = joinResultSet.getColumnIndex(relation.joinTargetKey)
-
-          if (sourceKeyIndex >= 0 && targetKeyIndex >= 0) {
-            let sourceId: ValueType = null
-            let targetId: ValueType = null
-
-            if (!joinResultSet.isColumnNull(sourceKeyIndex)) {
-              const rawSourceId = ResultSetUtils.getValueByRuntimeType(joinResultSet, sourceKeyIndex)
-              if (rawSourceId !== null && !(rawSourceId instanceof Uint8Array)) {
-                sourceId = rawSourceId
-              }
-            }
-            if (!joinResultSet.isColumnNull(targetKeyIndex)) {
-              const rawTargetId = ResultSetUtils.getValueByRuntimeType(joinResultSet, targetKeyIndex)
-              if (rawTargetId !== null && !(rawTargetId instanceof Uint8Array)) {
-                targetId = rawTargetId
-              }
-            }
-
-            if (sourceId !== null && targetId !== null) {
-              const sourceKey = String(sourceId)
-              const targetKey = String(targetId)
-
-              // 添加到源实体到目标实体的映射
-              let targetIds = sourceToTargetIds.get(sourceKey)
-              if (!targetIds) {
-                targetIds = []
-                sourceToTargetIds.set(sourceKey, targetIds)
-              }
-              targetIds.push(targetId)
-
-              // 收集所有目标实体 ID（去重）
-              if (!targetIdSet.has(targetKey)) {
-                targetIdSet.add(targetKey)
-                allTargetIds.push(targetId)
-              }
-            }
-          }
-        }
-      } catch (e) {
-        this.logRelationWarn(
-          `MANY_TO_MANY(中间表) 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
-          e
-        )
-      } finally {
-        this.closeResultSet(joinResultSet)
-      }
-    }
-
-    // 如果没有关联数据，设置所有关联为空数组
-    if (allTargetIds.length === 0) {
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedArray(relation.propertyName, [])
-      }
-      return entities
-    }
-
-    // 第二次查询：根据目标实体 ID 列表查询目标实体数据（分批处理）
-    // SELECT * FROM target_table WHERE pk IN (allTargetIds)
-
-    const targetMapper = new DataMapper(relation.targetEntity)
-
-    // 将目标实体按主键值索引
-    const targetEntitiesByPk: Map<string, EntityData> = new Map()
-
-    // 分批查询目标表
-    const targetIdBatches = splitIntoBatchesUtil(allTargetIds, this.resolveInClauseLimit())
-
-    for (let batchIndex = 0; batchIndex < targetIdBatches.length; batchIndex++) {
-      const batch = targetIdBatches[batchIndex]
-      const targetPredicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-      this.applyRelationQueryToPredicates(targetPredicates, targetMetadata, options)
-
-      const rdbTargetIds: Array<relationalStore.ValueType> = []
-      for (let i = 0; i < batch.length; i++) {
-        rdbTargetIds.push(this.toRdbValue(batch[i]))
-      }
-
-      try {
-        targetPredicates.in(targetPkColumn.columnName, rdbTargetIds)
-      } catch (e) {
-        this.logRelationWarn(
-          `MANY_TO_MANY(目标表) 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${targetIdBatches.length}`,
-          e
-        )
-        continue
-      }
-
-      let targetResultSet: relationalStore.ResultSet | null = null
-      try {
-        targetResultSet = await this.withQueryTimeout(store.query(targetPredicates), 'RELATION_LOAD')
-      } catch (e) {
-        this.logRelationWarn(
-          `MANY_TO_MANY(目标表) 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${targetIdBatches.length}`,
-          e
-        )
-        continue
-      }
-
-      try {
-        while (targetResultSet !== null && targetResultSet.goToNextRow()) {
-          const row = this.resultSetToRow(targetResultSet, targetMetadata)
-          const targetEntity = targetMapper.fromResultSetRow(row)
-
-          // 获取主键值
-          const pkProp = targetEntity.getProperty(targetPkColumn.propertyName)
-          if (pkProp !== null && pkProp.value !== null) {
-            const pkKey = String(pkProp.value)
-            targetEntitiesByPk.set(pkKey, targetEntity)
-          }
-        }
-      } catch (e) {
-        this.logRelationWarn(
-          `MANY_TO_MANY(目标表) 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${targetIdBatches.length}`,
-          e
-        )
-      } finally {
-        this.closeResultSet(targetResultSet)
-      }
-    }
-
-    // 将关联数据设置到主实体
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i]
-      const pkProp = entity.getProperty(sourcePkColumn.propertyName)
-
-      if (pkProp !== null && pkProp.value !== null) {
-        const sourceKey = String(pkProp.value)
-        const targetIds = sourceToTargetIds.get(sourceKey)
-
-        if (targetIds && targetIds.length > 0) {
-          const relatedEntities: Array<EntityData> = []
-          for (let j = 0; j < targetIds.length; j++) {
-            const targetKey = String(targetIds[j])
-            const targetEntity = targetEntitiesByPk.get(targetKey)
-            if (targetEntity) {
-              relatedEntities.push(targetEntity)
-            }
-          }
-          entity.setRelatedArray(relation.propertyName, this.applyCollectionQueryOptions(relatedEntities, options))
-        } else {
-          entity.setRelatedArray(relation.propertyName, [])
-        }
-      } else {
-        entity.setRelatedArray(relation.propertyName, [])
-      }
-    }
-
-    return entities
-  }
-
-  private resolveEntityValue(
-    entity: EntityData,
-    metadata: EntityMetadata,
-    propertyOrColumnName: string
-  ): ValueType {
-    let prop = entity.getProperty(propertyOrColumnName)
-    if (prop !== null) {
-      return prop.value
-    }
-    const column = metadata.getColumnByName(propertyOrColumnName)
-    if (column === null) {
-      return null
-    }
-    prop = entity.getProperty(column.propertyName)
-    if (prop === null) {
-      return null
-    }
-    return prop.value
-  }
-
-  private collectMorphId(
-    idsByType: Map<string, Array<ValueType>>,
-    seenIdByType: Map<string, Set<string>>,
-    typeValue: string,
-    idValue: ValueType
-  ): void {
-    let ids = idsByType.get(typeValue)
-    if (!ids) {
-      ids = []
-      idsByType.set(typeValue, ids)
-    }
-    let seen = seenIdByType.get(typeValue)
-    if (!seen) {
-      seen = new Set<string>()
-      seenIdByType.set(typeValue, seen)
-    }
-    const idKey = String(idValue)
-    if (!seen.has(idKey)) {
-      seen.add(idKey)
-      ids.push(idValue)
-    }
-  }
-
-  private buildMorphRelationOptions(
-    targetEntityName: string,
-    callback: (qb: QueryBuilder) => void
-  ): RelationQueryOptions {
-    const relationBuilder = new QueryBuilder(targetEntityName)
-    callback(relationBuilder)
-    const options = new RelationQueryOptions()
-    const conditions = relationBuilder.getConditions()
-    for (let i = 0; i < conditions.length; i++) {
-      const source = conditions[i]
-      const target = new WhereCondition()
-      target.column = source.column
-      target.operator = source.operator
-      target.value = source.value
-      target.secondValue = source.secondValue
-      target.logicalOperator = source.logicalOperator
-      options.conditions.push(target)
-    }
-    const orderByColumns = relationBuilder.getOrderByColumns()
-    for (let i = 0; i < orderByColumns.length; i++) {
-      const item = orderByColumns[i]
-      options.orderByColumns.push(new OrderByClause(item.column, item.direction))
-    }
-    options.limitValue = relationBuilder.getLimitValue()
-    options.offsetValue = relationBuilder.getOffsetValue()
-    options.includeDeleted = relationBuilder.isIncludeDeleted()
-    options.onlyDeleted = relationBuilder.isOnlyDeleted()
-    return options
+    return await this.manyToManySupport.loadManyToMany(entities, relation, options)
   }
 
   private async loadMorphTo(
@@ -749,131 +467,7 @@ export class RelationLoader {
     options: RelationQueryOptions | null = null,
     morphWithWhereCallback: ((qb: QueryBuilder) => void) | null = null
   ): Promise<Array<EntityData>> {
-    const sourceMetadata = MetadataStorage.getInstance().getEntityMetadata(this.sourceEntityName)
-    if (sourceMetadata === null) {
-      return entities
-    }
-
-    const entitiesByRef: Map<string, Array<EntityData>> = new Map()
-    const idsByType: Map<string, Array<ValueType>> = new Map()
-    const seenIdByType: Map<string, Set<string>> = new Map()
-
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i]
-      entity.setRelatedSingle(relation.propertyName, null)
-      const typeValue = this.resolveEntityValue(entity, sourceMetadata, relation.typeColumn)
-      const idValue = this.resolveEntityValue(entity, sourceMetadata, relation.idColumn)
-      if (typeValue === null || idValue === null) {
-        continue
-      }
-      const normalizedType = String(typeValue)
-      if (normalizedType.length === 0) {
-        continue
-      }
-      const refKey = `${normalizedType}::${String(idValue)}`
-      let owners = entitiesByRef.get(refKey)
-      if (!owners) {
-        owners = []
-        entitiesByRef.set(refKey, owners)
-      }
-      owners.push(entity)
-      this.collectMorphId(idsByType, seenIdByType, normalizedType, idValue)
-    }
-
-    if (entitiesByRef.size === 0) {
-      return entities
-    }
-
-    let store: relationalStore.RdbStore
-    try {
-      store = this.getStore()
-    } catch (e) {
-      return entities
-    }
-
-    const typeEntries = Array.from(idsByType.entries())
-    for (let i = 0; i < typeEntries.length; i++) {
-      const typeValue = typeEntries[i][0]
-      const ids = typeEntries[i][1]
-      if (ids.length === 0) {
-        continue
-      }
-      const targetEntityName = relation.resolveTargetEntity(typeValue)
-      if (targetEntityName.length === 0) {
-        continue
-      }
-      const targetMetadata = MetadataStorage.getInstance().getEntityMetadata(targetEntityName)
-      if (targetMetadata === null) {
-        continue
-      }
-      const targetPkColumn = targetMetadata.getPrimaryKeyColumn()
-      if (targetPkColumn === null) {
-        continue
-      }
-      const targetMapper = new DataMapper(targetEntityName)
-      let effectiveOptions = options
-      if (morphWithWhereCallback !== null) {
-        effectiveOptions = this.buildMorphRelationOptions(targetEntityName, morphWithWhereCallback)
-      }
-      const batches = splitIntoBatchesUtil(ids, this.resolveInClauseLimit())
-      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-        const batch = batches[batchIndex]
-        const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-        this.applyRelationQueryToPredicates(predicates, targetMetadata, effectiveOptions)
-        const rdbValues: Array<relationalStore.ValueType> = []
-        for (let j = 0; j < batch.length; j++) {
-          rdbValues.push(this.toRdbValue(batch[j]))
-        }
-        try {
-          predicates.in(targetPkColumn.columnName, rdbValues)
-        } catch (e) {
-          this.logRelationWarn(
-            `MORPH_TO 构建查询条件失败: relation=${relation.propertyName}, target=${targetEntityName}, batch=${batchIndex + 1}/${batches.length}`,
-            e
-          )
-          continue
-        }
-
-        let resultSet: relationalStore.ResultSet | null = null
-        try {
-          resultSet = await this.withQueryTimeout(store.query(predicates), 'RELATION_LOAD')
-        } catch (e) {
-          this.logRelationWarn(
-            `MORPH_TO 查询失败: relation=${relation.propertyName}, target=${targetEntityName}, batch=${batchIndex + 1}/${batches.length}`,
-            e
-          )
-          continue
-        }
-        try {
-          while (resultSet !== null && resultSet.goToNextRow()) {
-            const row = this.resultSetToRow(resultSet, targetMetadata)
-            const relatedEntity = targetMapper.fromResultSetRow(row)
-            const pkProp = relatedEntity.getProperty(targetPkColumn.propertyName)
-            if (pkProp === null || pkProp.value === null) {
-              continue
-            }
-            const refKey = `${typeValue}::${String(pkProp.value)}`
-            const owners = entitiesByRef.get(refKey)
-            if (!owners) {
-              continue
-            }
-            for (let ownerIndex = 0; ownerIndex < owners.length; ownerIndex++) {
-              owners[ownerIndex].setRelatedSingle(relation.propertyName, relatedEntity)
-            }
-          }
-        } catch (e) {
-          this.logRelationWarn(
-            `MORPH_TO 结果集遍历失败: relation=${relation.propertyName}, target=${targetEntityName}, batch=${batchIndex + 1}/${batches.length}`,
-            e
-          )
-          throw e instanceof Error ? e : new Error(String(e))
-        } finally {
-          this.closeResultSet(resultSet)
-        }
-      }
-    }
-
-    return entities
+    return await this.morphToSupport.loadMorphTo(entities, relation, options, morphWithWhereCallback)
   }
 
   private applyCollectionQueryOptions(

@@ -29,6 +29,12 @@ import { QueryExecutorSubQueryBatchSupport } from './QueryExecutorSubQueryBatchS
 import { QueryExecutorOrderSupport } from './QueryExecutorOrderSupport'
 import { QueryExecutorResultSetSupport } from './QueryExecutorResultSetSupport'
 import {
+  QueryExecutorSubQueryPreparationSupport,
+  QueryExecutorSubQueryPreparationResult
+} from './QueryExecutorSubQueryPreparationSupport'
+import { QueryExecutorRelationProcessingSupport } from './QueryExecutorRelationProcessingSupport'
+import { QueryExecutorInMemoryCountSupport } from './QueryExecutorInMemoryCountSupport'
+import {
   QueryExecutorSqlSupport,
   QueryExecutorSqlResult,
   QueryExecutorWhereClauseResult
@@ -39,12 +45,8 @@ import { OrmError } from '../errors/OrmError'
 import { sanitizeErrorMessage, sanitizeSqlPreview } from '../errors/ErrorSanitizer'
 import {
   applyLimitOffset as applyLimitOffsetUtil,
-  buildIdSetFromValues,
   filterEntitiesByIdSet,
-  hasOrConditions,
-  normalizeSubQueryIds,
   restoreConditions as restoreConditionsUtil,
-  splitIntoBatches as splitIntoBatchesUtil,
   toIdKey as toIdKeyUtil
 } from './QueryExecutionUtils'
 
@@ -85,10 +87,16 @@ export class QueryExecutor {
   private relationSupport: QueryExecutorRelationSupport
   /** 子查询批处理执行支持 */
   private subQueryBatchSupport: QueryExecutorSubQueryBatchSupport
+  /** 子查询预处理支持 */
+  private subQueryPreparationSupport: QueryExecutorSubQueryPreparationSupport
   /** 查询排序与列补齐支持 */
   private orderSupport: QueryExecutorOrderSupport
   /** 结果集映射支持 */
   private resultSetSupport: QueryExecutorResultSetSupport
+  /** 关联后处理支持 */
+  private relationProcessingSupport: QueryExecutorRelationProcessingSupport
+  /** 内存过滤计数支持 */
+  private inMemoryCountSupport: QueryExecutorInMemoryCountSupport
   /** 查询 SQL 构建支持 */
   private sqlSupport: QueryExecutorSqlSupport
   /** 日志记录器 */
@@ -209,6 +217,33 @@ export class QueryExecutor {
       ): Promise<Array<ValueType>> =>
         await this.subQueryRelationExecutor.executeOneSubQuery(subQuery, store, entityName, sourcePkColumn)
     })
+    this.subQueryPreparationSupport = new QueryExecutorSubQueryPreparationSupport(
+      this.queryBuilder,
+      async (): Promise<Array<ValueType>> => await this.subQueryExecutor.executeSubQueries(),
+      (sourceIds: Array<ValueType>): boolean => this.applySubQueryFilter(sourceIds),
+      (): number => QueryExecutor.subQueryInLimit
+    )
+    this.relationProcessingSupport = new QueryExecutorRelationProcessingSupport(
+      this.queryBuilder,
+      async (entities: Array<EntityData>): Promise<Array<EntityData>> => await this.loadRelations(entities),
+      async (entities: Array<EntityData>): Promise<void> => await this.attachRelationCounts(entities),
+      (entities: Array<EntityData>): void => this.attachLazyRelations(entities)
+    )
+    this.inMemoryCountSupport = new QueryExecutorInMemoryCountSupport(
+      this.queryBuilder,
+      async (operation: string, task: () => Promise<number>): Promise<number> =>
+        await this.runWithClearedLimitOffset(operation, task),
+      (operation: string): relationalStore.RdbPredicates => this.buildPredicatesOrThrow(operation),
+      async (
+        store: relationalStore.RdbStore,
+        predicates: relationalStore.RdbPredicates,
+        selectedColumns: Array<string>,
+        operation: string
+      ): Promise<relationalStore.ResultSet> => await this.queryResultSet(store, predicates, selectedColumns, operation),
+      (resultSet: relationalStore.ResultSet, idColumn: string, idSet: Set<string>): number =>
+        this.countIdsFromResultSet(resultSet, idColumn, idSet),
+      (resultSet: relationalStore.ResultSet | null): void => this.closeResultSet(resultSet)
+    )
   }
 
   static setSubQueryInLimitForTest(limit: number): void {
@@ -1074,37 +1109,20 @@ export class QueryExecutor {
     context: SubQueryExecutionContext,
     adjustLimitOffsetWhenInMemory: boolean
   ): Promise<void> {
-    if (!this.queryBuilder.hasSubQueries()) {
-      return
+    const result: QueryExecutorSubQueryPreparationResult = await this.subQueryPreparationSupport.prepare()
+    context.noMatch = result.noMatch
+    context.inMemoryFilterIds = result.inMemoryFilterIds
+    context.subQueryIdBatches = result.subQueryIdBatches
+    context.subQueryFilterApplied = result.subQueryFilterApplied
+    if (
+      result.requiresClearLimitOffset &&
+      adjustLimitOffsetWhenInMemory &&
+      (context.originalLimit > 0 || context.originalOffset > 0)
+    ) {
+      this.queryBuilder.limit(0)
+      this.queryBuilder.offset(0)
+      context.limitAdjusted = true
     }
-
-    const subQueryIds = normalizeSubQueryIds(await this.subQueryExecutor.executeSubQueries())
-    if (subQueryIds.length === 0) {
-      context.noMatch = true
-      return
-    }
-
-    if (hasOrConditions(this.queryBuilder.getConditions())) {
-      context.inMemoryFilterIds = buildIdSetFromValues(subQueryIds)
-      if (adjustLimitOffsetWhenInMemory && (context.originalLimit > 0 || context.originalOffset > 0)) {
-        this.queryBuilder.limit(0)
-        this.queryBuilder.offset(0)
-        context.limitAdjusted = true
-      }
-      return
-    }
-
-    if (subQueryIds.length > QueryExecutor.subQueryInLimit) {
-      context.subQueryIdBatches = splitIntoBatchesUtil(subQueryIds, QueryExecutor.subQueryInLimit)
-      if (adjustLimitOffsetWhenInMemory && (context.originalLimit > 0 || context.originalOffset > 0)) {
-        this.queryBuilder.limit(0)
-        this.queryBuilder.offset(0)
-        context.limitAdjusted = true
-      }
-      return
-    }
-
-    context.subQueryFilterApplied = this.applySubQueryFilter(subQueryIds)
   }
 
   private finalizeSubQueryContext(context: SubQueryExecutionContext): void {
@@ -1173,17 +1191,7 @@ export class QueryExecutor {
   }
 
   private async applyRelationProcessing(results: Array<EntityData>): Promise<Array<EntityData>> {
-    let processed = results
-    if (this.queryBuilder.hasRelations() && processed.length > 0) {
-      processed = await this.loadRelations(processed)
-    }
-    if (this.queryBuilder.hasRelationCounts() && processed.length > 0) {
-      await this.attachRelationCounts(processed)
-    }
-    if (this.queryBuilder.hasLazyRelations() && processed.length > 0) {
-      this.attachLazyRelations(processed)
-    }
-    return processed
+    return await this.relationProcessingSupport.process(results)
   }
 
   private cloneEntitiesForRelationCount(entities: Array<EntityData>): Array<EntityData> {
@@ -1556,36 +1564,7 @@ export class QueryExecutor {
     store: relationalStore.RdbStore,
     idSet: Set<string>
   ): Promise<number> {
-    const metadata = this.queryBuilder.getEntityMetadata()
-    const pkColumn = metadata.getPrimaryKeyColumn()
-    if (pkColumn === null) {
-      return 0
-    }
-
-    let resultSet: relationalStore.ResultSet | null = null
-
-    try {
-      return await this.runWithClearedLimitOffset('COUNT', async (): Promise<number> => {
-        const predicates = this.buildPredicatesOrThrow('COUNT')
-
-        try {
-          const queriedResultSet = await this.queryResultSet(store, predicates, [pkColumn.columnName], 'COUNT')
-          resultSet = queriedResultSet
-          return this.countIdsFromResultSet(queriedResultSet, pkColumn.columnName, idSet)
-        } catch (e) {
-          const errorMessage = e instanceof Error ? e.message : String(e)
-          throw new ExecutionError('COUNT', `执行统计查询失败: ${errorMessage}`)
-        }
-      })
-    } catch (error) {
-      if (error instanceof ExecutionError) {
-        throw error
-      }
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      throw new ExecutionError('COUNT', errorMessage)
-    } finally {
-      this.closeResultSet(resultSet)
-    }
+    return await this.inMemoryCountSupport.countWithInMemoryFilter(store, idSet)
   }
 
 

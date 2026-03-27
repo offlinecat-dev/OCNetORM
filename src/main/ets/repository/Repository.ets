@@ -21,7 +21,6 @@ import { ColumnType } from '../types/ColumnType'
 import { EntityNotRegisteredError, PrimaryKeyNotDefinedError } from '../errors/MetadataError'
 import { ExecutionError } from '../errors/DatabaseError'
 import { HookExecutionError } from '../errors/HookError'
-import { TransactionRollbackError } from '../errors/TransactionError'
 import { BatchInsertResult } from './BatchInsertResult'
 import { BatchInsertOptions } from './BatchInsertOptions'
 import { TransactionOptions } from './TransactionOptions'
@@ -36,6 +35,7 @@ import { TransactionManager } from './TransactionManager'
 import { BatchOperations } from './BatchOperations'
 import { CrudOperations } from './CrudOperations'
 import { DeleteOperations } from './DeleteOperations'
+import { RepositoryTransactionGuardSupport } from './RepositoryTransactionGuardSupport'
 import { StoreLease } from '../database/pool/StoreLease'
 import {
   countSqlPlaceholders,
@@ -104,6 +104,8 @@ export class Repository {
   private crudOperations: CrudOperations
   /** 删除操作管理器 */
   private deleteOperations: DeleteOperations
+  /** 事务与写入守卫策略 */
+  private transactionGuardSupport: RepositoryTransactionGuardSupport
   /** 当前仓库实例执行上下文（不可变） */
   private executionScope: RepositoryExecutionScope
 
@@ -173,6 +175,11 @@ export class Repository {
       (value) => this.toRdbValue(value),
       () => this,
       (name) => this.createScopedRepository(name)
+    )
+    this.transactionGuardSupport = new RepositoryTransactionGuardSupport(
+      (): boolean => this.inStrictTransaction(),
+      (): boolean => this.shouldBlockWriteUnderPooledActiveTransaction(),
+      (): relationalStore.RdbStore => this.getStore()
     )
   }
 
@@ -761,57 +768,11 @@ export class Repository {
   }
 
   private ensureWritePathAllowed(operation: string): void {
-    if (this.inStrictTransaction()) {
-      return
-    }
-    if (this.shouldBlockWriteUnderPooledActiveTransaction()) {
-      throw new TransactionRollbackError(
-        `检测到连接池模式下存在活动事务，禁止在未绑定事务上下文的 Repository 执行 ${operation} 写入，请复用事务回调提供的 Repository 实例`
-      )
-    }
-    let store: relationalStore.RdbStore
-    try {
-      store = this.getStore()
-    } catch (e) {
-      if (e instanceof Error) {
-        throw e
-      }
-      throw new Error(String(e))
-    }
-    if (!TransactionManager.isConnectionTransactionActive(store)) {
-      return
-    }
-    throw new TransactionRollbackError(
-      `检测到连接级事务已激活，禁止在事务边界外执行 ${operation} 写入，请复用外层事务上下文`
-    )
+    this.transactionGuardSupport.ensureWritePathAllowed(operation)
   }
 
   private ensureNoNestedTransaction(entryName: string): void {
-    if (this.inStrictTransaction()) {
-      throw new TransactionRollbackError(
-        `不支持同一 Repository 嵌套调用 ${entryName}，请复用外层事务或改为 SAVEPOINT 语义`
-      )
-    }
-    if (this.shouldBlockWriteUnderPooledActiveTransaction()) {
-      throw new TransactionRollbackError(
-        `检测到连接池模式下存在活动事务，禁止在未绑定事务上下文的 Repository 启动 ${entryName}，请复用外层事务回调传入的 Repository`
-      )
-    }
-    let store: relationalStore.RdbStore
-    try {
-      store = this.getStore()
-    } catch (e) {
-      if (e instanceof Error) {
-        throw e
-      }
-      throw new Error(String(e))
-    }
-    if (!TransactionManager.isConnectionTransactionActive(store)) {
-      return
-    }
-    throw new TransactionRollbackError(
-      `不支持跨 Repository 嵌套调用 ${entryName}，请复用外层事务上下文`
-    )
+    this.transactionGuardSupport.ensureNoNestedTransaction(entryName)
   }
 
   /**

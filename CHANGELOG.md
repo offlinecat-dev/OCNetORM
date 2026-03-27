@@ -26,6 +26,13 @@
 - `RelationLoader` 的 `ONE_TO_MANY/MANY_TO_ONE` 执行路径拆分到 `RelationLoaderCoreRelationSupport`，主加载器进一步瘦身
 - `RelationLoader` 的 `ONE_TO_ONE(source/target)` 执行路径拆分到 `RelationLoaderOneToOneSupport`，关系加载职责进一步收敛
 - `QueryExecutor` 的结果集行映射逻辑拆分到 `QueryExecutorResultSetSupport`，统一实体/原生/动态行转换路径
+- `RelationLoader` 的 `MANY_TO_MANY` 执行路径拆分到 `RelationLoaderManyToManySupport`，主加载器继续降复杂度
+- `RelationLoader` 的 `MORPH_TO` 执行路径拆分到 `RelationLoaderMorphToSupport`，并收敛 Morph 选项构建逻辑
+- `QueryExecutor` 的子查询预处理流程拆分到 `QueryExecutorSubQueryPreparationSupport`
+- `QueryExecutor` 的关联后处理流程拆分到 `QueryExecutorRelationProcessingSupport`
+- `QueryExecutor` 的内存过滤计数流程拆分到 `QueryExecutorInMemoryCountSupport`
+- `QueryBuilder` 的关联路径解析/关联注册流程拆分到 `QueryBuilderRelationStrategySupport`
+- `Repository` 的事务与写入守卫流程拆分到 `RepositoryTransactionGuardSupport`
 
 ### 测试
 - `entry/src/main/ets/suites/QuerySuite.ets` 新增：

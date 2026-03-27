@@ -16,6 +16,7 @@ import { PaginationParams } from './PaginationParams'
 import { SubQuery, SubQueryCallback } from './SubQuery'
 import { QueryExecutor } from './QueryExecutor'
 import { RelationQueryOptions, RelationCountOption } from './RelationQueryOptions'
+import { QueryBuilderRelationStrategySupport } from './QueryBuilderRelationStrategySupport'
 import { EntityData } from '../mapping/EntityData'
 import {
   normalizeSortDirectionOrThrow,
@@ -125,6 +126,8 @@ export class QueryBuilder {
   private morphRelationQueryCallbacks: Map<string, (qb: QueryBuilder) => void> = new Map()
   /** 关联计数配置 */
   private relationCountOptions: Array<RelationCountOption> = []
+  /** 关联路径与注册策略支持 */
+  private relationStrategySupport: QueryBuilderRelationStrategySupport
 
   /**
    * 构造函数
@@ -138,6 +141,12 @@ export class QueryBuilder {
       throw new EntityNotRegisteredError(entityName)
     }
     this.entityMetadata = metadata
+    this.relationStrategySupport = new QueryBuilderRelationStrategySupport(
+      this.entityName,
+      this.relationNames,
+      this.lazyRelationNames,
+      this.relationCountOptions
+    )
   }
 
   /**
@@ -481,40 +490,15 @@ export class QueryBuilder {
   }
 
   private normalizeRelationPath(relationPath: string): string {
-    return relationPath.trim()
+    return this.relationStrategySupport.normalizeRelationPath(relationPath)
   }
 
   private splitRelationPathOrThrow(relationPath: string): Array<string> {
-    const normalizedPath = this.normalizeRelationPath(relationPath)
-    if (normalizedPath.length === 0) {
-      throw new RelationNotFoundError(this.entityName, relationPath)
-    }
-    const segments = normalizedPath.split('.')
-    for (let i = 0; i < segments.length; i++) {
-      if (segments[i].trim().length === 0) {
-        throw new RelationNotFoundError(this.entityName, relationPath)
-      }
-      segments[i] = segments[i].trim()
-    }
-    return segments
+    return this.relationStrategySupport.splitRelationPathOrThrow(relationPath)
   }
 
   private resolveRelationPathTargetEntity(relationPath: string): string {
-    const segments = this.splitRelationPathOrThrow(relationPath)
-    let currentEntityName = this.entityName
-    const metadataStorage = MetadataStorage.getInstance()
-    for (let i = 0; i < segments.length; i++) {
-      const relation = metadataStorage.getRelation(currentEntityName, segments[i])
-      if (relation === null) {
-        throw new RelationNotFoundError(currentEntityName, segments[i])
-      }
-      if (relation.targetEntity.length === 0) {
-        // 动态目标实体（如 MorphTo）无法在构建阶段静态验证后续路径
-        return ''
-      }
-      currentEntityName = relation.targetEntity
-    }
-    return currentEntityName
+    return this.relationStrategySupport.resolveRelationPathTargetEntity(relationPath)
   }
 
   private createRelationQueryOptions(builder: QueryBuilder): RelationQueryOptions {
@@ -542,20 +526,7 @@ export class QueryBuilder {
    * @throws RelationNotFoundError 如果关联关系未注册
    */
   with(relationName: string): QueryBuilder {
-    const normalizedRelationPath = this.normalizeRelationPath(relationName)
-    this.resolveRelationPathTargetEntity(normalizedRelationPath)
-
-    // 避免重复添加
-    if (!this.relationNames.includes(normalizedRelationPath)) {
-      this.relationNames.push(normalizedRelationPath)
-    }
-
-    // 如果之前设置了延迟加载，移除以避免重复
-    const lazyIndex = this.lazyRelationNames.indexOf(normalizedRelationPath)
-    if (lazyIndex >= 0) {
-      this.lazyRelationNames.splice(lazyIndex, 1)
-    }
-
+    this.relationStrategySupport.registerWith(relationName)
     return this
   }
 
@@ -566,16 +537,7 @@ export class QueryBuilder {
    * @throws RelationNotFoundError 如果关联关系未注册
    */
   withLazy(relationName: string): QueryBuilder {
-    const normalizedRelationPath = this.normalizeRelationPath(relationName)
-    const relation = MetadataStorage.getInstance().getRelation(this.entityName, normalizedRelationPath)
-    if (relation === null) {
-      throw new RelationNotFoundError(this.entityName, normalizedRelationPath)
-    }
-
-    if (!this.lazyRelationNames.includes(normalizedRelationPath) && !this.relationNames.includes(normalizedRelationPath)) {
-      this.lazyRelationNames.push(normalizedRelationPath)
-    }
-
+    this.relationStrategySupport.registerWithLazy(relationName)
     return this
   }
 
@@ -681,19 +643,7 @@ export class QueryBuilder {
    * @returns 当前实例（支持链式调用）
    */
   withCount(relationPath: string, alias: string = ''): QueryBuilder {
-    const normalizedRelationPath = this.normalizeRelationPath(relationPath)
-    this.resolveRelationPathTargetEntity(normalizedRelationPath)
-    const resolvedAlias = alias.trim().length > 0 ? alias.trim() : `${normalizedRelationPath.replace(/\./g, '_')}_count`
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(resolvedAlias)) {
-      throw new InvalidConditionError('withCount', `非法别名: ${resolvedAlias}`)
-    }
-    for (let i = 0; i < this.relationCountOptions.length; i++) {
-      if (this.relationCountOptions[i].relationPath === normalizedRelationPath) {
-        this.relationCountOptions[i].alias = resolvedAlias
-        return this
-      }
-    }
-    this.relationCountOptions.push(new RelationCountOption(normalizedRelationPath, resolvedAlias))
+    this.relationStrategySupport.registerWithCount(relationPath, alias)
     return this
   }
 
@@ -949,26 +899,26 @@ export class QueryBuilder {
    * @returns 当前实例（支持链式调用）
    */
   reset(): QueryBuilder {
-    this.conditions = []
-    this.orderByColumns = []
+    this.conditions.splice(0, this.conditions.length)
+    this.orderByColumns.splice(0, this.orderByColumns.length)
     this.limitValue = 0
     this.offsetValue = 0
-    this.selectedColumns = []
-    this.relationNames = []
-    this.lazyRelationNames = []
+    this.selectedColumns.splice(0, this.selectedColumns.length)
+    this.relationNames.splice(0, this.relationNames.length)
+    this.lazyRelationNames.splice(0, this.lazyRelationNames.length)
     this.includeDeleted = false
     this.onlyDeletedFlag = false
     this.pageNumber = 0
     this.pageSizeValue = 0
-    this.subQueries = []
+    this.subQueries.splice(0, this.subQueries.length)
     this.queryTimeoutMs = 0
-    this.groupByColumns = []
+    this.groupByColumns.splice(0, this.groupByColumns.length)
     this.havingClause = ''
-    this.havingArgs = []
-    this.selectRawExpressions = []
+    this.havingArgs.splice(0, this.havingArgs.length)
+    this.selectRawExpressions.splice(0, this.selectRawExpressions.length)
     this.relationQueryOptions.clear()
     this.morphRelationQueryCallbacks.clear()
-    this.relationCountOptions = []
+    this.relationCountOptions.splice(0, this.relationCountOptions.length)
     return this
   }
 
@@ -1147,6 +1097,12 @@ export class QueryBuilder {
       const item = this.relationCountOptions[i]
       cloned.relationCountOptions.push(new RelationCountOption(item.relationPath, item.alias))
     }
+    cloned.relationStrategySupport = new QueryBuilderRelationStrategySupport(
+      cloned.entityName,
+      cloned.relationNames,
+      cloned.lazyRelationNames,
+      cloned.relationCountOptions
+    )
     return cloned
   }
 
