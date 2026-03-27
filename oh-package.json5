@@ -1,6 +1,6 @@
 {
   "name": "ocorm",
-  "version": "3.0.0",
+  "version": "3.0.2",
   "description": "为 HarmonyOS（Next/OpenHarmony）设计的轻量级 SQLite ORM 框架。基于 @ohos.data.relationalStore，采用 Data Mapper 与 Repository 模式。",
   "main": "Index.ets",
   "author": "offlinecat-dev",

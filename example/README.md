@@ -1,147 +1,96 @@
-# ocorm 使用示例
+# ocorm 示例说明
 
-本目录包含 ocorm 框架的完整使用示例，帮助开发者快速上手。
+本目录保存 `ocorm` 模块随仓库维护的源码示例，重点是“最小可读的能力演示”，不是完整应用工程。
 
-## 目录结构
+如果你要看可挂到页面里的运行示例，请同时看：
 
-```
+- [`../../entry/src/main/ets/example/README.md`](../../entry/src/main/ets/example/README.md)
+
+## 1. 目录结构
+
+```text
 example/
-├── entity/                    # 实体定义示例
-│   └── UserEntity.ets        # 用户实体类
-├── repository/               # 仓库操作示例
-│   └── UserRepository.ets    # 用户仓库类
-├── database/                 # 数据库初始化示例
-│   └── DatabaseInit.ets      # 数据库初始化器
-├── pages/                    # ArkUI 页面示例
-│   └── UsageExamplePage.ets  # 图形界面示例页面
-├── UsageExample.ets          # 完整使用示例（函数版）
-└── README.md                 # 本文档
+├── database/
+│   └── DatabaseInit.ets
+├── entity/
+│   └── UserEntity.ets
+├── pages/
+│   └── UsageExamplePage.ets
+├── repository/
+│   └── UserRepository.ets
+├── UsageExample.ets
+└── README.md
 ```
 
-## 快速开始
+## 2. 各文件负责什么
 
-### 1. 安装依赖
+| 文件 | 作用 |
+| --- | --- |
+| `entity/UserEntity.ets` | 演示实体定义与字段映射 |
+| `database/DatabaseInit.ets` | 演示数据库初始化与 `OCORMInit` 使用 |
+| `repository/UserRepository.ets` | 演示仓储层封装 |
+| `UsageExample.ets` | 演示组合式用法与常见调用片段 |
+| `pages/UsageExamplePage.ets` | 演示 ArkUI 页面如何接入示例逻辑 |
 
-```bash
-ohpm install ocorm
-```
+## 3. 推荐阅读顺序
 
-### 2. 定义实体
+1. `entity/UserEntity.ets`
+2. `database/DatabaseInit.ets`
+3. `repository/UserRepository.ets`
+4. `UsageExample.ets`
+5. `pages/UsageExamplePage.ets`
 
-```typescript
-import { defineEntity, ColumnType, EntitySchema } from 'ocorm'
+## 4. 最小示例
 
-// 定义实体类
-class UserEntity {
-  id: number = 0
-  username: string = ''
-  email: string = ''
-}
+### 4.1 实体与初始化
 
-// 定义 Schema
-const UserSchema: EntitySchema = {
+```ts
+import { ColumnType, DatabaseConfig, OCORMInit, defineEntity } from 'ocorm'
+
+defineEntity('User', {
   tableName: 'users',
   columns: [
     { property: 'id', primaryKey: true, autoIncrement: true },
-    { property: 'username', type: ColumnType.TEXT, nullable: false },
-    { property: 'email', type: ColumnType.TEXT, unique: true }
+    { property: 'userName', name: 'user_name', type: ColumnType.TEXT }
   ]
-}
+})
 
-// 注册实体
-defineEntity('UserEntity', UserSchema)
+await OCORMInit(context, {
+  config: new DatabaseConfig('example.db'),
+  autoCreateTables: true
+})
 ```
 
-### 3. 初始化数据库
+### 4.2 保存与查询
 
-在 EntryAbility 的 onCreate 中初始化：
+```ts
+import { ConditionOperator, EntityData, EntityDataInput, QueryExecutor, Repository } from 'ocorm'
 
-```typescript
-import { OCORMInit, DatabaseConfig } from 'ocorm'
-import { relationalStore } from '@kit.ArkData'
+const repo = new Repository('User')
+const input = EntityDataInput.create()
+input.set('userName', 'demo-user')
 
-async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam) {
-  // 先注册实体
-  defineEntity('UserEntity', UserSchema)
-  
-  // 初始化数据库（3.0 起 encrypt 默认为 true）
-  const config = new DatabaseConfig('app.db', relationalStore.SecurityLevel.S1)
-  await OCORMInit(this.context, {
-    config,
-    autoCreateTables: true
-  })
-}
+await repo.save(EntityData.from('User', input))
+
+const qb = repo.createQueryBuilder()
+  .where('userName', ConditionOperator.EQUAL, 'demo-user')
+
+const rows = await new QueryExecutor(qb).get()
+console.info(rows.length)
 ```
 
-### 4. 使用仓库进行 CRUD 操作
+## 5. 使用边界
 
-```typescript
-import { Repository, EntityData } from 'ocorm'
+- 这里的示例优先展示 API，不覆盖完整应用生命周期。
+- 需要页面联调、Ability 生命周期接入时，请以 `entry/src/main/ets/example/` 为准。
+- 需要系统性说明时，不要继续翻示例代码，直接进入开发者文档。
 
-const repository = new Repository('UserEntity')
+## 6. 配套文档
 
-// 创建
-const userData = new EntityData('UserEntity')
-userData.addProperty('username', 'zhangsan', 'string')
-userData.addProperty('email', 'zhangsan@example.com', 'string')
-const saveResult = await repository.save(userData)
+- [`../README.md`](../README.md)
+- [`../docs/开发者文档/README.md`](../docs/开发者文档/README.md)
+- [`../docs/开发者文档/18-API速查/README.md`](../docs/开发者文档/18-API速查/README.md)
 
-// 查询
-const user = await repository.findById(1)
-const allUsers = await repository.findAll()
+## 7. 变更记录
 
-// 更新
-if (user !== null) {
-  user.setPropertyValue('username', 'lisi')
-  await repository.save(user)
-}
-
-// 删除
-await repository.removeById(1)
-```
-
-### 5. 使用查询构建器
-
-```typescript
-import { QueryExecutor, ConditionOperator } from 'ocorm'
-
-const repository = new Repository('UserEntity')
-
-// 条件查询
-const queryBuilder = repository.createQueryBuilder()
-  .where('username', ConditionOperator.EQUAL, 'zhangsan')
-  .orderBy('createdAt', 'DESC')
-  .limit(10)
-
-const executor = new QueryExecutor(queryBuilder)
-const results = await executor.get()
-```
-
-## 更多示例
-
-- **实体定义**: 查看 `entity/UserEntity.ets`
-- **仓库操作**: 查看 `repository/UserRepository.ets`
-- **数据库初始化**: 查看 `database/DatabaseInit.ets`
-- **完整示例**: 查看 `UsageExample.ets`
-
-## 功能特性
-
-- ✅ 实体定义与注册
-- ✅ 自动建表
-- ✅ CRUD 操作
-- ✅ 链式查询构建器
-- ✅ 分页查询
-- ✅ 软删除
-- ✅ 事务支持
-- ✅ 查询缓存
-- ✅ 日志记录
-
-## 3.0 使用提示
-
-- `DatabaseConfig.encrypt` 默认已开启，示例保持加密默认行为
-- `TransactionOptions.serializable()` 在 3.0 中为 fail-fast（创建时直接抛错）
-- 事务隔离级别建议优先使用 `READ_COMMITTED`
-
-## 文档
-
-完整文档请访问: https://github.com/offlinecat-dev/OCNetORM
+- 2026-03-28：重写示例说明，按当前目录结构与 3.0.2 API 对齐。

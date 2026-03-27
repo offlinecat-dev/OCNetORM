@@ -5,7 +5,7 @@
 ### 修复
 - `rawQuery` 改为默认强制参数化：无占位符或参数数量不匹配时直接拒绝执行（fail-fast）
 - `release` 构建配置启用混淆（`build-profile.json5`）
-- `BuildProfile` 默认环境标识由 `debug/true` 调整为 `release/false`，降低发布链路误判风险
+- 对齐 `BuildProfile` 版本常量（`HAR_VERSION=3.0.2`）；运行模式以 `build-profile.json5` 的构建配置为准
 - `ohosTest` 设备矩阵补齐 `phone/2in1`，收敛设备覆盖口径
 - 清理 HAR 核心目录中的 UI 组件残留（移除 `MainPage.ets`）
 - `Repository` 原生 SQL 校验与守卫分类逻辑拆分至独立模块 `rawsql/RawSqlGuards`
