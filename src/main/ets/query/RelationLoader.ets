@@ -17,6 +17,8 @@ import { DatabaseManager } from '../database/DatabaseManager'
 import { ValueType } from '../types/ValueTypes'
 import { RelationNotFoundError } from '../errors/RelationError'
 import { ExecutionError } from '../errors/DatabaseError'
+import { OrmError } from '../errors/OrmError'
+import { sanitizeErrorMessage } from '../errors/ErrorSanitizer'
 import { ColumnType } from '../types/ColumnType'
 import { RelationLoadResult, ParallelRelationLoadResult } from './RelationLoadResult'
 import { Logger } from '../logging/Logger'
@@ -26,11 +28,14 @@ import { OneToOneRelationLoadStrategy } from './OneToOneRelationLoadStrategy'
 import { OneToManyRelationLoadStrategy } from './OneToManyRelationLoadStrategy'
 import { ManyToOneRelationLoadStrategy } from './ManyToOneRelationLoadStrategy'
 import { ManyToManyRelationLoadStrategy } from './ManyToManyRelationLoadStrategy'
-import { ConditionOperator } from '../types/ConditionOperator'
 import { OrderByClause } from '../types/ValueTypes'
-import { LogicalOperator, WhereCondition } from './WhereCondition'
+import { WhereCondition } from './WhereCondition'
 import { RelationQueryOptions } from './RelationQueryOptions'
 import { QueryBuilder } from './QueryBuilder'
+import { splitIntoBatches as splitIntoBatchesUtil } from './QueryExecutionUtils'
+import { applyRelationQueryToPredicates as applyRelationQueryToPredicatesUtil } from './RelationPredicateUtils'
+
+type AsyncFailure = Error | object | string | number | boolean | null | undefined
 
 /**
  * 关联数据加载器类
@@ -41,6 +46,8 @@ export class RelationLoader {
   private sourceEntityName: string
   /** 关系加载策略映射 */
   private relationStrategies: Map<RelationType, RelationLoadStrategy>
+  /** 可选的 Store 提供者（用于复用外部租约连接） */
+  private storeProvider: (() => relationalStore.RdbStore) | null
 
   /** IN 条件参数数量限制默认值 */
   private static readonly DEFAULT_IN_CLAUSE_LIMIT: number = 500
@@ -51,9 +58,10 @@ export class RelationLoader {
    * 构造函数
    * @param sourceEntityName 源实体名称
    */
-  constructor(sourceEntityName: string) {
+  constructor(sourceEntityName: string, storeProvider?: () => relationalStore.RdbStore) {
     this.sourceEntityName = sourceEntityName
     this.relationStrategies = new Map<RelationType, RelationLoadStrategy>()
+    this.storeProvider = storeProvider ? storeProvider : null
     this.relationStrategies.set(
       RelationType.ONE_TO_ONE,
       new OneToOneRelationLoadStrategy(async (
@@ -103,22 +111,26 @@ export class RelationLoader {
     return Math.floor(limit)
   }
 
-  /**
-   * 将数组分批处理
-   * @param values 原始数组
-   * @param batchSize 每批大小
-   * @returns 分批后的二维数组
-   */
-  private splitIntoBatches<T>(values: Array<T>, batchSize: number): Array<Array<T>> {
-    const batches: Array<Array<T>> = []
-    for (let i = 0; i < values.length; i += batchSize) {
-      const batch: Array<T> = []
-      for (let j = i; j < Math.min(i + batchSize, values.length); j++) {
-        batch.push(values[j])
-      }
-      batches.push(batch)
+  private async withQueryTimeout(
+    task: Promise<relationalStore.ResultSet>,
+    operation: string
+  ): Promise<relationalStore.ResultSet> {
+    const timeoutMs = DatabaseManager.getInstance().getQueryTimeoutMs()
+    if (timeoutMs <= 0) {
+      return await task
     }
-    return batches
+    return await new Promise<relationalStore.ResultSet>((resolve, reject) => {
+      const timerId = setTimeout(() => {
+        reject(new Error(`${operation} 查询超时 (${timeoutMs}ms)`))
+      }, timeoutMs)
+      task.then((result) => {
+        clearTimeout(timerId)
+        resolve(result)
+      }).catch((error: AsyncFailure) => {
+        clearTimeout(timerId)
+        reject(error)
+      })
+    })
   }
 
   private resolveInClauseLimit(): number {
@@ -135,6 +147,17 @@ export class RelationLoader {
    * @throws ExecutionError 如果数据库未初始化
    */
   private getStore(): relationalStore.RdbStore {
+    if (this.storeProvider !== null) {
+      try {
+        return this.storeProvider()
+      } catch (e) {
+        if (e instanceof ExecutionError) {
+          throw e
+        }
+        const errorMessage = e instanceof Error ? e.message : String(e)
+        throw new ExecutionError('DATABASE', errorMessage)
+      }
+    }
     try {
       return DatabaseManager.getInstance().getStore()
     } catch (e) {
@@ -152,6 +175,24 @@ export class RelationLoader {
     } catch (e) {
       // ignore
     }
+  }
+
+  private resolveErrorMessage(error: AsyncFailure): string {
+    if (error instanceof OrmError) {
+      return sanitizeErrorMessage(error.getFullMessage())
+    }
+    if (error instanceof Error) {
+      return sanitizeErrorMessage(error.message)
+    }
+    return sanitizeErrorMessage(String(error))
+  }
+
+  private logRelationWarn(context: string, error: AsyncFailure): void {
+    Logger.getInstance().logWarn(`${context}: ${this.resolveErrorMessage(error)}`)
+  }
+
+  private logRelationWarnMessage(context: string, message: string): void {
+    Logger.getInstance().logWarn(`${context}: ${sanitizeErrorMessage(message)}`)
   }
 
   private getRelationStrategy(relationType: RelationType): RelationLoadStrategy | null {
@@ -235,8 +276,7 @@ export class RelationLoader {
         logger.logDebug(`并行关联加载完成: 1 个关联, 耗时 ${duration}ms`)
         return result
       } catch (e) {
-        const error = e instanceof Error ? e : new Error(String(e))
-        logger.logInfo(`关联 '${relationNames[0]}' 加载失败: ${error.message}`)
+        this.logRelationWarn(`关联 '${relationNames[0]}' 加载失败`, e)
         return entities
       }
     }
@@ -267,7 +307,7 @@ export class RelationLoader {
       } else {
         failureCount++
         // 记录失败的关联
-        logger.logInfo(`关联 '${results[i].relationName}' 加载失败: ${results[i].errorMessage}`)
+        this.logRelationWarnMessage(`关联 '${results[i].relationName}' 加载失败`, results[i].errorMessage)
       }
     }
 
@@ -321,7 +361,7 @@ export class RelationLoader {
       return RelationLoadResult.createSuccess(relationName, loadedCount, duration)
     } catch (e) {
       const duration = Date.now() - startTime
-      const errorMessage = e instanceof Error ? e.message : String(e)
+      const errorMessage = this.resolveErrorMessage(e)
       return RelationLoadResult.createFailure(relationName, errorMessage, duration)
     }
   }
@@ -395,7 +435,7 @@ export class RelationLoader {
     const relatedByFk: Map<string, Array<EntityData>> = new Map()
 
     // 分批处理 IN 条件，避免超出 SQLite 参数限制
-    const batches = this.splitIntoBatches(pkValues, this.resolveInClauseLimit())
+    const batches = splitIntoBatchesUtil(pkValues, this.resolveInClauseLimit())
     const inverseKeyColumn = targetMetadata.getColumnByProperty(relation.inverseKey)
     const inverseColumnName = inverseKeyColumn !== null
       ? inverseKeyColumn.columnName
@@ -414,15 +454,21 @@ export class RelationLoader {
       try {
         predicates.in(inverseColumnName, rdbValues)
       } catch (e) {
-        // 构建条件失败，继续下一批
+        this.logRelationWarn(
+          `ONE_TO_MANY 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${batches.length}`,
+          e
+        )
         continue
       }
 
       let resultSet: relationalStore.ResultSet | null = null
       try {
-        resultSet = await store.query(predicates)
+        resultSet = await this.withQueryTimeout(store.query(predicates), 'RELATION_LOAD')
       } catch (e) {
-        // 查询失败，继续下一批
+        this.logRelationWarn(
+          `ONE_TO_MANY 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${batches.length}`,
+          e
+        )
         continue
       }
 
@@ -459,7 +505,10 @@ export class RelationLoader {
           }
         }
       } catch (e) {
-        // 遍历结果集失败，忽略
+        this.logRelationWarn(
+          `ONE_TO_MANY 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${batches.length}`,
+          e
+        )
       } finally {
         this.closeResultSet(resultSet)
       }
@@ -563,7 +612,7 @@ export class RelationLoader {
     const relatedByPk: Map<string, EntityData> = new Map()
 
     // 分批处理 IN 条件，避免超出 SQLite 参数限制
-    const fkBatches = this.splitIntoBatches(fkValues, this.resolveInClauseLimit())
+    const fkBatches = splitIntoBatchesUtil(fkValues, this.resolveInClauseLimit())
 
     for (let batchIndex = 0; batchIndex < fkBatches.length; batchIndex++) {
       const batch = fkBatches[batchIndex]
@@ -578,15 +627,21 @@ export class RelationLoader {
       try {
         predicates.in(targetPkColumn.columnName, rdbValues)
       } catch (e) {
-        // 构建条件失败，继续下一批
+        this.logRelationWarn(
+          `MANY_TO_ONE 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
+          e
+        )
         continue
       }
 
       let resultSet: relationalStore.ResultSet | null = null
       try {
-        resultSet = await store.query(predicates)
+        resultSet = await this.withQueryTimeout(store.query(predicates), 'RELATION_LOAD')
       } catch (e) {
-        // 查询失败，继续下一批
+        this.logRelationWarn(
+          `MANY_TO_ONE 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
+          e
+        )
         continue
       }
 
@@ -603,7 +658,10 @@ export class RelationLoader {
           }
         }
       } catch (e) {
-        // 遍历结果集失败，忽略
+        this.logRelationWarn(
+          `MANY_TO_ONE 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
+          e
+        )
       } finally {
         this.closeResultSet(resultSet)
       }
@@ -735,56 +793,73 @@ export class RelationLoader {
       return entities
     }
 
-    const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-    this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
-
-    // 构建 IN 条件
-    const rdbValues: Array<relationalStore.ValueType> = []
-    for (let i = 0; i < fkValues.length; i++) {
-      rdbValues.push(this.toRdbValue(fkValues[i]))
-    }
-    try {
-      predicates.in(targetPkColumn.columnName, rdbValues)
-    } catch (e) {
-      // 构建条件失败，设置所有关联为 null
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedSingle(relation.propertyName, null)
-      }
-      return entities
-    }
-
-    let resultSet: relationalStore.ResultSet | null = null
-    try {
-      resultSet = await store.query(predicates)
-    } catch (e) {
-      // 查询失败，设置所有关联为 null
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedSingle(relation.propertyName, null)
-      }
-      return entities
-    }
-
     const targetMapper = new DataMapper(relation.targetEntity)
 
     // 将关联数据按主键值索引
     const relatedByPk: Map<string, EntityData> = new Map()
 
-    try {
-      while (resultSet !== null && resultSet.goToNextRow()) {
-        const row = this.resultSetToRow(resultSet, targetMetadata)
-        const relatedEntity = targetMapper.fromResultSetRow(row)
+    // 分批处理 IN 条件，避免超出 SQLite 参数限制
+    const fkBatches = splitIntoBatchesUtil(fkValues, this.resolveInClauseLimit())
 
-        // 获取主键值
-        const pkProp = relatedEntity.getProperty(targetPkColumn.propertyName)
-        if (pkProp !== null && pkProp.value !== null) {
-          const pkKey = String(pkProp.value)
-          relatedByPk.set(pkKey, relatedEntity)
-        }
+    for (let batchIndex = 0; batchIndex < fkBatches.length; batchIndex++) {
+      const batch = fkBatches[batchIndex]
+      const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
+      this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
+
+      // 构建 IN 条件
+      const rdbValues: Array<relationalStore.ValueType> = []
+      for (let i = 0; i < batch.length; i++) {
+        rdbValues.push(this.toRdbValue(batch[i]))
       }
-    } catch (e) {
-      // 遍历结果集失败，忽略
-    } finally {
-      this.closeResultSet(resultSet)
+      try {
+        predicates.in(targetPkColumn.columnName, rdbValues)
+      } catch (e) {
+        this.logRelationWarn(
+          `ONE_TO_ONE(source) 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
+          e
+        )
+        // 构建条件失败，设置所有关联为 null
+        for (let i = 0; i < entities.length; i++) {
+          entities[i].setRelatedSingle(relation.propertyName, null)
+        }
+        return entities
+      }
+
+      let resultSet: relationalStore.ResultSet | null = null
+      try {
+        resultSet = await this.withQueryTimeout(store.query(predicates), 'RELATION_LOAD')
+      } catch (e) {
+        this.logRelationWarn(
+          `ONE_TO_ONE(source) 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
+          e
+        )
+        // 查询失败，设置所有关联为 null
+        for (let i = 0; i < entities.length; i++) {
+          entities[i].setRelatedSingle(relation.propertyName, null)
+        }
+        return entities
+      }
+
+      try {
+        while (resultSet !== null && resultSet.goToNextRow()) {
+          const row = this.resultSetToRow(resultSet, targetMetadata)
+          const relatedEntity = targetMapper.fromResultSetRow(row)
+
+          // 获取主键值
+          const pkProp = relatedEntity.getProperty(targetPkColumn.propertyName)
+          if (pkProp !== null && pkProp.value !== null) {
+            const pkKey = String(pkProp.value)
+            relatedByPk.set(pkKey, relatedEntity)
+          }
+        }
+      } catch (e) {
+        this.logRelationWarn(
+          `ONE_TO_ONE(source) 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
+          e
+        )
+      } finally {
+        this.closeResultSet(resultSet)
+      }
     }
 
     // 将关联数据设置到主实体
@@ -881,75 +956,93 @@ export class RelationLoader {
       return entities
     }
 
-    const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-    this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
     const inverseKeyColumn = targetMetadata.getColumnByProperty(relation.inverseKey)
     const inverseColumnName = inverseKeyColumn !== null
       ? inverseKeyColumn.columnName
       : relation.inverseKey
-
-    // 构建 IN 条件：目标表的外键列 IN 源实体的主键值
-    const rdbValues: Array<relationalStore.ValueType> = []
-    for (let i = 0; i < pkValues.length; i++) {
-      rdbValues.push(this.toRdbValue(pkValues[i]))
-    }
-    try {
-      predicates.in(inverseColumnName, rdbValues)
-    } catch (e) {
-      // 构建条件失败，设置所有关联为 null
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedSingle(relation.propertyName, null)
-      }
-      return entities
-    }
-
-    let resultSet: relationalStore.ResultSet | null = null
-    try {
-      resultSet = await store.query(predicates)
-    } catch (e) {
-      // 查询失败，设置所有关联为 null
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedSingle(relation.propertyName, null)
-      }
-      return entities
-    }
 
     const targetMapper = new DataMapper(relation.targetEntity)
 
     // 将关联数据按外键值索引
     const relatedByFk: Map<string, EntityData> = new Map()
 
-    try {
-      while (resultSet !== null && resultSet.goToNextRow()) {
-        const row = this.resultSetToRow(resultSet, targetMetadata)
-        const relatedEntity = targetMapper.fromResultSetRow(row)
+    // 分批处理 IN 条件，避免超出 SQLite 参数限制
+    const pkBatches = splitIntoBatchesUtil(pkValues, this.resolveInClauseLimit())
 
-        // 获取外键值
-        let fkValue: ValueType = null
-        const fkProp = relatedEntity.getProperty(relation.inverseKey)
-        if (fkProp !== null) {
-          fkValue = fkProp.value
-        } else {
-          // 尝试通过列名获取
-          const fkColumn = targetMetadata.getColumnByName(relation.inverseKey)
-          if (fkColumn !== null) {
-            const fkPropByColumn = relatedEntity.getProperty(fkColumn.propertyName)
-            if (fkPropByColumn !== null) {
-              fkValue = fkPropByColumn.value
+    for (let batchIndex = 0; batchIndex < pkBatches.length; batchIndex++) {
+      const batch = pkBatches[batchIndex]
+      const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
+      this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
+
+      // 构建 IN 条件：目标表的外键列 IN 源实体的主键值
+      const rdbValues: Array<relationalStore.ValueType> = []
+      for (let i = 0; i < batch.length; i++) {
+        rdbValues.push(this.toRdbValue(batch[i]))
+      }
+      try {
+        predicates.in(inverseColumnName, rdbValues)
+      } catch (e) {
+        this.logRelationWarn(
+          `ONE_TO_ONE(target) 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
+          e
+        )
+        // 构建条件失败，设置所有关联为 null
+        for (let i = 0; i < entities.length; i++) {
+          entities[i].setRelatedSingle(relation.propertyName, null)
+        }
+        return entities
+      }
+
+      let resultSet: relationalStore.ResultSet | null = null
+      try {
+        resultSet = await this.withQueryTimeout(store.query(predicates), 'RELATION_LOAD')
+      } catch (e) {
+        this.logRelationWarn(
+          `ONE_TO_ONE(target) 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
+          e
+        )
+        // 查询失败，设置所有关联为 null
+        for (let i = 0; i < entities.length; i++) {
+          entities[i].setRelatedSingle(relation.propertyName, null)
+        }
+        return entities
+      }
+
+      try {
+        while (resultSet !== null && resultSet.goToNextRow()) {
+          const row = this.resultSetToRow(resultSet, targetMetadata)
+          const relatedEntity = targetMapper.fromResultSetRow(row)
+
+          // 获取外键值
+          let fkValue: ValueType = null
+          const fkProp = relatedEntity.getProperty(relation.inverseKey)
+          if (fkProp !== null) {
+            fkValue = fkProp.value
+          } else {
+            // 尝试通过列名获取
+            const fkColumn = targetMetadata.getColumnByName(relation.inverseKey)
+            if (fkColumn !== null) {
+              const fkPropByColumn = relatedEntity.getProperty(fkColumn.propertyName)
+              if (fkPropByColumn !== null) {
+                fkValue = fkPropByColumn.value
+              }
             }
           }
-        }
 
-        if (fkValue !== null) {
-          const fkKey = String(fkValue)
-          // ONE_TO_ONE 关系，每个外键值只对应一个目标实体
-          relatedByFk.set(fkKey, relatedEntity)
+          if (fkValue !== null) {
+            const fkKey = String(fkValue)
+            // ONE_TO_ONE 关系，每个外键值只对应一个目标实体
+            relatedByFk.set(fkKey, relatedEntity)
+          }
         }
+      } catch (e) {
+        this.logRelationWarn(
+          `ONE_TO_ONE(target) 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
+          e
+        )
+      } finally {
+        this.closeResultSet(resultSet)
       }
-    } catch (e) {
-      // 遍历结果集失败，忽略
-    } finally {
-      this.closeResultSet(resultSet)
     }
 
     // 将关联数据设置到主实体
@@ -1053,7 +1146,7 @@ export class RelationLoader {
     const targetIdSet: Set<string> = new Set()
 
     // 分批查询中间表
-    const pkBatches = this.splitIntoBatches(pkValues, this.resolveInClauseLimit())
+    const pkBatches = splitIntoBatchesUtil(pkValues, this.resolveInClauseLimit())
 
     for (let batchIndex = 0; batchIndex < pkBatches.length; batchIndex++) {
       const batch = pkBatches[batchIndex]
@@ -1067,15 +1160,21 @@ export class RelationLoader {
       try {
         joinPredicates.in(relation.joinSourceKey, rdbPkValues)
       } catch (e) {
-        // 构建条件失败，继续下一批
+        this.logRelationWarn(
+          `MANY_TO_MANY(中间表) 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
+          e
+        )
         continue
       }
 
       let joinResultSet: relationalStore.ResultSet | null = null
       try {
-        joinResultSet = await store.query(joinPredicates)
+        joinResultSet = await this.withQueryTimeout(store.query(joinPredicates), 'RELATION_LOAD')
       } catch (e) {
-        // 查询失败，继续下一批
+        this.logRelationWarn(
+          `MANY_TO_MANY(中间表) 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
+          e
+        )
         continue
       }
 
@@ -1123,7 +1222,10 @@ export class RelationLoader {
           }
         }
       } catch (e) {
-        // 遍历结果集失败，忽略
+        this.logRelationWarn(
+          `MANY_TO_MANY(中间表) 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
+          e
+        )
       } finally {
         this.closeResultSet(joinResultSet)
       }
@@ -1146,7 +1248,7 @@ export class RelationLoader {
     const targetEntitiesByPk: Map<string, EntityData> = new Map()
 
     // 分批查询目标表
-    const targetIdBatches = this.splitIntoBatches(allTargetIds, this.resolveInClauseLimit())
+    const targetIdBatches = splitIntoBatchesUtil(allTargetIds, this.resolveInClauseLimit())
 
     for (let batchIndex = 0; batchIndex < targetIdBatches.length; batchIndex++) {
       const batch = targetIdBatches[batchIndex]
@@ -1161,15 +1263,21 @@ export class RelationLoader {
       try {
         targetPredicates.in(targetPkColumn.columnName, rdbTargetIds)
       } catch (e) {
-        // 构建条件失败，继续下一批
+        this.logRelationWarn(
+          `MANY_TO_MANY(目标表) 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${targetIdBatches.length}`,
+          e
+        )
         continue
       }
 
       let targetResultSet: relationalStore.ResultSet | null = null
       try {
-        targetResultSet = await store.query(targetPredicates)
+        targetResultSet = await this.withQueryTimeout(store.query(targetPredicates), 'RELATION_LOAD')
       } catch (e) {
-        // 查询失败，继续下一批
+        this.logRelationWarn(
+          `MANY_TO_MANY(目标表) 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${targetIdBatches.length}`,
+          e
+        )
         continue
       }
 
@@ -1186,7 +1294,10 @@ export class RelationLoader {
           }
         }
       } catch (e) {
-        // 遍历结果集失败，忽略
+        this.logRelationWarn(
+          `MANY_TO_MANY(目标表) 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${targetIdBatches.length}`,
+          e
+        )
       } finally {
         this.closeResultSet(targetResultSet)
       }
@@ -1367,7 +1478,7 @@ export class RelationLoader {
       if (morphWithWhereCallback !== null) {
         effectiveOptions = this.buildMorphRelationOptions(targetEntityName, morphWithWhereCallback)
       }
-      const batches = this.splitIntoBatches(ids, this.resolveInClauseLimit())
+      const batches = splitIntoBatchesUtil(ids, this.resolveInClauseLimit())
       for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
         const batch = batches[batchIndex]
         const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
@@ -1379,13 +1490,21 @@ export class RelationLoader {
         try {
           predicates.in(targetPkColumn.columnName, rdbValues)
         } catch (e) {
+          this.logRelationWarn(
+            `MORPH_TO 构建查询条件失败: relation=${relation.propertyName}, target=${targetEntityName}, batch=${batchIndex + 1}/${batches.length}`,
+            e
+          )
           continue
         }
 
         let resultSet: relationalStore.ResultSet | null = null
         try {
-          resultSet = await store.query(predicates)
+          resultSet = await this.withQueryTimeout(store.query(predicates), 'RELATION_LOAD')
         } catch (e) {
+          this.logRelationWarn(
+            `MORPH_TO 查询失败: relation=${relation.propertyName}, target=${targetEntityName}, batch=${batchIndex + 1}/${batches.length}`,
+            e
+          )
           continue
         }
         try {
@@ -1405,6 +1524,12 @@ export class RelationLoader {
               owners[ownerIndex].setRelatedSingle(relation.propertyName, relatedEntity)
             }
           }
+        } catch (e) {
+          this.logRelationWarn(
+            `MORPH_TO 结果集遍历失败: relation=${relation.propertyName}, target=${targetEntityName}, batch=${batchIndex + 1}/${batches.length}`,
+            e
+          )
+          throw e instanceof Error ? e : new Error(String(e))
         } finally {
           this.closeResultSet(resultSet)
         }
@@ -1439,226 +1564,12 @@ export class RelationLoader {
     metadata: EntityMetadata,
     options: RelationQueryOptions | null
   ): void {
-    const conditions = this.buildEffectiveRelationConditions(metadata, options)
-    if (conditions.length > 0) {
-      this.applyWhereConditionsToPredicates(predicates, conditions)
-    }
-    if (options !== null) {
-      this.applyOrderByToPredicates(predicates, options)
-    }
-  }
-
-  private buildEffectiveRelationConditions(
-    metadata: EntityMetadata,
-    options: RelationQueryOptions | null
-  ): Array<WhereCondition> {
-    const relationConditions = options !== null
-      ? this.cloneWhereConditions(options.conditions)
-      : []
-    if (!metadata.isSoftDeleteEnabled()) {
-      return relationConditions
-    }
-    if (options !== null && options.includeDeleted) {
-      return relationConditions
-    }
-    const softDeleteCondition = this.createSoftDeleteCondition(metadata, options)
-    if (relationConditions.length === 0) {
-      return [softDeleteCondition]
-    }
-    if (!this.hasOrLogicalCondition(relationConditions)) {
-      const merged: Array<WhereCondition> = [softDeleteCondition]
-      for (let i = 0; i < relationConditions.length; i++) {
-        merged.push(relationConditions[i])
-      }
-      return merged
-    }
-    return this.mergeSoftDeleteWithOrConditions(relationConditions, softDeleteCondition)
-  }
-
-  private hasOrLogicalCondition(conditions: Array<WhereCondition>): boolean {
-    for (let i = 1; i < conditions.length; i++) {
-      if (conditions[i].logicalOperator === LogicalOperator.OR) {
-        return true
-      }
-    }
-    return false
-  }
-
-  private createSoftDeleteCondition(
-    metadata: EntityMetadata,
-    options: RelationQueryOptions | null
-  ): WhereCondition {
-    const condition = new WhereCondition()
-    condition.column = metadata.getDeletedAtColumn()
-    condition.operator = options !== null && options.onlyDeleted
-      ? ConditionOperator.IS_NOT_NULL
-      : ConditionOperator.IS_NULL
-    condition.value = null
-    condition.logicalOperator = LogicalOperator.AND
-    return condition
-  }
-
-  private cloneWhereConditions(conditions: Array<WhereCondition>): Array<WhereCondition> {
-    const cloned: Array<WhereCondition> = []
-    for (let i = 0; i < conditions.length; i++) {
-      cloned.push(this.cloneWhereCondition(conditions[i]))
-    }
-    return cloned
-  }
-
-  private cloneWhereCondition(condition: WhereCondition): WhereCondition {
-    const cloned = new WhereCondition()
-    cloned.column = condition.column
-    cloned.operator = condition.operator
-    cloned.value = condition.value
-    cloned.secondValue = condition.secondValue
-    cloned.logicalOperator = condition.logicalOperator
-    return cloned
-  }
-
-  private mergeSoftDeleteWithOrConditions(
-    conditions: Array<WhereCondition>,
-    softDeleteCondition: WhereCondition
-  ): Array<WhereCondition> {
-    const merged: Array<WhereCondition> = []
-    let segmentStart = 0
-    for (let i = 1; i <= conditions.length; i++) {
-      const isSegmentEnd = i === conditions.length || conditions[i].logicalOperator === LogicalOperator.OR
-      if (!isSegmentEnd) {
-        continue
-      }
-      const clonedSoftDelete = this.cloneWhereCondition(softDeleteCondition)
-      clonedSoftDelete.logicalOperator = segmentStart === 0 ? LogicalOperator.AND : LogicalOperator.OR
-      merged.push(clonedSoftDelete)
-      for (let j = segmentStart; j < i; j++) {
-        const clonedCondition = this.cloneWhereCondition(conditions[j])
-        if (j === segmentStart) {
-          clonedCondition.logicalOperator = LogicalOperator.AND
-        }
-        merged.push(clonedCondition)
-      }
-      segmentStart = i
-    }
-    return merged
-  }
-
-  private applyOrderByToPredicates(
-    predicates: relationalStore.RdbPredicates,
-    options: RelationQueryOptions
-  ): void {
-    for (let i = 0; i < options.orderByColumns.length; i++) {
-      const orderBy = options.orderByColumns[i]
-      if (orderBy.direction === 'ASC') {
-        predicates.orderByAsc(orderBy.column)
-      } else {
-        predicates.orderByDesc(orderBy.column)
-      }
-    }
-  }
-
-  private applyWhereConditionsToPredicates(
-    predicates: relationalStore.RdbPredicates,
-    conditions: Array<WhereCondition>
-  ): void {
-    for (let i = 0; i < conditions.length; i++) {
-      const condition = conditions[i]
-      if (i > 0) {
-        if (condition.logicalOperator === LogicalOperator.OR) {
-          predicates.or()
-        } else {
-          predicates.and()
-        }
-      }
-      this.applyOneWhereCondition(predicates, condition)
-    }
-  }
-
-  private applyOneWhereCondition(
-    predicates: relationalStore.RdbPredicates,
-    condition: WhereCondition
-  ): void {
-    if (this.applySimpleValueCondition(predicates, condition)) {
-      return
-    }
-    if (condition.operator === ConditionOperator.IN || condition.operator === ConditionOperator.NOT_IN) {
-      const values: Array<ValueType> = condition.value instanceof Array ? condition.value : []
-      const rdbValues: Array<relationalStore.ValueType> = []
-      for (let i = 0; i < values.length; i++) {
-        rdbValues.push(this.toRdbValue(values[i]))
-      }
-      if (condition.operator === ConditionOperator.IN) {
-        predicates.in(condition.column, rdbValues)
-      } else {
-        predicates.notIn(condition.column, rdbValues)
-      }
-      return
-    }
-    if (condition.operator === ConditionOperator.BETWEEN) {
-      predicates.between(condition.column, this.toRdbValue(condition.value), this.toRdbValue(condition.secondValue))
-      return
-    }
-    if (condition.operator === ConditionOperator.IS_NULL) {
-      predicates.isNull(condition.column)
-      return
-    }
-    if (condition.operator === ConditionOperator.IS_NOT_NULL) {
-      predicates.isNotNull(condition.column)
-    }
-  }
-
-  private applySimpleValueCondition(
-    predicates: relationalStore.RdbPredicates,
-    condition: WhereCondition
-  ): boolean {
-    const value = this.toRdbValue(condition.value)
-    if (condition.operator === ConditionOperator.EQUAL) {
-      predicates.equalTo(condition.column, value)
-      return true
-    }
-    if (condition.operator === ConditionOperator.NOT_EQUAL) {
-      predicates.notEqualTo(condition.column, value)
-      return true
-    }
-    if (condition.operator === ConditionOperator.GREATER) {
-      predicates.greaterThan(condition.column, value)
-      return true
-    }
-    if (condition.operator === ConditionOperator.LESS) {
-      predicates.lessThan(condition.column, value)
-      return true
-    }
-    if (condition.operator === ConditionOperator.GREATER_EQUAL) {
-      predicates.greaterThanOrEqualTo(condition.column, value)
-      return true
-    }
-    if (condition.operator === ConditionOperator.LESS_EQUAL) {
-      predicates.lessThanOrEqualTo(condition.column, value)
-      return true
-    }
-    if (condition.operator === ConditionOperator.LIKE) {
-      predicates.like(condition.column, condition.value !== null ? String(condition.value) : '')
-      return true
-    }
-    return false
-  }
-
-  private applySoftDeleteToPredicates(
-    predicates: relationalStore.RdbPredicates,
-    metadata: EntityMetadata,
-    options: RelationQueryOptions | null = null
-  ): void {
-    if (!metadata.isSoftDeleteEnabled()) {
-      return
-    }
-    if (options !== null && options.includeDeleted) {
-      return
-    }
-    const deletedAtColumn = metadata.getDeletedAtColumn()
-    if (options !== null && options.onlyDeleted) {
-      predicates.isNotNull(deletedAtColumn)
-      return
-    }
-    predicates.isNull(deletedAtColumn)
+    applyRelationQueryToPredicatesUtil(
+      predicates,
+      metadata,
+      options,
+      (value: ValueType | Array<ValueType> | null): relationalStore.ValueType => this.toRdbValue(value)
+    )
   }
 
   /**

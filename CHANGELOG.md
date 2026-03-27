@@ -1,10 +1,62 @@
 # CHANGELOG
 
+## [3.0.2] - 2026-03-27
+
+### 修复
+- `rawQuery` 改为默认强制参数化：无占位符或参数数量不匹配时直接拒绝执行（fail-fast）
+- `release` 构建配置启用混淆（`build-profile.json5`）
+- `BuildProfile` 默认环境标识由 `debug/true` 调整为 `release/false`，降低发布链路误判风险
+- `ohosTest` 设备矩阵补齐 `phone/2in1`，收敛设备覆盖口径
+- 清理 HAR 核心目录中的 UI 组件残留（移除 `MainPage.ets`）
+- `Repository` 原生 SQL 校验与守卫分类逻辑拆分至独立模块 `rawsql/RawSqlGuards`
+- `QueryBuilder` 的 `ORDER BY/HAVING/selectRaw` 守卫逻辑拆分至独立模块 `query/QueryBuilderGuards`
+- `QueryExecutor` 复用共享执行工具（排序比较、ID 归一化、分批、分页裁剪），并新增 `normalizeSubQueryIds` 到 `query/QueryExecutionUtils`
+- `RelationLoader` 分批逻辑改为复用 `QueryExecutionUtils.splitIntoBatches`，删除本地重复实现
+- `DatabaseManager` 测试注入 API 迁移到测试专用入口 `database/testing/DatabaseManagerTestHooks`，主类移除 `getTestState/setTestState/applyRuntimeConfigForTest/resetInstance`
+- `QueryExecutor` 继续将条件恢复/OR 检测/ID 过滤下沉到 `QueryExecutionUtils`，减少执行器内聚合逻辑
+- 修复 `DatabaseManager.resetInstanceForTesting` 对共享 `RdbStore` 的误关闭问题，避免 `entry` 多套件回归出现 `The RdbStore or ResultSet is already closed`
+- `DatabaseManagerTestHooks` 测试桥接类型收敛为显式类型声明，兼容 ArkTS 严格编译规则（无 `any/unknown`、无结构化类型绕过）
+- `EntryOrmSecurityFix` 并发事务用例新增超时护栏，避免 `BEGIN` 观测异常时测试长时间卡死
+- `QueryExecutor` 关联路径加载逻辑拆分到 `QueryExecutorRelationSupport`，主执行器改为职责委托
+- `RelationLoader` 关系查询谓词拼装逻辑拆分到 `RelationPredicateUtils`，减少加载器核心类的职责聚合
+- `QueryExecutor` 的 SQL 组装与 WHERE 条件参数化转换拆分到 `QueryExecutorSqlSupport`，主执行器改为委托实现
+
+### 测试
+- `entry/src/main/ets/suites/QuerySuite.ets` 新增：
+  - `QueryEnhancement_RawQueryRequiresParameterizedSql`
+  - `QueryEnhancement_RawQuerySafe`
+- `entry/src/main/ets/suites/EntryOrmReviewReport20FixSuite.ets` 同步新增/调整 `rawQuery` 与 `rawQuerySafe` 严格参数化回归
+- `entry/src/test/EntryOrmReviewReport20Fix.test.ets` 新增 `rawQuerySafe` 严格参数化回归，并更新 `rawQuery` 行为断言
+
+## [3.0.1] - 2026-03-17
+
+### 修复
+- 实体查询路径明确拒绝 `selectRaw/groupBy/having`，避免静默忽略导致的语义偏差（提示改用 `getRaw()` 或 `aggregate()`）
+- `rawQuery` 校验剔除注释与字符串内容，避免误判与规则绕过
+- 查询并发闸门支持超时失败，避免高并发下无限等待
+- 结果集列读取与遍历异常增加告警日志，提升可观测性
+- 更新/删除日志与慢查询事件改用占位符 SQL，降低敏感信息泄露风险
+
+### 新增
+- `QueryExecutor.getRaw()`：返回 `Array<ResultSetRow>`，用于原生 SELECT/聚合/分组查询
+
+### 测试
+- `entry/src/test/EntryOrmReviewReport20Fix.test.ets` 新增实体查询拒绝/`getRaw`/`rawQuery` 校验回归
+
 ## [3.0.0] - 2026-02-21
 
 ### 版本定位
 - 发布 `3.0` 主版本，整合 2.4.31 ~ 2.4.37 的核心重构与安全加固成果
-- 对外 API 维持以 `import { ... } from '@offlinecat/ocorm'` 为中心的使用方式
+- 对外 API 维持以 `import { ... } from 'ocorm'` 为中心的使用方式
+
+### 最近修复
+- 事务串行化从 Repository 实例级提升为连接级共享锁，修复同连接多仓库实例并发事务互不感知的问题
+- 增加同 Repository 嵌套 `transaction/transactionWithOptions` 拦截，避免锁重入导致的死锁风险
+- 调整 `transactionWithOptions` 超时语义：调用方超时即时返回，内部事务改为后台清理并在清理完成/超时后释放锁
+- 统一多对多 `attach/sync` 事务边界：
+  - 事务内：`SAVEPOINT` 不可用时显式失败（避免事务内再次 `beginTransaction`）
+  - 事务外：允许回退到独立事务以保持兼容与可用性
+- 修正 `attach` 日志 SQL 模板为合法形式（列清单 + 参数占位符），避免误导排障
 
 ### 主要增强
 - 新增工具链能力：`SeederManager`、`defineFactory`、`MigrationGenerator`
@@ -48,7 +100,7 @@
   - 事务并发串行化验证
   - 默认加密配置验证
   - 慢查询 SQL 脱敏事件验证
-- `OCORM/src/test/Stage9Database/Database.test.ets` 同步更新默认加密断言
+- `ocorm/src/test/Stage9Database/Database.test.ets` 同步更新默认加密断言
 
 ## [2.4.36] - 2026-02-13
 
@@ -58,7 +110,7 @@
 - `DataMapper` 调用 `toDbValue` 时补充列名参数，确保类型错误上下文可定位到具体列
 
 ### 测试
-- `OCORM/src/test/Stage4Mapping/TypeConverter.test.ets` 新增 strict 抛错与 lenient 兜底回归，并修正 REAL 字符串数值断言
+- `ocorm/src/test/Stage4Mapping/TypeConverter.test.ets` 新增 strict 抛错与 lenient 兜底回归，并修正 REAL 字符串数值断言
 - `entry/src/main/ets/suites/MappingSuite.ets` 新增 `TypeConverter_ToDbValue_StrictAndLenient` 集成回归
 
 ## [2.4.35] - 2026-02-13
@@ -68,9 +120,9 @@
 - 修复写入阶段唯一冲突语义不一致：`CrudOperations` 在数据库唯一约束失败时统一抛出 `UniqueValidationError`
 
 ### 测试
-- `OCORM/src/test/Stage7Repository/SaveInsertUpdate.test.ets` 新增数据库唯一冲突映射回归（insert/update）
-- `OCORM/src/test/Stage10SchemaMigration/SchemaBuilder.test.ets` 新增 `@Unique` 规则索引生成回归
-- `OCORM/src/test/Stage10SchemaMigration/SchemaDiffer.test.ets` 新增 `@Unique` 规则索引差异回归
+- `ocorm/src/test/Stage7Repository/SaveInsertUpdate.test.ets` 新增数据库唯一冲突映射回归（insert/update）
+- `ocorm/src/test/Stage10SchemaMigration/SchemaBuilder.test.ets` 新增 `@Unique` 规则索引生成回归
+- `ocorm/src/test/Stage10SchemaMigration/SchemaDiffer.test.ets` 新增 `@Unique` 规则索引差异回归
 
 ## [2.4.34] - 2026-02-13
 
@@ -79,9 +131,9 @@
 - 强化 `rawExecute` 安全护栏：仅允许参数化 `INSERT/UPDATE/DELETE/REPLACE`，拒绝多语句、SQL 注释片段和危险关键字
 
 ### 测试
-- `OCORM/src/test/Stage8Cache/QueryCache.test.ets` 新增命名空间隔离与按命名空间失效回归
-- `OCORM/src/test/Stage9Database/Database.test.ets` 新增切库清缓存与命名空间同步回归
-- `OCORM/src/test/Stage7Repository/RepositoryQuery.test.ets` 新增 rawExecute 安全闸回归
+- `ocorm/src/test/Stage8Cache/QueryCache.test.ets` 新增命名空间隔离与按命名空间失效回归
+- `ocorm/src/test/Stage9Database/Database.test.ets` 新增切库清缓存与命名空间同步回归
+- `ocorm/src/test/Stage7Repository/RepositoryQuery.test.ets` 新增 rawExecute 安全闸回归
 - `entry/src/main/ets/suites/QuerySuite.ets` 新增 rawExecute 安全闸集成回归
 
 ## [2.4.33] - 2026-02-13
@@ -99,7 +151,7 @@
   - sync 在 savepoint 路径下的提交与回滚行为
 - 事务语义回归补充：
   - `entry/src/test/EntryOrmReviewFix.test.ets` 覆盖 readOnly/隔离级别强语义失败
-  - `OCORM/src/test/Stage7Repository/RepositoryTransaction.test.ets` 覆盖配置错误不启动事务
+  - `ocorm/src/test/Stage7Repository/RepositoryTransaction.test.ets` 覆盖配置错误不启动事务
 
 ## [2.4.32] - 2026-02-10
 
