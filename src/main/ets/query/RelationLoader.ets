@@ -28,6 +28,8 @@ import { OneToManyRelationLoadStrategy } from './OneToManyRelationLoadStrategy'
 import { ManyToOneRelationLoadStrategy } from './ManyToOneRelationLoadStrategy'
 import { ManyToManyRelationLoadStrategy } from './ManyToManyRelationLoadStrategy'
 import { RelationLoaderParallelSupport } from './RelationLoaderParallelSupport'
+import { RelationLoaderCoreRelationSupport } from './RelationLoaderCoreRelationSupport'
+import { RelationLoaderOneToOneSupport } from './RelationLoaderOneToOneSupport'
 import { OrderByClause } from '../types/ValueTypes'
 import { WhereCondition } from './WhereCondition'
 import { RelationQueryOptions } from './RelationQueryOptions'
@@ -48,6 +50,10 @@ export class RelationLoader {
   private relationStrategies: Map<RelationType, RelationLoadStrategy>
   /** 并行加载支持 */
   private parallelSupport: RelationLoaderParallelSupport
+  /** 关系核心加载支持（ONE_TO_MANY/MANY_TO_ONE） */
+  private coreRelationSupport: RelationLoaderCoreRelationSupport
+  /** ONE_TO_ONE 关系加载支持 */
+  private oneToOneSupport: RelationLoaderOneToOneSupport
   /** 可选的 Store 提供者（用于复用外部租约连接） */
   private storeProvider: (() => relationalStore.RdbStore) | null
 
@@ -98,6 +104,46 @@ export class RelationLoader {
         await this.loadRelation(entities, relationName),
       (error: AsyncFailure): string => this.resolveErrorMessage(error),
       (context: string, message: string): void => this.logRelationWarnMessage(context, message)
+    )
+    this.coreRelationSupport = new RelationLoaderCoreRelationSupport(
+      this.sourceEntityName,
+      (): relationalStore.RdbStore => this.getStore(),
+      (): number => this.resolveInClauseLimit(),
+      (
+        predicates: relationalStore.RdbPredicates,
+        metadata: EntityMetadata,
+        options: RelationQueryOptions | null
+      ): void => this.applyRelationQueryToPredicates(predicates, metadata, options),
+      (value: ValueType | Array<ValueType> | null): relationalStore.ValueType => this.toRdbValue(value),
+      async (
+        task: Promise<relationalStore.ResultSet>,
+        operation: string
+      ): Promise<relationalStore.ResultSet> => await this.withQueryTimeout(task, operation),
+      (resultSet: relationalStore.ResultSet, metadata: EntityMetadata): ResultSetRow =>
+        this.resultSetToRow(resultSet, metadata),
+      (resultSet: relationalStore.ResultSet | null): void => this.closeResultSet(resultSet),
+      (context: string, error: AsyncFailure): void => this.logRelationWarn(context, error),
+      (items: Array<EntityData>, options: RelationQueryOptions | null): Array<EntityData> =>
+        this.applyCollectionQueryOptions(items, options)
+    )
+    this.oneToOneSupport = new RelationLoaderOneToOneSupport(
+      this.sourceEntityName,
+      (): relationalStore.RdbStore => this.getStore(),
+      (): number => this.resolveInClauseLimit(),
+      (
+        predicates: relationalStore.RdbPredicates,
+        metadata: EntityMetadata,
+        options: RelationQueryOptions | null
+      ): void => this.applyRelationQueryToPredicates(predicates, metadata, options),
+      (value: ValueType | Array<ValueType> | null): relationalStore.ValueType => this.toRdbValue(value),
+      async (
+        task: Promise<relationalStore.ResultSet>,
+        operation: string
+      ): Promise<relationalStore.ResultSet> => await this.withQueryTimeout(task, operation),
+      (resultSet: relationalStore.ResultSet, metadata: EntityMetadata): ResultSetRow =>
+        this.resultSetToRow(resultSet, metadata),
+      (resultSet: relationalStore.ResultSet | null): void => this.closeResultSet(resultSet),
+      (context: string, error: AsyncFailure): void => this.logRelationWarn(context, error)
     )
   }
 
@@ -285,158 +331,7 @@ export class RelationLoader {
     relation: RelationMetadata,
     options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
-    // 获取源实体的主键列
-    const sourceMetadata = MetadataStorage.getInstance().getEntityMetadata(this.sourceEntityName)
-    if (sourceMetadata === null) {
-      return entities
-    }
-
-    const sourcePkColumn = sourceMetadata.getPrimaryKeyColumn()
-    if (sourcePkColumn === null) {
-      return entities
-    }
-
-    // 收集所有主实体的主键值
-    const pkValues: Array<ValueType> = []
-    const pkValueToEntities: Map<string, Array<EntityData>> = new Map()
-
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i]
-      const pkProp = entity.getProperty(sourcePkColumn.propertyName)
-      if (pkProp !== null && pkProp.value !== null) {
-        const pkKey = String(pkProp.value)
-        pkValues.push(pkProp.value)
-
-        // 建立主键值到实体的映射（可能有多个实体有相同主键，虽然不常见）
-        let entityList = pkValueToEntities.get(pkKey)
-        if (!entityList) {
-          entityList = []
-          pkValueToEntities.set(pkKey, entityList)
-        }
-        entityList.push(entity)
-      }
-    }
-
-    if (pkValues.length === 0) {
-      return entities
-    }
-
-    // 获取目标实体元数据
-    const targetMetadata = MetadataStorage.getInstance().getEntityMetadata(relation.targetEntity)
-    if (targetMetadata === null) {
-      return entities
-    }
-
-    // 查询关联数据：SELECT * FROM target_table WHERE inverseKey IN (pkValues)
-    let store: relationalStore.RdbStore
-    try {
-      store = this.getStore()
-    } catch (e) {
-      // 数据库未初始化，返回原实体
-      return entities
-    }
-
-    const targetMapper = new DataMapper(relation.targetEntity)
-
-    // 将关联数据按外键值分组
-    const relatedByFk: Map<string, Array<EntityData>> = new Map()
-
-    // 分批处理 IN 条件，避免超出 SQLite 参数限制
-    const batches = splitIntoBatchesUtil(pkValues, this.resolveInClauseLimit())
-    const inverseKeyColumn = targetMetadata.getColumnByProperty(relation.inverseKey)
-    const inverseColumnName = inverseKeyColumn !== null
-      ? inverseKeyColumn.columnName
-      : relation.inverseKey
-
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      const batch = batches[batchIndex]
-      const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-      this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
-
-      // 构建 IN 条件
-      const rdbValues: Array<relationalStore.ValueType> = []
-      for (let i = 0; i < batch.length; i++) {
-        rdbValues.push(this.toRdbValue(batch[i]))
-      }
-      try {
-        predicates.in(inverseColumnName, rdbValues)
-      } catch (e) {
-        this.logRelationWarn(
-          `ONE_TO_MANY 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${batches.length}`,
-          e
-        )
-        continue
-      }
-
-      let resultSet: relationalStore.ResultSet | null = null
-      try {
-        resultSet = await this.withQueryTimeout(store.query(predicates), 'RELATION_LOAD')
-      } catch (e) {
-        this.logRelationWarn(
-          `ONE_TO_MANY 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${batches.length}`,
-          e
-        )
-        continue
-      }
-
-      try {
-        while (resultSet !== null && resultSet.goToNextRow()) {
-          const row = this.resultSetToRow(resultSet, targetMetadata)
-          const relatedEntity = targetMapper.fromResultSetRow(row)
-
-          // 获取外键值
-          const fkProp = relatedEntity.getProperty(relation.inverseKey)
-          // 如果属性名找不到，尝试通过列名查找
-          let fkValue: ValueType = null
-          if (fkProp !== null) {
-            fkValue = fkProp.value
-          } else {
-            // 尝试通过列名获取
-            const fkColumn = targetMetadata.getColumnByName(relation.inverseKey)
-            if (fkColumn !== null) {
-              const fkPropByColumn = relatedEntity.getProperty(fkColumn.propertyName)
-              if (fkPropByColumn !== null) {
-                fkValue = fkPropByColumn.value
-              }
-            }
-          }
-
-          if (fkValue !== null) {
-            const fkKey = String(fkValue)
-            let relatedList = relatedByFk.get(fkKey)
-            if (!relatedList) {
-              relatedList = []
-              relatedByFk.set(fkKey, relatedList)
-            }
-            relatedList.push(relatedEntity)
-          }
-        }
-      } catch (e) {
-        this.logRelationWarn(
-          `ONE_TO_MANY 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${batches.length}`,
-          e
-        )
-      } finally {
-        this.closeResultSet(resultSet)
-      }
-    }
-
-    // 将关联数据设置到主实体
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i]
-      const pkProp = entity.getProperty(sourcePkColumn.propertyName)
-      if (pkProp !== null && pkProp.value !== null) {
-        const pkKey = String(pkProp.value)
-        const relatedEntities = relatedByFk.get(pkKey)
-        if (relatedEntities) {
-          entity.setRelatedArray(relation.propertyName, this.applyCollectionQueryOptions(relatedEntities, options))
-        } else {
-          entity.setRelatedArray(relation.propertyName, [])
-        }
-      }
-    }
-
-    return entities
+    return await this.coreRelationSupport.loadOneToMany(entities, relation, options)
   }
 
   /**
@@ -451,156 +346,7 @@ export class RelationLoader {
     relation: RelationMetadata,
     options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
-    // 获取目标实体元数据
-    const targetMetadata = MetadataStorage.getInstance().getEntityMetadata(relation.targetEntity)
-    if (targetMetadata === null) {
-      return entities
-    }
-
-    const targetPkColumn = targetMetadata.getPrimaryKeyColumn()
-    if (targetPkColumn === null) {
-      return entities
-    }
-
-    // 获取源实体元数据
-    const sourceMetadata = MetadataStorage.getInstance().getEntityMetadata(this.sourceEntityName)
-    if (sourceMetadata === null) {
-      return entities
-    }
-
-    // 收集所有主实体的外键值
-    const fkValues: Array<ValueType> = []
-    const fkValueSet: Set<string> = new Set()
-
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i]
-      // 尝试通过属性名获取外键值
-      let fkProp = entity.getProperty(relation.inverseKey)
-      // 如果属性名找不到，尝试通过列名查找
-      if (fkProp === null) {
-        const fkColumn = sourceMetadata.getColumnByName(relation.inverseKey)
-        if (fkColumn !== null) {
-          fkProp = entity.getProperty(fkColumn.propertyName)
-        }
-      }
-
-      if (fkProp !== null && fkProp.value !== null) {
-        const fkKey = String(fkProp.value)
-        if (!fkValueSet.has(fkKey)) {
-          fkValueSet.add(fkKey)
-          fkValues.push(fkProp.value)
-        }
-      }
-    }
-
-    if (fkValues.length === 0) {
-      // 没有外键值，设置所有关联为 null
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedSingle(relation.propertyName, null)
-      }
-      return entities
-    }
-
-    // 查询关联数据：SELECT * FROM target_table WHERE pk IN (fkValues)
-    let store: relationalStore.RdbStore
-    try {
-      store = this.getStore()
-    } catch (e) {
-      // 数据库未初始化，设置所有关联为 null
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedSingle(relation.propertyName, null)
-      }
-      return entities
-    }
-
-    const targetMapper = new DataMapper(relation.targetEntity)
-
-    // 将关联数据按主键值索引
-    const relatedByPk: Map<string, EntityData> = new Map()
-
-    // 分批处理 IN 条件，避免超出 SQLite 参数限制
-    const fkBatches = splitIntoBatchesUtil(fkValues, this.resolveInClauseLimit())
-
-    for (let batchIndex = 0; batchIndex < fkBatches.length; batchIndex++) {
-      const batch = fkBatches[batchIndex]
-      const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-      this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
-
-      // 构建 IN 条件
-      const rdbValues: Array<relationalStore.ValueType> = []
-      for (let i = 0; i < batch.length; i++) {
-        rdbValues.push(this.toRdbValue(batch[i]))
-      }
-      try {
-        predicates.in(targetPkColumn.columnName, rdbValues)
-      } catch (e) {
-        this.logRelationWarn(
-          `MANY_TO_ONE 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
-          e
-        )
-        continue
-      }
-
-      let resultSet: relationalStore.ResultSet | null = null
-      try {
-        resultSet = await this.withQueryTimeout(store.query(predicates), 'RELATION_LOAD')
-      } catch (e) {
-        this.logRelationWarn(
-          `MANY_TO_ONE 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
-          e
-        )
-        continue
-      }
-
-      try {
-        while (resultSet !== null && resultSet.goToNextRow()) {
-          const row = this.resultSetToRow(resultSet, targetMetadata)
-          const relatedEntity = targetMapper.fromResultSetRow(row)
-
-          // 获取主键值
-          const pkProp = relatedEntity.getProperty(targetPkColumn.propertyName)
-          if (pkProp !== null && pkProp.value !== null) {
-            const pkKey = String(pkProp.value)
-            relatedByPk.set(pkKey, relatedEntity)
-          }
-        }
-      } catch (e) {
-        this.logRelationWarn(
-          `MANY_TO_ONE 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
-          e
-        )
-      } finally {
-        this.closeResultSet(resultSet)
-      }
-    }
-
-    // 将关联数据设置到主实体
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i]
-      // 尝试通过属性名获取外键值
-      let fkProp = entity.getProperty(relation.inverseKey)
-      // 如果属性名找不到，尝试通过列名查找
-      if (fkProp === null) {
-        const fkColumn = sourceMetadata.getColumnByName(relation.inverseKey)
-        if (fkColumn !== null) {
-          fkProp = entity.getProperty(fkColumn.propertyName)
-        }
-      }
-
-      if (fkProp !== null && fkProp.value !== null) {
-        const fkKey = String(fkProp.value)
-        const relatedEntity = relatedByPk.get(fkKey)
-        if (relatedEntity) {
-          entity.setRelatedSingle(relation.propertyName, relatedEntity)
-        } else {
-          entity.setRelatedSingle(relation.propertyName, null)
-        }
-      } else {
-        entity.setRelatedSingle(relation.propertyName, null)
-      }
-    }
-
-    return entities
+    return await this.coreRelationSupport.loadManyToOne(entities, relation, options)
   }
 
   /**
@@ -638,164 +384,7 @@ export class RelationLoader {
     relation: RelationMetadata,
     options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
-    // 获取目标实体元数据
-    const targetMetadata = MetadataStorage.getInstance().getEntityMetadata(relation.targetEntity)
-    if (targetMetadata === null) {
-      return entities
-    }
-
-    const targetPkColumn = targetMetadata.getPrimaryKeyColumn()
-    if (targetPkColumn === null) {
-      return entities
-    }
-
-    // 获取源实体元数据
-    const sourceMetadata = MetadataStorage.getInstance().getEntityMetadata(this.sourceEntityName)
-    if (sourceMetadata === null) {
-      return entities
-    }
-
-    // 收集所有主实体的外键值（去重）
-    const fkValues: Array<ValueType> = []
-    const fkValueSet: Set<string> = new Set()
-
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i]
-      // 尝试通过属性名获取外键值
-      let fkProp = entity.getProperty(relation.inverseKey)
-      // 如果属性名找不到，尝试通过列名查找
-      if (fkProp === null) {
-        const fkColumn = sourceMetadata.getColumnByName(relation.inverseKey)
-        if (fkColumn !== null) {
-          fkProp = entity.getProperty(fkColumn.propertyName)
-        }
-      }
-
-      if (fkProp !== null && fkProp.value !== null) {
-        const fkKey = String(fkProp.value)
-        if (!fkValueSet.has(fkKey)) {
-          fkValueSet.add(fkKey)
-          fkValues.push(fkProp.value)
-        }
-      }
-    }
-
-    if (fkValues.length === 0) {
-      // 没有外键值，设置所有关联为 null
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedSingle(relation.propertyName, null)
-      }
-      return entities
-    }
-
-    // 查询关联数据：SELECT * FROM target_table WHERE pk IN (fkValues)
-    let store: relationalStore.RdbStore
-    try {
-      store = this.getStore()
-    } catch (e) {
-      // 数据库未初始化，设置所有关联为 null
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedSingle(relation.propertyName, null)
-      }
-      return entities
-    }
-
-    const targetMapper = new DataMapper(relation.targetEntity)
-
-    // 将关联数据按主键值索引
-    const relatedByPk: Map<string, EntityData> = new Map()
-
-    // 分批处理 IN 条件，避免超出 SQLite 参数限制
-    const fkBatches = splitIntoBatchesUtil(fkValues, this.resolveInClauseLimit())
-
-    for (let batchIndex = 0; batchIndex < fkBatches.length; batchIndex++) {
-      const batch = fkBatches[batchIndex]
-      const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-      this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
-
-      // 构建 IN 条件
-      const rdbValues: Array<relationalStore.ValueType> = []
-      for (let i = 0; i < batch.length; i++) {
-        rdbValues.push(this.toRdbValue(batch[i]))
-      }
-      try {
-        predicates.in(targetPkColumn.columnName, rdbValues)
-      } catch (e) {
-        this.logRelationWarn(
-          `ONE_TO_ONE(source) 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
-          e
-        )
-        // 构建条件失败，设置所有关联为 null
-        for (let i = 0; i < entities.length; i++) {
-          entities[i].setRelatedSingle(relation.propertyName, null)
-        }
-        return entities
-      }
-
-      let resultSet: relationalStore.ResultSet | null = null
-      try {
-        resultSet = await this.withQueryTimeout(store.query(predicates), 'RELATION_LOAD')
-      } catch (e) {
-        this.logRelationWarn(
-          `ONE_TO_ONE(source) 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
-          e
-        )
-        // 查询失败，设置所有关联为 null
-        for (let i = 0; i < entities.length; i++) {
-          entities[i].setRelatedSingle(relation.propertyName, null)
-        }
-        return entities
-      }
-
-      try {
-        while (resultSet !== null && resultSet.goToNextRow()) {
-          const row = this.resultSetToRow(resultSet, targetMetadata)
-          const relatedEntity = targetMapper.fromResultSetRow(row)
-
-          // 获取主键值
-          const pkProp = relatedEntity.getProperty(targetPkColumn.propertyName)
-          if (pkProp !== null && pkProp.value !== null) {
-            const pkKey = String(pkProp.value)
-            relatedByPk.set(pkKey, relatedEntity)
-          }
-        }
-      } catch (e) {
-        this.logRelationWarn(
-          `ONE_TO_ONE(source) 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${fkBatches.length}`,
-          e
-        )
-      } finally {
-        this.closeResultSet(resultSet)
-      }
-    }
-
-    // 将关联数据设置到主实体
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i]
-      // 尝试通过属性名获取外键值
-      let fkProp = entity.getProperty(relation.inverseKey)
-      // 如果属性名找不到，尝试通过列名查找
-      if (fkProp === null) {
-        const fkColumn = sourceMetadata.getColumnByName(relation.inverseKey)
-        if (fkColumn !== null) {
-          fkProp = entity.getProperty(fkColumn.propertyName)
-        }
-      }
-
-      if (fkProp !== null && fkProp.value !== null) {
-        const fkKey = String(fkProp.value)
-        const relatedEntity = relatedByPk.get(fkKey)
-        if (relatedEntity) {
-          entity.setRelatedSingle(relation.propertyName, relatedEntity)
-        } else {
-          entity.setRelatedSingle(relation.propertyName, null)
-        }
-      } else {
-        entity.setRelatedSingle(relation.propertyName, null)
-      }
-    }
-
-    return entities
+    return await this.oneToOneSupport.loadOneToOneSourceSide(entities, relation, options)
   }
 
   /**
@@ -810,166 +399,7 @@ export class RelationLoader {
     relation: RelationMetadata,
     options: RelationQueryOptions | null = null
   ): Promise<Array<EntityData>> {
-    // 获取源实体元数据
-    const sourceMetadata = MetadataStorage.getInstance().getEntityMetadata(this.sourceEntityName)
-    if (sourceMetadata === null) {
-      return entities
-    }
-
-    const sourcePkColumn = sourceMetadata.getPrimaryKeyColumn()
-    if (sourcePkColumn === null) {
-      return entities
-    }
-
-    // 获取目标实体元数据
-    const targetMetadata = MetadataStorage.getInstance().getEntityMetadata(relation.targetEntity)
-    if (targetMetadata === null) {
-      return entities
-    }
-
-    // 收集所有主实体的主键值（去重）
-    const pkValues: Array<ValueType> = []
-    const pkValueSet: Set<string> = new Set()
-
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i]
-      const pkProp = entity.getProperty(sourcePkColumn.propertyName)
-      if (pkProp !== null && pkProp.value !== null) {
-        const pkKey = String(pkProp.value)
-        if (!pkValueSet.has(pkKey)) {
-          pkValueSet.add(pkKey)
-          pkValues.push(pkProp.value)
-        }
-      }
-    }
-
-    if (pkValues.length === 0) {
-      // 没有主键值，设置所有关联为 null
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedSingle(relation.propertyName, null)
-      }
-      return entities
-    }
-
-    // 查询关联数据：SELECT * FROM target_table WHERE inverseKey IN (pkValues)
-    let store: relationalStore.RdbStore
-    try {
-      store = this.getStore()
-    } catch (e) {
-      // 数据库未初始化，设置所有关联为 null
-      for (let i = 0; i < entities.length; i++) {
-        entities[i].setRelatedSingle(relation.propertyName, null)
-      }
-      return entities
-    }
-
-    const inverseKeyColumn = targetMetadata.getColumnByProperty(relation.inverseKey)
-    const inverseColumnName = inverseKeyColumn !== null
-      ? inverseKeyColumn.columnName
-      : relation.inverseKey
-
-    const targetMapper = new DataMapper(relation.targetEntity)
-
-    // 将关联数据按外键值索引
-    const relatedByFk: Map<string, EntityData> = new Map()
-
-    // 分批处理 IN 条件，避免超出 SQLite 参数限制
-    const pkBatches = splitIntoBatchesUtil(pkValues, this.resolveInClauseLimit())
-
-    for (let batchIndex = 0; batchIndex < pkBatches.length; batchIndex++) {
-      const batch = pkBatches[batchIndex]
-      const predicates = new relationalStore.RdbPredicates(targetMetadata.tableName)
-      this.applyRelationQueryToPredicates(predicates, targetMetadata, options)
-
-      // 构建 IN 条件：目标表的外键列 IN 源实体的主键值
-      const rdbValues: Array<relationalStore.ValueType> = []
-      for (let i = 0; i < batch.length; i++) {
-        rdbValues.push(this.toRdbValue(batch[i]))
-      }
-      try {
-        predicates.in(inverseColumnName, rdbValues)
-      } catch (e) {
-        this.logRelationWarn(
-          `ONE_TO_ONE(target) 构建查询条件失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
-          e
-        )
-        // 构建条件失败，设置所有关联为 null
-        for (let i = 0; i < entities.length; i++) {
-          entities[i].setRelatedSingle(relation.propertyName, null)
-        }
-        return entities
-      }
-
-      let resultSet: relationalStore.ResultSet | null = null
-      try {
-        resultSet = await this.withQueryTimeout(store.query(predicates), 'RELATION_LOAD')
-      } catch (e) {
-        this.logRelationWarn(
-          `ONE_TO_ONE(target) 查询失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
-          e
-        )
-        // 查询失败，设置所有关联为 null
-        for (let i = 0; i < entities.length; i++) {
-          entities[i].setRelatedSingle(relation.propertyName, null)
-        }
-        return entities
-      }
-
-      try {
-        while (resultSet !== null && resultSet.goToNextRow()) {
-          const row = this.resultSetToRow(resultSet, targetMetadata)
-          const relatedEntity = targetMapper.fromResultSetRow(row)
-
-          // 获取外键值
-          let fkValue: ValueType = null
-          const fkProp = relatedEntity.getProperty(relation.inverseKey)
-          if (fkProp !== null) {
-            fkValue = fkProp.value
-          } else {
-            // 尝试通过列名获取
-            const fkColumn = targetMetadata.getColumnByName(relation.inverseKey)
-            if (fkColumn !== null) {
-              const fkPropByColumn = relatedEntity.getProperty(fkColumn.propertyName)
-              if (fkPropByColumn !== null) {
-                fkValue = fkPropByColumn.value
-              }
-            }
-          }
-
-          if (fkValue !== null) {
-            const fkKey = String(fkValue)
-            // ONE_TO_ONE 关系，每个外键值只对应一个目标实体
-            relatedByFk.set(fkKey, relatedEntity)
-          }
-        }
-      } catch (e) {
-        this.logRelationWarn(
-          `ONE_TO_ONE(target) 结果集遍历失败: relation=${relation.propertyName}, batch=${batchIndex + 1}/${pkBatches.length}`,
-          e
-        )
-      } finally {
-        this.closeResultSet(resultSet)
-      }
-    }
-
-    // 将关联数据设置到主实体
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i]
-      const pkProp = entity.getProperty(sourcePkColumn.propertyName)
-      if (pkProp !== null && pkProp.value !== null) {
-        const pkKey = String(pkProp.value)
-        const relatedEntity = relatedByFk.get(pkKey)
-        if (relatedEntity) {
-          entity.setRelatedSingle(relation.propertyName, relatedEntity)
-        } else {
-          entity.setRelatedSingle(relation.propertyName, null)
-        }
-      } else {
-        entity.setRelatedSingle(relation.propertyName, null)
-      }
-    }
-
-    return entities
+    return await this.oneToOneSupport.loadOneToOneTargetSide(entities, relation, options)
   }
 
   /**

@@ -11,7 +11,6 @@ import { EntityData } from '../mapping/EntityData'
 import { ResultSetRow } from '../mapping/ResultSetRow'
 import { DatabaseManager } from '../database/DatabaseManager'
 import { ExecutionError } from '../errors/DatabaseError'
-import { ColumnType } from '../types/ColumnType'
 import { RelationLoader } from './RelationLoader'
 import { PaginatedResult } from './PaginatedResult'
 import { Logger } from '../logging/Logger'
@@ -28,6 +27,7 @@ import { SubQueryRelationExecutor } from './SubQueryRelationExecutor'
 import { QueryExecutorRelationSupport } from './QueryExecutorRelationSupport'
 import { QueryExecutorSubQueryBatchSupport } from './QueryExecutorSubQueryBatchSupport'
 import { QueryExecutorOrderSupport } from './QueryExecutorOrderSupport'
+import { QueryExecutorResultSetSupport } from './QueryExecutorResultSetSupport'
 import {
   QueryExecutorSqlSupport,
   QueryExecutorSqlResult,
@@ -87,6 +87,8 @@ export class QueryExecutor {
   private subQueryBatchSupport: QueryExecutorSubQueryBatchSupport
   /** 查询排序与列补齐支持 */
   private orderSupport: QueryExecutorOrderSupport
+  /** 结果集映射支持 */
+  private resultSetSupport: QueryExecutorResultSetSupport
   /** 查询 SQL 构建支持 */
   private sqlSupport: QueryExecutorSqlSupport
   /** 日志记录器 */
@@ -123,6 +125,7 @@ export class QueryExecutor {
     this.dataMapper = new DataMapper(queryBuilder.getEntityName())
     this.relationLoader = new RelationLoader(this.queryBuilder.getEntityName(), () => this.getStore())
     this.orderSupport = new QueryExecutorOrderSupport(this.queryBuilder)
+    this.resultSetSupport = new QueryExecutorResultSetSupport(this.queryBuilder)
     this.sqlSupport = new QueryExecutorSqlSupport(
       this.queryBuilder,
       (value: ValueType | Array<ValueType> | null): relationalStore.ValueType => this.toRdbValue(value)
@@ -894,97 +897,18 @@ export class QueryExecutor {
    * 将 ResultSet 当前行转换为 ResultSetRow
    */
   private resultSetToRow(resultSet: relationalStore.ResultSet): ResultSetRow {
-    const row = new ResultSetRow()
-    const columnNames = resultSet.columnNames
-    const metadata = this.queryBuilder.getEntityMetadata()
-
-    for (let i = 0; i < columnNames.length; i++) {
-      const columnName = columnNames[i]
-      try {
-        const columnIndex = resultSet.getColumnIndex(columnName)
-
-        // 根据列类型获取值
-        if (resultSet.isColumnNull(columnIndex)) {
-          row.set(columnName, null)
-        } else {
-          // 尝试获取不同类型的值
-          const columnMetadata = metadata.getColumnByName(columnName)
-          if (columnMetadata !== null) {
-            switch (columnMetadata.columnType) {
-              case ColumnType.INTEGER:
-                row.set(columnName, resultSet.getLong(columnIndex))
-                break
-              case ColumnType.REAL:
-                row.set(columnName, resultSet.getDouble(columnIndex))
-                break
-              case ColumnType.TEXT:
-                row.set(columnName, resultSet.getString(columnIndex))
-                break
-              case ColumnType.BLOB:
-                row.set(columnName, resultSet.getBlob(columnIndex))
-                break
-              default:
-                row.set(columnName, resultSet.getString(columnIndex))
-            }
-          } else {
-            // 默认作为字符串处理
-            row.set(columnName, resultSet.getString(columnIndex))
-          }
-        }
-      } catch (e) {
-        // 忽略单个列的读取错误，继续处理其他列
-        row.set(columnName, null)
-      }
-    }
-
-    return row
+    return this.resultSetSupport.resultSetToRow(resultSet)
   }
 
   /**
    * 将 ResultSet 当前行转换为 ResultSetRow（原生查询）
    */
   private resultSetToRawRow(resultSet: relationalStore.ResultSet): ResultSetRow {
-    const row = new ResultSetRow()
-    const columnNames = resultSet.columnNames
-    for (let i = 0; i < columnNames.length; i++) {
-      const columnName = columnNames[i]
-      try {
-        const columnIndex = resultSet.getColumnIndex(columnName)
-        row.set(columnName, ResultSetUtils.getValueByRuntimeType(resultSet, columnIndex))
-      } catch (e) {
-        row.set(columnName, null)
-      }
-    }
-    return row
-  }
-
-  private resolveValueTypeName(value: ValueType): string {
-    if (value === null) {
-      return 'null'
-    }
-    if (value instanceof Uint8Array) {
-      return 'blob'
-    }
-    return typeof value
+    return this.resultSetSupport.resultSetToRawRow(resultSet)
   }
 
   private resultSetToDynamicEntity(resultSet: relationalStore.ResultSet, entityName: string): EntityData {
-    const entity = new EntityData(entityName)
-    const columnNames = resultSet.columnNames
-    for (let i = 0; i < columnNames.length; i++) {
-      const columnName = columnNames[i]
-      let value: ValueType = null
-      try {
-        const columnIndex = resultSet.getColumnIndex(columnName)
-        if (!resultSet.isColumnNull(columnIndex)) {
-          value = ResultSetUtils.getValueByRuntimeType(resultSet, columnIndex) as ValueType
-        }
-      } catch (e) {
-        value = null
-      }
-      entity.addProperty(columnName, value, this.resolveValueTypeName(value))
-    }
-    return entity
+    return this.resultSetSupport.resultSetToDynamicEntity(resultSet, entityName)
   }
 
   /**
