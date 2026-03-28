@@ -1,114 +1,80 @@
 # 07-原生SQL安全守卫-RawSqlGuards
 
-> 状态：已完成
-> 适用版本：ocorm 3.x（当前仓库实现）
-> 最后更新：2026-03-27
+> 状态：已完成  
+> 适用版本：ocorm 3.x  
+> 最后更新：2026-03-28
 
-## 1. 目标
-- 说明 `SQL 安全守卫` 如何在仓储层前置拦截危险 SQL。
-- 拆清读 SQL 与写 SQL 各自的允许范围。
-- 给出 guard 通过与拒绝的最小样例。
+## 1. 这页讲什么
+这页讲的是 `rawQuery/rawQuerySafe/rawExecute` 在仓储层的安全语义，以及业务侧该如何正确使用。  
+注意：`RawSqlGuards` 是内部实现，不是面向库使用者的公共 API。
 
-## 2. 核心函数
+## 2. 对外可用入口（公共 API）
+- `Repository.rawQuery(sql, args)`：只读 SQL（`SELECT/WITH/EXPLAIN`）
+- `Repository.rawQuerySafe(sql, args)`：在入口先做严格校验，再执行只读 SQL
+- `Repository.rawExecute(sql, args)`：写 SQL（`INSERT/UPDATE/DELETE/REPLACE`）
+
+## 3. 内部守卫（仅源码实现）
+以下函数位于 `src/main/ets/repository/rawsql/RawSqlGuards.ets`，由仓储入口自动调用：
 - `countSqlPlaceholders(sql)`
 - `validateRawQuerySql(sql)`
 - `validateRawExecuteSql(sql, argsLength)`
-- `isExpectedRawQueryGuardError(errorMessage)`
-- `isExpectedRawExecuteGuardError(errorMessage)`
+- `isExpectedRawQueryGuardError(message)`
+- `isExpectedRawExecuteGuardError(message)`
 
-## 3. 关键规则
-### 3.1 `validateRawQuerySql`
-- 不能为空
-- 不能多语句
-- 只允许 `SELECT`、`WITH`、`EXPLAIN`
-- 去掉字符串字面量和注释后，不能包含写关键字
+业务代码不应直接 import 这些函数。
 
-```arkts
-import { validateRawQuerySql } from 'ocorm'
+## 4. 正确用法（可复制）
+```ts
+import { ExecutionError, Repository } from 'ocorm'
 
-const sql = validateRawQuerySql('SELECT id, name FROM user WHERE id = ?')
-console.info(sql)
+const repo = new Repository('User')
+
+try {
+  const rows = await repo.rawQuery(
+    'SELECT id, name FROM user WHERE id = ?',
+    [1]
+  )
+  console.info(rows.length)
+
+  const affected = await repo.rawExecute(
+    'UPDATE user SET name = ? WHERE id = ?',
+    ['Alice', 1]
+  )
+  console.info(affected)
+} catch (error) {
+  if (error instanceof ExecutionError) {
+    console.error(error.message)
+  }
+  throw error
+}
 ```
 
-### 3.2 `validateRawExecuteSql`
-- 不能为空
-- 不能多语句
-- 禁止 `--`、`/* */`
-- 只允许 `INSERT/UPDATE/DELETE/REPLACE`
-- 禁止 `DROP/ALTER/CREATE/TRUNCATE/ATTACH/DETACH/VACUUM/REINDEX/PRAGMA`
-- 必须参数化，且参数数量严格匹配
+## 5. 失败示例与修复
+```ts
+import { Repository } from 'ocorm'
 
-```arkts
-import { validateRawExecuteSql } from 'ocorm'
+const repo = new Repository('User')
 
-const sql = validateRawExecuteSql(
-  'UPDATE user SET name = ? WHERE id = ?',
-  2
-)
+// 失败1：rawQuery 不能执行写 SQL
+await repo.rawQuery('DELETE FROM user WHERE id = ?', [1])
 
-console.info(sql)
+// 失败2：rawExecute 必须参数化且参数数量匹配
+await repo.rawExecute('UPDATE user SET name = \"Alice\" WHERE id = 1', [])
 ```
 
-### 3.3 占位符计数
-两个入口最终都依赖 `countSqlPlaceholders(sql)` 做参数数量校验。
+修复方式：
+- `rawQuery` 只用于只读 SQL
+- `rawExecute` 只用于写 SQL
+- 一律使用 `?` 占位符，并确保 `?` 数量与参数数组长度一致
 
-```arkts
-import { countSqlPlaceholders } from 'ocorm'
-
-console.info(countSqlPlaceholders('SELECT * FROM user WHERE id = ? AND age > ?'))
-```
-
-## 4. 误用示例
-下面这些都会被 guard 拒绝。
-
-```arkts
-import { validateRawQuerySql } from 'ocorm'
-
-validateRawQuerySql('DELETE FROM user WHERE id = ?')
-```
-
-```arkts
-import { validateRawExecuteSql } from 'ocorm'
-
-validateRawExecuteSql('UPDATE user SET name = "Alice"', 0)
-```
-
-```arkts
-import { validateRawExecuteSql } from 'ocorm'
-
-validateRawExecuteSql('PRAGMA journal_mode = WAL', 0)
-```
-
-## 5. 守卫错误识别
-仓储层会用 `isExpectedRawQueryGuardError(...)` / `isExpectedRawExecuteGuardError(...)` 区分“预期 guard 拒绝”和“真正执行失败”，前者记 warn，后者记 error。
-
-```arkts
-import {
-  isExpectedRawExecuteGuardError,
-  isExpectedRawQueryGuardError
-} from 'ocorm'
-
-console.info(isExpectedRawQueryGuardError('RAW_QUERY 仅允许 SELECT/WITH/EXPLAIN 只读 SQL'))
-console.info(isExpectedRawExecuteGuardError('RAW_EXECUTE 参数数量与占位符数量不一致'))
-```
-
-## 6. 实战规则
-- 读 SQL 和写 SQL 的 guard 不是同一个集合，不要混用入口。
-- 参数化是第一优先级，连 guard 都过不了时不要去怪底层数据库。
-- 需要日志排查时，先看是不是 guard warn，再看是否为执行层 error。
-
-```text
-排查顺序:
-1. SQL 是否为空 / 多语句
-2. 是否包含注释片段
-3. 起始关键字是否在允许列表
-4. 占位符数量是否和 args 对齐
+## 6. 排查顺序
+1. SQL 是否为空或多语句  
+2. 是否包含注释片段（`--`、`/* */`）  
+3. 起始关键字是否符合入口约束  
+4. 占位符数量是否与参数数量一致  
 5. 是否命中危险关键字
-```
 
-## 7. 参考源码
-
-## 8. 变更记录
-- 2026-03-27：补全原生 SQL guard 规则、允许范围与误用样例
-
-
+## 7. 源码对齐路径
+- `src/main/ets/repository/Repository.ets`
+- `src/main/ets/repository/rawsql/RawSqlGuards.ets`
+- `src/main/ets/errors/DatabaseError.ets`

@@ -1,111 +1,67 @@
 # 03-Breaking-Changes
 
 > 状态：已完成
-> 适用范围：当前仓库可证明的 breaking changes
+> 适用范围：`2.x -> 3.0.2` 与 `3.0.1 -> 3.0.2`
 > 最后更新：2026-03-28
 
-## 1. 文档边界
-这里不写“想象中的历史变更”，只写当前仓库能直接证明、或能从 `CHANGELOG + 当前实现` 推导出的兼容性断点。
+## 1. 已确认的 breaking changes
 
-## 2. 当前可确认的 breaking changes
-### 2.1 `rawQuery` 默认强制参数化
-这是当前最明确、最硬的行为断点。`3.0.2` 的 `CHANGELOG` 与当前 `Repository.ets` 都能证明：无占位符或占位符数量不匹配的 `rawQuery` 会直接失败。
+### 1.1 `rawQuery` 默认强参数化（3.0.2）
 
-```arkts
-// 旧写法：在当前仓库 3.0.2 下不再兼容
-await repo.rawQuery('SELECT * FROM user')
-```
+- 触发条件：无 `?` 占位符，或参数数量与占位符数量不一致
+- 典型报错关键词：`RAW_QUERY 仅允许参数化 SQL`、`RAW_QUERY 参数数量与占位符数量不一致`
+- 源码：`src/main/ets/repository/Repository.ets`、`rawsql/RawSqlGuards.ets`
 
-```arkts
-// 新写法：必须使用参数化
-await repo.rawQuery('SELECT * FROM user WHERE id = ?', [1])
-```
+### 1.2 实体查询拒绝 `selectRaw/groupBy/having`（3.0.1 起）
 
-### 2.2 实体查询路径拒绝 `selectRaw/groupBy/having`
-这条在 `3.0.1` 已经建立，并在当前仓库继续保持。如果业务还把实体查询和聚合语义混在一起，会直接出错。
+- 触发条件：`get/getOne/getPaginated/count` 路径带聚合 DSL
+- 典型报错：`实体查询不支持 selectRaw/groupBy/having，请使用 getRaw() 或 aggregate()`
+- 源码：`src/main/ets/query/QueryExecutor.ets`
 
-```arkts
-// 旧混用方式：当前仓库不接受
-await new QueryExecutor(
-  repo.createQueryBuilder()
-    .selectRaw(['COUNT(*) AS total'])
-).get()
-```
+### 1.3 事务隔离级别收紧（3.0）
 
-```arkts
-// 正确做法：走 getRaw 或 aggregate
-await new QueryExecutor(
-  repo.createQueryBuilder()
-    .selectRaw(['COUNT(*) AS total'])
-).getRaw()
-```
+- `TransactionOptions.serializable()` 在创建阶段直接抛错
+- `REPEATABLE_READ/SERIALIZABLE` 在执行阶段被拒绝
+- 源码：`src/main/ets/repository/TransactionOptions.ets`、`TransactionManager.ets`
 
+### 1.4 只读事务不再静默降级（3.0）
 
-```arkts
+- 触发条件：平台不支持 `PRAGMA query_only`
+- 结果：事务直接失败（fail-fast）
+- 源码：`src/main/ets/repository/TransactionManager.ets`
 
-```
+### 1.5 默认加密值变化（3.0）
 
-### 2.4 事务边界更严格
-从 `3.0.0` 开始，仓储层对同 Repository 嵌套事务、跨 Repository 嵌套事务、未绑定事务上下文写入的拦截都已收紧。继续沿用“外层事务里随手再 new 一个 Repository 写入”的老习惯，会直接失败。
+- `DatabaseConfig.encrypt` 默认值为 `true`
+- 旧代码若依赖默认值，迁移后行为可能偏移
+- 源码：`src/main/ets/database/DatabaseConfig.ets`
 
-```arkts
-import { EntityData, EntityDataInput, Repository } from 'ocorm'
-
-function makeUser(id: number, name: string): EntityData {
-  const input = EntityDataInput.create()
-  input.set('id', id)
-  input.set('name', name)
-  return EntityData.from('User', input)
-}
-
-const repo = new Repository('User')
-
-await repo.transaction(async (txRepo) => {
-  await repo.save(makeUser(1, 'blocked'))
-})
-```
-
-## 3. 高风险兼容点
-下面这些不是“导入名消失”，但实际迁移风险同样高：
-- 把 `saveAll` 当原子批处理
-- 把 `transactionWithOptions(timeout)` 当成“底层会立刻取消”
-- 把 `READ_UNCOMMITTED` / `SERIALIZABLE` 当成总是可用
-- 直接依赖内部实现文件如 `QueryExecutor*Support`、`rawsql/*` 作为公开 API
-
-```text
-兼容性判断原则:
-调用侧只要依赖了“旧宽松行为”，升级到当前仓库就要当 breaking change 处理
-```
-
-## 4. 误用示例
-下面这些在迁移时都要清理掉：
-
-```arkts
-await repo.rawQuery('SELECT * FROM user')
-await repo.rawExecute('DELETE FROM user WHERE id = 1')
-```
-
-```arkts
-await repo.transaction(async (txRepo) => {
-  await repo.removeById(1)
-})
-```
-
-```arkts
-const options = TransactionOptions.serializable()
-```
-
-## 5. 升级检查清单
-- [ ] 所有 `rawQuery/rawQuerySafe/rawExecute` 调用已参数化
-- [ ] 聚合/分组查询已从实体模式切到 `getRaw()/aggregate()`
-- [ ] 事务回调里统一复用 `txRepo`
-- [ ] 未直接依赖内部 support 模块或 `rawsql/*` 作为对外 API
+## 2. 升级前批量审计命令
 
 ```bash
+rg -n "rawQuery\(|rawQuerySafe\(|rawExecute\(|selectRaw\(|groupBy\(|having\(|TransactionOptions\.serializable\(|REPEATABLE_READ|SERIALIZABLE|new DatabaseConfig\(" src test
 ```
 
-## 6. 参考路径
-- `OCORM/CHANGELOG.md`
+## 3. 升级后最小验收
 
-## 7. 变更记录
-- 2026-03-28：基于当前仓库可证明行为补全 breaking changes 清单
+```bash
+ohpm i @offlinecat/ocorm
+hvigor test
+```
+
+建议新增一组纯库回归：
+
+1. `rawQuery` 参数化用例（通过 + 失败各 1 条）
+2. `getRaw()/aggregate()` 聚合用例
+3. `transactionWithOptions` 的 `READ_COMMITTED/READ_UNCOMMITTED/readOnly` 用例
+
+## 4. 源码对齐路径
+
+- `CHANGELOG.md`
+- `src/main/ets/database/DatabaseConfig.ets`
+- `src/main/ets/repository/TransactionOptions.ets`
+- `src/main/ets/repository/TransactionManager.ets`
+- `src/main/ets/repository/Repository.ets`
+- `src/main/ets/repository/rawsql/RawSqlGuards.ets`
+- `src/main/ets/query/QueryExecutor.ets`
+

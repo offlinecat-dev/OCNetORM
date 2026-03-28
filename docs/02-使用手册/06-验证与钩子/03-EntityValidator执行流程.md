@@ -201,7 +201,7 @@ try {
 ### 8.4 报错与定位方式
 定位顺序固定按下面做，不要猜：
 1. 看 `result.errors.length` 或捕获到的错误类型，先判断是单错还是多错。
-2. 看 `error.name`，确认是 `RequiredValidationError`、`PatternValidationError`、`UniqueValidationError` 还是 `EntityValidationError`。
+2. 看 `error.name`，确认是字段级 `ValidationError` 还是聚合级 `EntityValidationError`。
 3. 看 `error.message`，拿到用户可读提示。
 4. 如果是聚合错，再回到 `validate` 版本读取 `result.errors` 逐条拆开。
 5. 如果 `Unique` 没报错但业务数据重复，优先检查调用时是否传入了 `uniqueChecker`。
@@ -209,8 +209,7 @@ try {
 ```ts
 import {
   ValidationError,
-  EntityValidationError,
-  UniqueValidationError
+  EntityValidationError
 } from 'ocorm'
 import { EntityValidator } from 'ocorm'
 
@@ -221,9 +220,7 @@ try {
     uniqueChecker: (_entityName, _propertyName, value) => value !== 'duplicated@example.com'
   })
 } catch (error) {
-  if (error instanceof UniqueValidationError) {
-    console.error('唯一性失败:', error.message)
-  } else if (error instanceof EntityValidationError) {
+  if (error instanceof EntityValidationError) {
     console.error('聚合失败:', error.message)
   } else if (error instanceof ValidationError) {
     console.error('字段级失败:', error.message)

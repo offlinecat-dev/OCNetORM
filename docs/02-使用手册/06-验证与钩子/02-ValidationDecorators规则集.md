@@ -126,21 +126,20 @@ class Task {
 ### 4.1 常见验证错误类型
 ```ts
 import {
+  ValidationError,
   RequiredValidationError,
   LengthValidationError,
   EmailValidationError,
-  RangeValidationError,
-  PatternValidationError,
-  DateValidationError,
-  EnumValidationError,
-  CustomValidationError,
-  UniqueValidationError,
   EntityValidationError
 } from 'ocorm'
 ```
 
+说明：
+- `ocorm` 公共导出里已提供通用基类 `ValidationError`，以及常见的 `Required/Length/Email` 细分错误与聚合错误 `EntityValidationError`。
+- 其余规则失败可统一按 `ValidationError` 处理，并通过 `error.message`、`error.name` 和业务上下文定位。
+
 ### 4.2 定位步骤
-- 看 `error.name` 判断规则类型（如 `PatternValidationError`）
+- 先看 `error.name` 与 `error.message`，定位失败字段与规则语义
 - 看 `error.message` 获取用户可读信息
 - 多字段失败时，`validateOrThrow` 抛 `EntityValidationError`，其 `reason` 是聚合摘要
 - 优先核查字段映射：`EntityValidator` 会用 `metadata.getColumnByProperty(propertyName)?.columnName ?? propertyName`

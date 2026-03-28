@@ -1,11 +1,29 @@
 # 04-API参考
 
-仅覆盖 `ocorm` 公共导出 API。
+本目录只覆盖 `Index.ets` 对外导出的公共 API，并与 `src/main/ets/**` 实现保持一一对应。
 
-1. [01-核心入口-错误与类型API](./01-核心入口-错误与类型API.md)
-2. [02-查询-关系与缓存API](./02-查询-关系与缓存API.md)
-3. [03-仓储-事务与原生SQLAPI](./03-仓储-事务与原生SQLAPI.md)
-4. [04-Schema-迁移与工具链API](./04-Schema-迁移与工具链API.md)
-5. [05-映射-验证与装饰器API](./05-映射-验证与装饰器API.md)
+## 分层索引
 
-不包含：测试钩子、内部连接层实现、`entry` 测试基建。
+1. [core](./core/README.md)  
+   初始化入口、实体注册、作用域、全局上下文事件
+2. [query](./query/README.md)  
+   QueryBuilder / QueryExecutor / RelationLoader / QueryCache
+3. [repository](./repository/README.md)  
+   Repository、事务、批量写入、原生 SQL 安全守卫
+4. [schema](./schema/README.md)  
+   SchemaBuilder、SchemaInspector、SchemaDiffer、MigrationManager
+5. [mapping](./mapping/README.md)  
+   DataMapper、TypeConverter、ViewModelMapper
+6. [validation](./validation/README.md)  
+   ValidationDecorators、ValidationMetadataStorage、EntityValidator
+
+## 全局约束速记
+
+- 参数化 SQL 是强约束：`rawQuery/rawQuerySafe/rawExecute` 均要求 `?` 占位符且参数数量匹配。
+- 并发事务有守卫：连接池启用且存在活动事务时，未绑定事务上下文的写入会被拒绝。
+- 超时语义分层：查询超时由 `QueryBuilder.timeout()` 或 `DatabaseConfig.queryTimeoutMs` 控制；事务超时由 `TransactionOptions.timeout` 控制，超时后会触发后台清理流程。
+
+## 范围声明
+
+- 仅文档化公共 API 契约：用途 / 参数 / 返回 / 异常 / 副作用 / 事务上下文 / 最小示例。
+- 不包含：测试专用钩子、内部连接池细节实现、`entry` 模块测试基建。
