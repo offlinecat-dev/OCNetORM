@@ -1,0 +1,293 @@
+# 02-批量操作-BatchInsert-BatchOperations
+
+> 状态：已完成
+> 适用版本：ocorm 3.x（当前仓库）
+> 最后更新：2026-03-27
+
+## 1. 目标
+说明 `Repository.batchInsert`、`Repository.saveAll`、`BatchInsertOptions`、`BatchInsertResult` 在当前源码中的真实行为，重点区分：
+- 顺序保存 vs 真正批量插入
+- 本地事务 vs 已有事务复用
+- 失败结果返回 vs 严格事务内升级为异常
+
+## 2. 背景与适用范围
+这部分能力分散在两层：
+- `Repository` 负责暴露 `saveAll`、`batchInsert` 并套上写入守卫、事务上下文与严格失败升级。
+- `BatchOperations` 负责真正执行顺序保存、批量验证、钩子执行和 `数据库连接.batchInsert` 调用。
+
+如果你的目标是“高吞吐导入”，首选 `batchInsert`。如果你的目标是“逐条复用 `save` 语义”，才使用 `saveAll`。
+
+## 3. 核心 API 速记
+- `saveAll(entities: Array<EntityData>): Promise<Array<SaveResult>>`
+- `batchInsert(entities: Array<EntityData>, options?: BatchInsertOptions): Promise<BatchInsertResult>`
+- `BatchInsertOptions.createDefault()`
+- `BatchInsertOptions.create(useTransaction, executeHooks, executeValidation)`
+- `BatchInsertOptions.createFast()`
+- `BatchInsertOptions.createSafe()`
+- `BatchInsertResult.createSuccess(...)`
+- `BatchInsertResult.createFailure(...)`
+- `BatchInsertResult.createPartialSuccess(...)`
+
+## 4. 关键语义
+### 4.1 `saveAll` 只是顺序循环
+`BatchOperations.saveAll` 的实现非常直接：遍历数组，逐项调用 `saveOne`，把每次结果压入数组后返回。
+
+这意味着：
+- 它不是数据库级批处理。
+- 它没有自动包裹单独事务。
+- 它的吞吐量和失败语义都更接近“循环调用 `save`”。
+
+### 4.2 `batchInsert` 才是真正的批量插入入口
+`batchInsert` 会先做三类前置工作，再调用底层 `store.batchInsert(...)`：
+- 可选验证：`executeValidation`
+- 可选 `beforeSave` 钩子：`executeHooks`
+- 实体到 `ValuesBucket` 的转换
+
+任何一个前置阶段出错，都会直接返回 `BatchInsertResult.createFailure(...)`，并在错误信息里带上索引位置。
+
+### 4.3 `BatchInsertOptions` 的真实开关
+- `useTransaction = true`：在当前连接没有活动事务时，`BatchOperations` 会自行 `beginTransaction / commit / rollBack`
+- `executeHooks = true`：逐条执行 `beforeSave`
+- `executeValidation = true`：逐条跑实体校验和唯一性校验
+
+如果当前连接上已经存在事务，`batchInsert` 不会再开启本地事务，而是直接复用现有事务上下文。
+
+### 4.4 返回值不是只有“成功/失败”两态
+`BatchInsertResult` 有三种常见形态：
+- 全量成功：`success = true`，`insertedCount === totalCount`
+- 部分成功：`success = false`，但 `insertedCount > 0`
+- 全量失败：`success = false`，`insertedCount === 0`
+
+不要把 `success = false` 简化理解成“肯定一条都没写进去”。
+
+### 4.5 严格事务里的失败会升级
+`Repository.batchInsert(...)` 在事务回调提供的 `txRepo` 上执行时，会调用 `ensureBatchInsertResultSuccess`。
+
+这意味着：
+- 普通上下文里，失败通常以 `BatchInsertResult` 返回
+- 严格事务上下文里，失败结果会被升级为 `ExecutionError('BATCH_INSERT', ...)`
+- 再由事务层包装成回滚异常
+
+## 5. 正确示例
+默认选项等价于 `BatchInsertOptions.createDefault()`，会启用事务、钩子和验证。调用端应明确检查 `BatchInsertResult`。
+
+```ts
+import { EntityData, EntityDataInput, Repository } from 'ocorm'
+
+function makeUser(id: number, name: string): EntityData {
+  const input = EntityDataInput.create()
+  input.set('id', id)
+  input.set('name', name)
+  return EntityData.from('User', input)
+}
+
+const userRepo = new Repository('User')
+
+const result = await userRepo.batchInsert([
+  makeUser(101, 'Alice'),
+  makeUser(102, 'Bob')
+])
+
+if (!result.success) {
+  console.error(result.errorMessage, result.failedIndexes)
+} else {
+  console.info(result.insertedCount, result.totalCount)
+}
+```
+
+如果你明确知道这是一次“快速导入”，并接受跳过钩子与验证，可以使用 `createFast()`。这不是安全默认值，只是显式降级。
+
+```ts
+import { BatchInsertOptions, EntityData, EntityDataInput, Repository } from 'ocorm'
+
+function makeUser(id: number, name: string): EntityData {
+  const input = EntityDataInput.create()
+  input.set('id', id)
+  input.set('name', name)
+  return EntityData.from('User', input)
+}
+
+const userRepo = new Repository('User')
+
+const options = BatchInsertOptions.createFast()
+const result = await userRepo.batchInsert([
+  makeUser(201, 'Bulk-1'),
+  makeUser(202, 'Bulk-2')
+], options)
+
+console.info(result.success, result.insertedCount, result.getSuccessRate())
+```
+
+如果你需要“逐条复用 `save` 语义”，例如依赖 `save` 的插入/更新判定，就使用 `saveAll`，并逐项检查每个 `SaveResult`。
+
+```ts
+import { EntityData, EntityDataInput, Repository } from 'ocorm'
+
+function makeUser(id: number, name: string): EntityData {
+  const input = EntityDataInput.create()
+  input.set('id', id)
+  input.set('name', name)
+  return EntityData.from('User', input)
+}
+
+const userRepo = new Repository('User')
+
+const results = await userRepo.saveAll([
+  makeUser(301, 'Upsert-A'),
+  makeUser(302, 'Upsert-B')
+])
+
+for (const [index, item] of results.entries()) {
+  if (!item.success) {
+    console.error(`第 ${index} 项失败:`, item.errorMessage)
+  }
+}
+```
+
+## 6. 误用示例
+下面这段代码的错误在于把 `saveAll` 当成高性能批量导入。源码里它只是顺序调用 `save`，吞吐和原子性都不是同一个量级。
+
+```ts
+import { EntityData, EntityDataInput, Repository } from 'ocorm'
+
+function makeUser(id: number, name: string): EntityData {
+  const input = EntityDataInput.create()
+  input.set('id', id)
+  input.set('name', name)
+  return EntityData.from('User', input)
+}
+
+const userRepo = new Repository('User')
+
+// 误用：希望一次性高吞吐导入
+await userRepo.saveAll(new Array(1000).fill(0).map((_, index) => {
+  return makeUser(index + 1, `User-${index + 1}`)
+}))
+```
+
+另一个常见误用是把 `createFast()` 误解成“只关闭事务，其他保护还在”。实际源码里它一次性关闭了事务、钩子和验证。
+
+```ts
+import { BatchInsertOptions, EntityData, EntityDataInput, Repository } from 'ocorm'
+
+function makeUserWithEmail(id: number, email: string): EntityData {
+  const input = EntityDataInput.create()
+  input.set('id', id)
+  input.set('email', email)
+  return EntityData.from('User', input)
+}
+
+const userRepo = new Repository('User')
+
+// 误用：以为 still 会执行 beforeSave 和验证
+const options = BatchInsertOptions.createFast()
+await userRepo.batchInsert([
+  makeUserWithEmail(401, 'duplicated@example.com'),
+  makeUserWithEmail(402, 'duplicated@example.com')
+], options)
+```
+
+还有一种误用是只看 `success` 字段，不看计数和失败索引。`BatchInsertResult` 存在“部分成功”形态。
+
+```ts
+import { EntityData, EntityDataInput, Repository } from 'ocorm'
+
+function makeUser(id: number, name: string): EntityData {
+  const input = EntityDataInput.create()
+  input.set('id', id)
+  input.set('name', name)
+  return EntityData.from('User', input)
+}
+
+const userRepo = new Repository('User')
+const result = await userRepo.batchInsert([
+  makeUser(501, 'ok-1'),
+  makeUser(502, 'ok-2'),
+  makeUser(503, 'maybe-fail')
+])
+
+// 误用：只看一个布尔值，完全丢掉 insertedCount / totalCount / failedIndexes
+if (!result.success) {
+  console.error('全部失败')
+}
+```
+
+## 7. 失败语义与抛错说明
+空数组不是失败，源码明确返回 `BatchInsertResult.createSuccess(0, 0)`。这是一种“空操作成功”。
+
+```ts
+import { Repository } from 'ocorm'
+
+const userRepo = new Repository('User')
+const result = await userRepo.batchInsert([])
+
+console.info(result.success, result.insertedCount, result.totalCount)
+```
+
+普通上下文中，以下错误大多会以 `BatchInsertResult.createFailure(...)` 返回，而不是立刻抛异常：
+- 获取数据库连接失败
+- 验证失败
+- `beforeSave` 钩子失败
+- 数据转换失败
+- 底层批量插入执行失败
+
+```ts
+import { EntityData, EntityDataInput, Repository } from 'ocorm'
+
+function makeUser(id: number, name: string): EntityData {
+  const input = EntityDataInput.create()
+  input.set('id', id)
+  input.set('name', name)
+  return EntityData.from('User', input)
+}
+
+const userRepo = new Repository('User')
+
+const result = await userRepo.batchInsert([
+  makeUser(601, 'A'),
+  makeUser(601, 'B')
+])
+
+if (!result.success) {
+  console.error(result.errorMessage, result.failedIndexes)
+}
+```
+
+但在事务回调里，同样的失败结果会被 `Repository` 升级为异常，最终触发事务回滚。
+
+```ts
+import { EntityData, EntityDataInput, Repository } from 'ocorm'
+
+function makeUser(id: number, name: string): EntityData {
+  const input = EntityDataInput.create()
+  input.set('id', id)
+  input.set('name', name)
+  return EntityData.from('User', input)
+}
+
+const userRepo = new Repository('User')
+
+try {
+  await userRepo.transaction(async (txRepo) => {
+    await txRepo.batchInsert([
+      makeUser(701, 'A'),
+      makeUser(701, 'B')
+    ])
+  })
+} catch (e) {
+  console.error('严格事务中的 batchInsert 已抛错并回滚:', e)
+}
+```
+
+## 8. 实战规则
+- 需要“按 `save` 语义逐条处理”时用 `saveAll`，不要伪装成批量导入。
+- 需要吞吐量时用 `batchInsert`，并显式选择 `BatchInsertOptions`。
+- 调用后始终检查 `insertedCount`、`totalCount`、`failedIndexes`，不要只看 `success`。
+- 事务回调里要意识到：`batchInsert` 失败可能直接抛异常，而不是返回失败对象。
+
+## 9. 参考源码
+
+## 10. 变更记录
+- 2026-03-27：补全批量操作、选项开关、结果语义与失败边界说明
+
+
