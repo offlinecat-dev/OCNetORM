@@ -1,31 +1,37 @@
 # 17-治理与审查归档
 
 > 状态：已完成
-> 适用范围：`OCORM/docs/开发者文档/17-治理与审查归档`
+> 适用范围：`docs/开发者文档/17-治理与审查归档`
 > 最后更新：2026-03-28
 
 ## 1. 目录定位
 本目录不是“宣传页”，而是治理留痕区。它只归档当前仓库里能追溯到的审查事实、修复批次、测试登记路径和剩余风险，不替代码执行结果编故事。
 
-当前仓库里能直接用于审查归档的证据面，至少包括：
-- `OCORM/CHANGELOG.md` 中按版本记录的修复与测试回归条目
-- `entry/src/main/ets/suites/*.ets` 中的 Entry 同步套件注册与用例命名
-- `entry/src/test/*.test.ets` 中的 Hypium 测试登记与断言语义
-- `OCORM/docs/开发者文档` 中已经完成的说明文档
+当前仓库里可核验的审查证据面，至少包括：
+- `CHANGELOG.md` 中按版本记录的修复与测试回归条目
+- `../entry/src/main/ets/suites/*.ets` 中的 Entry 同步套件注册与用例命名
+- `../entry/src/test/*.test.ets` 中的 Hypium 测试登记与断言语义
+- `docs/开发者文档` 中已经完成的说明文档
+
+```text
+跨模块证据边界说明:
+- `../entry/...` 为兄弟模块证据路径（相对当前模块根目录 `OCORM`）
+- 这类路径用于“跨模块可核验”，不等同于“当前模块内可直接定位”
+```
 
 ## 2. 归档规则
 - 只写仓库中能定位到的事实，不写“应该如此”或“计划中如此”。
 - 报告里的“已修复”必须能回指到 `CHANGELOG`、修复套件命名或当前文档说明；否则只能写“已记录”。
 - 报告里的“已验证通过”必须存在明确执行记录或产物；仅看到测试文件存在，不等于测试已经执行。
-- 当 `entry/src/main/ets/suites/index.ets` 与 `entry/src/test/List.test.ets` 的登记口径不一致时，要归档为“入口层覆盖差异”，不能擅自视为全量纳管。
+- 当 `../entry/src/main/ets/suites/index.ets` 与 `../entry/src/test/List.test.ets` 的登记口径不一致时，要归档为“入口层覆盖差异”，不能擅自视为全量纳管。
 - 每份归档至少包含：范围、证据、问题分级、修复映射、剩余风险、结论。
 
 ```text
 证据采集顺序（固定）:
-1. 先看 OCORM/CHANGELOG.md
-2. 再看 entry/src/main/ets/suites/* 的套件命名与 case 注册
-3. 再看 entry/src/test/* 的 Hypium 测试入口与断言
-4. 最后用 OCORM/docs/开发者文档 中已完成章节补充行为解释
+1. 先看 CHANGELOG.md
+2. 再看 ../entry/src/main/ets/suites/* 的套件命名与 case 注册
+3. 再看 ../entry/src/test/* 的 Hypium 测试入口与断言
+4. 最后用 docs/开发者文档 中已完成章节补充行为解释
 ```
 
 ```text
@@ -93,7 +99,7 @@ LOW           -> 可以并入“待补文档/待补追踪”
 ```text
 结论: 已记录并已有修复批次
 版本落点: 3.0.1 / 3.0.2
-仓库证据: OCORM/CHANGELOG.md + 对应 Entry suite/test 命名
+仓库证据: CHANGELOG.md + 对应 Entry suite/test 命名
 执行口径: 当前材料证明“已登记回归”或“已纳入代码”，不证明“本次审查时已执行通过”
 后续动作: 如需写“已验证通过”，必须补充可追溯执行记录
 ```
@@ -114,18 +120,18 @@ LOW           -> 可以并入“待补文档/待补追踪”
 
 ## 6. 引用路径规则
 - 引用优先使用仓库相对路径，必要时补具体文件名与套件名。
-- 涉及版本落点时，优先引用 `OCORM/CHANGELOG.md` 的对应版本段落。
-- 涉及测试纳管时，同时引用 `entry/src/main/ets/suites/*.ets` 与 `entry/src/test/*.test.ets`。
+- 涉及版本落点时，优先引用 `CHANGELOG.md` 的对应版本段落。
+- 涉及测试纳管时，同时引用 `../entry/src/main/ets/suites/*.ets` 与 `../entry/src/test/*.test.ets`。
 - 涉及行为解释时，优先引用已完成的开发者文档，例如：
-  - `OCORM/docs/开发者文档/06-仓储与事务/05-事务守卫-嵌套-跨仓库-未绑定写入.md`
-  - `OCORM/docs/开发者文档/06-仓储与事务/06-rawQuery-rawQuerySafe-rawExecute.md`
-  - `OCORM/docs/开发者文档/05-查询体系/06-QueryExecutor原生模式-getRaw.md`
+  - `docs/开发者文档/06-仓储与事务/05-事务守卫-嵌套-跨仓库-未绑定写入.md`
+  - `docs/开发者文档/06-仓储与事务/06-rawQuery-rawQuerySafe-rawExecute.md`
+  - `docs/开发者文档/05-查询体系/06-QueryExecutor原生模式-getRaw.md`
 
 ```text
 推荐引用组合:
-1. 版本修复事实      -> OCORM/CHANGELOG.md
-2. 套件纳管事实      -> entry/src/main/ets/suites/index.ets
-3. 测试入口事实      -> entry/src/test/List.test.ets
+1. 版本修复事实      -> CHANGELOG.md
+2. 套件纳管事实      -> ../entry/src/main/ets/suites/index.ets
+3. 测试入口事实      -> ../entry/src/test/List.test.ets
 4. 单项断言事实      -> 对应 EntryOrm*.test.ets / *.Suite.ets
 5. 行为说明事实      -> 已完成的开发者文档
 ```
@@ -141,8 +147,8 @@ LOW           -> 可以并入“待补文档/待补追踪”
 - `EntryOrmReviewFixSuite` / `EntryOrmReviewFix.test.ets`
 - `EntryOrmReviewReport19FixSuite` / `EntryOrmReviewReport19Fix.test.ets`
 - `EntryOrmReviewReport20FixSuite` / `EntryOrmReviewReport20Fix.test.ets`
-- `entry/src/main/ets/suites/index.ets` 已注册以上 3 条审查修复线
-- `entry/src/test/List.test.ets` 当前显式挂载的 review 相关 Hypium 入口只看到 `EntryOrmReviewReport20Fix.test.ets`
+- `../entry/src/main/ets/suites/index.ets` 已注册以上 3 条审查修复线
+- `../entry/src/test/List.test.ets` 当前显式挂载的 review 相关 Hypium 入口只看到 `EntryOrmReviewReport20Fix.test.ets`
 
 这类“Suite 已注册、入口挂载未完全对齐”的事实，应在单日报告里归档为覆盖口径差异，而不是伪装成“全部回归已执行”。
 

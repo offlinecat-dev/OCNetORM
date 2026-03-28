@@ -37,5 +37,5 @@ repo.createQueryBuilder()
 语义结果：抛 `InvalidConditionError('HAVING', 'HAVING 占位符数量与参数数量不一致')`。
 
 ## 源码定位
-- `OCORM/src/main/ets/query/QueryBuilder.ets`（公共入口）
-- `OCORM/src/main/ets/query/QueryBuilderGuards.ets`（内部守卫实现，未导出）
+- `src/main/ets/query/QueryBuilder.ets`（公共入口）
+- `src/main/ets/query/QueryBuilderGuards.ets`（内部守卫实现，未导出）

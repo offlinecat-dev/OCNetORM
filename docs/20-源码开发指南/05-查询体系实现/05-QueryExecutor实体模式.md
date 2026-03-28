@@ -35,6 +35,6 @@ await new QueryExecutor(
 语义结果：抛 `ExecutionError('COUNT', '实体查询不支持 selectRaw/groupBy/having，请使用 getRaw() 或 aggregate()')`。
 
 ## 源码定位
-- `OCORM/src/main/ets/query/QueryExecutor.ets`
-- `OCORM/src/main/ets/query/QueryExecutorRelationSupport.ets`
-- `OCORM/src/main/ets/query/QueryExecutorSubQueryPreparationSupport.ets`
+- `src/main/ets/query/QueryExecutor.ets`
+- `src/main/ets/query/QueryExecutorRelationSupport.ets`
+- `src/main/ets/query/QueryExecutorSubQueryPreparationSupport.ets`

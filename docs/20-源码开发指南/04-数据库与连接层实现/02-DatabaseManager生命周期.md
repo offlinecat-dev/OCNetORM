@@ -91,6 +91,6 @@ function reproduceNotInitialized(): void {
 - 连接池开启后尽量统一使用 `withStoreLease`；手动 `acquireStoreLease` 必须保证 `lease.release()`。
 
 ## 关键源码路径
-- `OCORM/src/main/ets/database/DatabaseManager.ets`
-- `OCORM/src/main/ets/database/manager/StorePoolFactory.ets`
-- `OCORM/src/main/ets/database/manager/QuerySlotGate.ets`
+- `src/main/ets/database/DatabaseManager.ets`
+- `src/main/ets/database/manager/StorePoolFactory.ets`
+- `src/main/ets/database/manager/QuerySlotGate.ets`

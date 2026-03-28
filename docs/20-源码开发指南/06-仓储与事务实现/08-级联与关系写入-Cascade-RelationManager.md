@@ -78,7 +78,7 @@ await userRepo.save(user)
 `CascadeHandler` 在不同操作里支持的方向不同：
 - insert/update：会看 `MANY_TO_ONE`、`ONE_TO_ONE`、`ONE_TO_MANY`、`MANY_TO_MANY`
 - remove：会先处理 many-to-many 清空，再处理级联删除
-- 只有你把关联实体挂进 `EntityData` 的 related data（如 `setRelatedSingle/setRelatedArray`）后，级联路径才有数据可处理
+- 大多数级联删除路径依赖 `EntityData` 上的 related data（如 `setRelatedSingle/setRelatedArray`）；但 `remove` 下的 `MANY_TO_MANY` 只要存在 `sourcePk`，就会先执行 `sync(sourcePk, [], relationName)` 清空中间表，即使没有挂载 related data
 
 ## 5. 误用示例
 最常见误用是把 `attach` 当成“重复调用也会插入多条”。当前实现会先查重，重复关联只返回成功 `0`，不会报错也不会重复插入。
@@ -135,11 +135,11 @@ try {
 - 级联只会覆盖元数据允许的方向，不要把未配置 cascade 的关系当成自动联动。
 
 ## 8. 参考源码
-- `OCORM/src/main/ets/repository/RelationManager.ets`
-- `OCORM/src/main/ets/repository/CascadeHandler.ets`
-- `OCORM/src/main/ets/repository/Repository.ets`
-- `OCORM/src/main/ets/errors/RelationError.ets`
-- `OCORM/src/main/ets/core/MetadataStorage.ets`
+- `src/main/ets/repository/RelationManager.ets`
+- `src/main/ets/repository/CascadeHandler.ets`
+- `src/main/ets/repository/Repository.ets`
+- `src/main/ets/errors/RelationError.ets`
+- `src/main/ets/core/MetadataStorage.ets`
 
 ## 9. 变更记录
 - 2026-03-27：补全关系写入、级联规则、SAVEPOINT 与失败语义说明

@@ -286,11 +286,11 @@ try {
 - 事务回调里要意识到：`batchInsert` 失败可能直接抛异常，而不是返回失败对象。
 
 ## 9. 参考源码
-- `OCORM/src/main/ets/repository/Repository.ets`
-- `OCORM/src/main/ets/repository/BatchOperations.ets`
-- `OCORM/src/main/ets/repository/BatchInsertOptions.ets`
-- `OCORM/src/main/ets/repository/BatchInsertResult.ets`
-- `OCORM/src/main/ets/errors/TransactionError.ets`
+- `src/main/ets/repository/Repository.ets`
+- `src/main/ets/repository/BatchOperations.ets`
+- `src/main/ets/repository/BatchInsertOptions.ets`
+- `src/main/ets/repository/BatchInsertResult.ets`
+- `src/main/ets/errors/TransactionError.ets`
 
 ## 10. 变更记录
 - 2026-03-27：补全批量操作、选项开关、结果语义与失败边界说明

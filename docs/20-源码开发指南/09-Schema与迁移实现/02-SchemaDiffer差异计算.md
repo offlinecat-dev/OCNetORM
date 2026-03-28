@@ -40,7 +40,7 @@ for (let i = 0; i < diff.changes.length; i++) {
 - 缺表：生成 `CREATE_TABLE`，同时把该表对应的索引 SQL 一并加入 `sql`，回滚语句为 `DROP TABLE IF EXISTS`。
 - 新增列：仅当新增列不是主键、不要求自增，且不是“无默认值的非空列”时，才生成 `ALTER TABLE ... ADD COLUMN`。
 - 修改列或删列：一律触发 `REBUILD_TABLE`。实现会创建 `__ocorm_backup_*` 备份表、`__ocorm_tmp_*` 临时表，复制交集列后替换原表。
-- 索引差异：按“唯一性 + 列集合”判断等价，索引名不是主要判断条件。重建表后会继续补 `CREATE_INDEX` 变更。
+- 索引差异：按“唯一性 + 归一化后的列顺序串（`normalize + join`）”判断等价，属于顺序敏感比较，不是纯集合等价；索引名不是主要判断条件。重建表后会继续补 `CREATE_INDEX` 变更。
 - 多对多中间表：`includeJoinTables` 默认开启；设为 `false` 时，中间表不会进入差异结果。
 
 ```sql

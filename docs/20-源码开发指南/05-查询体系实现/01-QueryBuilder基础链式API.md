@@ -26,6 +26,6 @@ repo.createQueryBuilder().orderBy('id', 'DOWN' as never)
 语义结果：抛 `InvalidConditionError('ORDER BY', '非法排序方向: DOWN')`。
 
 ## 源码定位
-- `OCORM/src/main/ets/query/QueryBuilder.ets`
-- `OCORM/src/main/ets/query/QueryBuilderGuards.ets`（内部守卫实现，未导出）
-- `OCORM/src/main/ets/query/QueryExecutor.ets`
+- `src/main/ets/query/QueryBuilder.ets`
+- `src/main/ets/query/QueryBuilderGuards.ets`（内部守卫实现，未导出）
+- `src/main/ets/query/QueryExecutor.ets`

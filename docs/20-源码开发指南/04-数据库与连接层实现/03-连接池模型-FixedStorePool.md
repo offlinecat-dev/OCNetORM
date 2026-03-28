@@ -78,7 +78,7 @@ async function reproduceLeaseLeak(): Promise<void> {
 - 连接池关闭后任何待获取请求都会失败，测试里不要复用已关闭实例。
 
 ## 关键源码路径
-- `OCORM/src/main/ets/database/pool/FixedStorePool.ets`
-- `OCORM/src/main/ets/database/pool/PoolConfig.ets`
-- `OCORM/src/main/ets/database/pool/StoreLease.ets`
-- `OCORM/src/main/ets/database/DatabaseManager.ets`
+- `src/main/ets/database/pool/FixedStorePool.ets`
+- `src/main/ets/database/pool/PoolConfig.ets`
+- `src/main/ets/database/pool/StoreLease.ets`
+- `src/main/ets/database/DatabaseManager.ets`

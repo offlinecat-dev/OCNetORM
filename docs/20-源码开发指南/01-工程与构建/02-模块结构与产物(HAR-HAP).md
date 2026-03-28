@@ -1,12 +1,12 @@
 # 模块结构与产物（HAR/HAP）
 
 ## 1. 模块事实（来自真实 module.json5）
-- `OCORM/src/main/module.json5`：`module.type = "har"`
-- `entry/src/main/module.json5`：`module.type = "entry"`
+- `src/main/module.json5`：`module.type = "har"`
+- `../entry/src/main/module.json5`：`module.type = "entry"`
 - 根编排 `build-profile.json5` 同时声明 `entry` 与 `ocorm`
 
 ```json5
-// OCORM/src/main/module.json5
+// src/main/module.json5
 {
   "module": {
     "name": "ocorm",
@@ -17,7 +17,7 @@
 ```
 
 ```json5
-// entry/src/main/module.json5（节选）
+// ../entry/src/main/module.json5（节选）
 {
   "module": {
     "name": "entry",
@@ -30,12 +30,12 @@
 ```
 
 ## 2. 依赖关系与产物边界
-- `entry` 通过本地依赖引入 `ocorm`：`entry/oh-package.json5 -> "ocorm": "file:../OCORM"`
-- `ocorm` 的包信息由 `OCORM/oh-package.json5` 定义，当前版本 `3.0.2`
+- `entry` 通过本地依赖引入 `ocorm`：`../entry/oh-package.json5 -> "ocorm": "file:../OCORM"`
+- `ocorm` 的包信息由 `oh-package.json5` 定义，当前版本 `3.0.2`
 - 构建顺序必须保持：先 HAR，后 HAP
 
 ```json5
-// entry/oh-package.json5（节选）
+// ../entry/oh-package.json5（节选）
 {
   "dependencies": {
     "ocorm": "file:../OCORM"
@@ -44,7 +44,7 @@
 ```
 
 ```json5
-// OCORM/oh-package.json5（节选）
+// oh-package.json5（节选）
 {
   "name": "ocorm",
   "version": "3.0.2",
@@ -91,7 +91,7 @@ tools\hvigor-local.cmd assembleHap
 
 ## 5. 引用的真实文件
 - `build-profile.json5`
-- `OCORM/src/main/module.json5`
-- `entry/src/main/module.json5`
-- `entry/oh-package.json5`
-- `OCORM/oh-package.json5`
+- `src/main/module.json5`
+- `../entry/src/main/module.json5`
+- `../entry/oh-package.json5`
+- `oh-package.json5`

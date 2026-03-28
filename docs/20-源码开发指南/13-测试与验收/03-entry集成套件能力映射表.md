@@ -1,7 +1,7 @@
 # 03-entry集成套件能力映射表
 
 > 状态：已完成
-> 适用范围：`entry/src/main/ets/suites/*`
+> 适用范围：`../entry/src/main/ets/suites/*`（entry 为 OCORM 的兄弟模块）
 > 最后更新：2026-03-28
 
 ## 1. 目标
@@ -10,7 +10,7 @@
 - 给新增回归用例时提供落点参考。
 
 ## 2. 当前 Suite 注册面
-`entry/src/main/ets/suites/index.ets` 当前注册了核心套件、Phase 8 性能/边界套件，以及 Phase 9 Entry 同步套件。
+`../entry/src/main/ets/suites/index.ets` 当前注册了核心套件、Phase 8 性能/边界套件，以及 Phase 9 Entry 同步套件。
 
 ```arkts
 // Phase 9 Entry 同步套件
@@ -66,10 +66,10 @@ timeout/cleanup      -> EntryOrmCoreFixSuite / EntryOrmSecurityFixSuite
 批量/性能           -> EntryOrmPerformanceBatchSuite
 ```
 
-Hypium 入口若要跑到这些 suite 对应主题，还要检查 `entry/src/test/*.test.ets` 和 `entry/src/test/List.test.ets` 的挂载情况。
+Hypium 入口若要跑到这些 suite 对应主题，还要检查 `../entry/src/test/*.test.ets` 和 `../entry/src/test/List.test.ets` 的挂载情况（兄弟模块）。
 
 ```bash
-rg -n "EntryOrm|EntryConnectionPool|EntryRelationTimeout" entry/src/main/ets/suites entry/src/test
+rg -n "EntryOrm|EntryConnectionPool|EntryRelationTimeout" ../entry/src/main/ets/suites ../entry/src/test
 ```
 
 ## 5. 误用示例
@@ -82,9 +82,9 @@ rg -n "EntryOrm|EntryConnectionPool|EntryRelationTimeout" entry/src/main/ets/sui
 ```
 
 ## 6. 参考路径
-- `entry/src/main/ets/suites/index.ets`
-- `entry/src/main/ets/suites/*.ets`
-- `entry/src/test/*.test.ets`
+- `../entry/src/main/ets/suites/index.ets`
+- `../entry/src/main/ets/suites/*.ets`
+- `../entry/src/test/*.test.ets`
 
 ## 7. 变更记录
 - 2026-03-28：补全 entry 集成套件能力映射表

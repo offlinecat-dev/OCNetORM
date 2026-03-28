@@ -25,7 +25,7 @@ repo.createQueryBuilder().whereExists('invalidRelation', () => {})
 语义结果：抛 `RelationNotFoundError(entityName, 'invalidRelation')`。
 
 ## 源码定位
-- `OCORM/src/main/ets/query/QueryBuilder.ets`
-- `OCORM/src/main/ets/query/SubQuery.ets`
-- `OCORM/src/main/ets/query/QueryExecutorSubQueryPreparationSupport.ets`
-- `OCORM/src/main/ets/query/SubQueryRelationExecutor.ets`
+- `src/main/ets/query/QueryBuilder.ets`
+- `src/main/ets/query/SubQuery.ets`
+- `src/main/ets/query/QueryExecutorSubQueryPreparationSupport.ets`
+- `src/main/ets/query/SubQueryRelationExecutor.ets`

@@ -26,6 +26,6 @@ repo.createQueryBuilder().withLazy('posts.comments')
 语义结果：抛关系不存在错误（`withLazy` 仅接受一级关系名）。
 
 ## 源码定位
-- `OCORM/src/main/ets/query/RelationLoader.ets`
-- `OCORM/src/main/ets/query/QueryExecutorRelationSupport.ets`
-- `OCORM/src/main/ets/query/RelationLoaderMorphToSupport.ets`
+- `src/main/ets/query/RelationLoader.ets`
+- `src/main/ets/query/QueryExecutorRelationSupport.ets`
+- `src/main/ets/query/RelationLoaderMorphToSupport.ets`

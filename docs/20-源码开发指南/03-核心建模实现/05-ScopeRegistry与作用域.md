@@ -111,20 +111,20 @@ const qb = new Repository('User').createQueryBuilder().scope('tenant')
 const rows = await new QueryExecutor(qb).get()
 ```
 
-- `entry/src/main/ets/suites/QuerySuite.ets` 已覆盖：
+- `../entry/src/main/ets/suites/QuerySuite.ets` 已覆盖：
   - 连续 `scope('active').scope('adult')` 正常过滤
   - `scopes(['active','adult'])` 等价行为
   - 未注册作用域抛 `ScopeNotFoundError`
 
 ## 8. 源码定位
-- `OCORM/src/main/ets/core/ScopeRegistry.ets:24`
-- `OCORM/src/main/ets/core/ScopeRegistry.ets:60`
-- `OCORM/src/main/ets/core/ScopeRegistry.ets:74`
-- `OCORM/src/main/ets/core/ScopeRegistry.ets:88`
-- `OCORM/src/main/ets/core/ScopeRegistry.ets:160`
-- `OCORM/src/main/ets/core/ScopeRegistry.ets:175`
-- `OCORM/src/main/ets/query/QueryBuilder.ets:1135`
-- `OCORM/src/main/ets/query/QueryBuilder.ets:1138`
-- `OCORM/src/main/ets/core/EntitySchema.ets:173`
-- `entry/src/main/ets/suites/QuerySuite.ets:1229`
-- `entry/src/main/ets/suites/QuerySuite.ets:1263`
+- `src/main/ets/core/ScopeRegistry.ets:24`
+- `src/main/ets/core/ScopeRegistry.ets:60`
+- `src/main/ets/core/ScopeRegistry.ets:74`
+- `src/main/ets/core/ScopeRegistry.ets:88`
+- `src/main/ets/core/ScopeRegistry.ets:160`
+- `src/main/ets/core/ScopeRegistry.ets:175`
+- `src/main/ets/query/QueryBuilder.ets:1135`
+- `src/main/ets/query/QueryBuilder.ets:1138`
+- `src/main/ets/core/EntitySchema.ets:173`
+- `../entry/src/main/ets/suites/QuerySuite.ets:1229`
+- `../entry/src/main/ets/suites/QuerySuite.ets:1263`

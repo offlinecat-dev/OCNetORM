@@ -267,10 +267,10 @@ try {
 - 需要组合多个选项时，优先 `createDefault()` / `fromConfig(...)` 后再做局部覆写，语义更清楚。
 
 ## 10. 参考源码
-- `OCORM/src/main/ets/repository/TransactionOptions.ets`
-- `OCORM/src/main/ets/repository/TransactionManager.ets`
-- `OCORM/src/main/ets/repository/Repository.ets`
-- `OCORM/src/main/ets/errors/TransactionError.ets`
+- `src/main/ets/repository/TransactionOptions.ets`
+- `src/main/ets/repository/TransactionManager.ets`
+- `src/main/ets/repository/Repository.ets`
+- `src/main/ets/errors/TransactionError.ets`
 
 ## 11. 变更记录
 - 2026-03-27：补全事务选项默认值、工厂方法、隔离级别限制与失败语义说明

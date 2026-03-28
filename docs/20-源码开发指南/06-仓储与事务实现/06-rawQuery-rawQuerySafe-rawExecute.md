@@ -37,7 +37,7 @@ const rows = await userRepo.rawQuery(
 console.info(rows.length)
 ```
 
-`rawQuerySafe` 比 `rawQuery` 更适合面向接口层暴露，因为它先在入口处做更严格的参数校验。
+`rawQuerySafe` 适合需要显式防御式入口的场景：它会先做一轮参数化与占位符校验，然后再委托给 `rawQuery` 执行（`rawQuery` 内部仍会再次校验）。
 
 ```arkts
 import { Repository } from 'ocorm'
@@ -153,16 +153,16 @@ repo.queryCache.clear()
 如果你的目标是“拿受影响行数”，当前 `rawExecute` 不是最佳入口。
 
 ## 8. 实战规则
-- 只读 SQL 优先 `rawQuerySafe`，除非你明确需要更灵活的包装。
+- 只读 SQL 在需要显式前置防御时用 `rawQuerySafe`；它不是独立“更强能力”，而是“前置重复校验 + 委托 `rawQuery`”。
 - 写 SQL 只能用 `rawExecute`，并接受它的缓存清空副作用。
 - 参数化是硬性要求，不要试图拼接值到 SQL 字符串里。
 - 只要能用 `QueryBuilder`，优先用 `QueryBuilder`；原生 SQL 保留给复杂 CTE、Explain 或 ORM 暂未覆盖的表达式。
 
 ## 9. 参考源码
-- `OCORM/src/main/ets/repository/Repository.ets`
-- `OCORM/src/main/ets/repository/rawsql/RawSqlGuards.ets`
-- `OCORM/src/main/ets/errors/DatabaseError.ets`
-- `OCORM/src/main/ets/mapping/DataMapper.ets`
+- `src/main/ets/repository/Repository.ets`
+- `src/main/ets/repository/rawsql/RawSqlGuards.ets`
+- `src/main/ets/errors/DatabaseError.ets`
+- `src/main/ets/mapping/DataMapper.ets`
 
 ## 10. 变更记录
 - 2026-03-27：补全 rawQuery/rawQuerySafe/rawExecute 的边界、参数化规则与失败语义

@@ -110,7 +110,7 @@ function reproducePoolNormalization(): void {
 - 连接池 `maxSize` 与业务并发不匹配时，优先看池超时与排队指标，而不是盲目提升 SQL 超时。
 
 ## 关键源码路径
-- `OCORM/src/main/ets/database/DatabaseConfig.ets`
-- `OCORM/src/main/ets/database/pool/PoolConfig.ets`
-- `OCORM/src/main/ets/database/DatabaseManager.ets`
-- `OCORM/src/main/ets/database/manager/QuerySlotGate.ets`
+- `src/main/ets/database/DatabaseConfig.ets`
+- `src/main/ets/database/pool/PoolConfig.ets`
+- `src/main/ets/database/DatabaseManager.ets`
+- `src/main/ets/database/manager/QuerySlotGate.ets`

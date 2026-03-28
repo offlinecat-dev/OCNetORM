@@ -89,7 +89,7 @@ async function reproduceDoubleRelease(): Promise<void> {
 - `session.getTransactionStore() !== null` 时不要在中途释放该 lease。
 
 ## 关键源码路径
-- `OCORM/src/main/ets/database/session/DatabaseSession.ets`
-- `OCORM/src/main/ets/database/session/SessionStoreResolver.ets`
-- `OCORM/src/main/ets/database/pool/StoreLease.ets`
-- `OCORM/src/main/ets/database/DatabaseManager.ets`
+- `src/main/ets/database/session/DatabaseSession.ets`
+- `src/main/ets/database/session/SessionStoreResolver.ets`
+- `src/main/ets/database/pool/StoreLease.ets`
+- `src/main/ets/database/DatabaseManager.ets`

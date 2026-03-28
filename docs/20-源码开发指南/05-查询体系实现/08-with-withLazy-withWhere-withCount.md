@@ -29,6 +29,6 @@ repo.createQueryBuilder().withWhere('posts', () => {
 语义结果：抛 `InvalidConditionError('withWhere', '关联过滤回调执行失败: callback failed')`。
 
 ## 源码定位
-- `OCORM/src/main/ets/query/QueryBuilder.ets`
-- `OCORM/src/main/ets/query/QueryBuilderRelationStrategySupport.ets`
-- `OCORM/src/main/ets/query/RelationQueryOptions.ets`
+- `src/main/ets/query/QueryBuilder.ets`
+- `src/main/ets/query/QueryBuilderRelationStrategySupport.ets`
+- `src/main/ets/query/RelationQueryOptions.ets`

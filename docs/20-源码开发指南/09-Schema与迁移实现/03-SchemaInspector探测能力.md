@@ -45,7 +45,7 @@ for (let i = 0; i < tables.length; i++) {
   - 列必须是主键
   - 列类型需包含 `INT`
   - 建表 SQL 中必须匹配到该列后的 `AUTOINCREMENT`
-- `getIndexColumns()` 失败时直接返回空数组，不向外抛错；其余主查询失败会包装为 `ExecutionError`
+- `getIndexColumns()` 失败时直接返回空数组，不向外抛错；`getTableSql()` 失败时返回 `null`（降级继续探测，不包装为 `ExecutionError`）；其余主查询失败会包装为 `ExecutionError`
 
 ```sql
 -- SchemaInspector.getExistingTables 实际读取来源
@@ -131,7 +131,7 @@ if (productId?.unique === true) {
 ## 7. 失败处理 / 日志 / 回滚说明
 - `SchemaInspector` 是只读组件，不调用 `beginTransaction()`，也不调用 `commit()` / `rollBack()`。
 - 它自身不写 `_migrations` 日志。若探测发生在迁移链路之外，日志与告警完全由调用方负责。
-- `getExistingTables()`、`getTableInfo()`、`getTableIndexes()` 主流程失败时会抛 `ExecutionError`；调用方必须捕获。
+- `getExistingTables()`、`getTableInfo()`、`getTableIndexes()` 主流程失败时会抛 `ExecutionError`；调用方必须捕获。例外：`getTableSql()` 内部失败会吞掉异常并返回 `null`。
 - 若你在“迁移后验收”阶段使用 `SchemaInspector`，事务回滚只能由外层迁移执行器负责，`SchemaInspector` 不参与任何回滚。
 
 ```arkts

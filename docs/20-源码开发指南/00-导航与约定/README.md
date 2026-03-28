@@ -10,9 +10,9 @@
 
 ## 1. 文档边界（只写真实行为）
 - 本文档只描述仓库中可追溯的代码与配置行为，不写“计划中能力”。
-- 对外 API 以 `OCORM/Index.ets` 实际导出为准，不以历史文档为准。
-- 构建与兼容信息以 `build-profile.json5`、模块 `module.json5`、`oh-package.json5`、`BuildProfile.ets` 为准。
-- 测试档位行为以 `entry/src/main/ets/suites/index.ets` 和 `entry/src/main/ets/testcore/CommandSuiteRunner.ets` 为准。
+- 对外 API 以 `Index.ets` 实际导出为准，不以历史文档为准。
+- 构建与兼容信息以 `../build-profile.json5`、模块 `module.json5`、`oh-package.json5`、`BuildProfile.ets` 为准。
+- 测试档位行为以 `../entry/src/main/ets/suites/index.ets` 和 `../entry/src/main/ets/testcore/CommandSuiteRunner.ets` 为准。
 
 ## 2. 建议阅读顺序
 1. [01-文档阅读路径](./01-文档阅读路径.md)
@@ -21,25 +21,25 @@
 4. 再进入能力章节（`01-工程与构建` 到 `19-Roadmap与变更计划`）
 
 ## 3. 关键源码索引
-- 导出入口：`OCORM/Index.ets`
+- 导出入口：`Index.ets`
 - 统一导出：
-  - `OCORM/src/main/ets/core/index.ets`
-  - `OCORM/src/main/ets/database/index.ets`
-  - `OCORM/src/main/ets/query/index.ets`
-  - `OCORM/src/main/ets/repository/index.ets`
+  - `src/main/ets/core/index.ets`
+  - `src/main/ets/database/index.ets`
+  - `src/main/ets/query/index.ets`
+  - `src/main/ets/repository/index.ets`
 - 构建配置：
-  - `build-profile.json5`（根工程 products/modules）
-  - `OCORM/build-profile.json5`（HAR release 混淆）
-  - `OCORM/src/main/module.json5`（`type: har`）
-  - `entry/src/main/module.json5`（`type: entry`）
-  - `OCORM/src/ohosTest/module.json5`（`type: feature`）
+  - `../build-profile.json5`（根工程 products/modules）
+  - `build-profile.json5`（HAR release 混淆）
+  - `src/main/module.json5`（`type: har`）
+  - `../entry/src/main/module.json5`（`type: entry`）
+  - `src/ohosTest/module.json5`（`type: feature`）
 - 版本口径：
-  - `OCORM/BuildProfile.ets`（`HAR_VERSION = '3.0.2'`）
-  - `OCORM/oh-package.json5`（`version: "3.0.2"`）
+  - `BuildProfile.ets`（`HAR_VERSION = '3.0.2'`）
+  - `oh-package.json5`（`version: "3.0.2"`）
 - 测试档位：
-  - `entry/src/main/ets/suites/index.ets`
-  - `entry/src/main/ets/entryability/EntryAbility.ets`
-  - `entry/src/main/ets/testcore/CommandSuiteRunner.ets`
+  - `../entry/src/main/ets/suites/index.ets`
+  - `../entry/src/main/ets/entryability/EntryAbility.ets`
+  - `../entry/src/main/ets/testcore/CommandSuiteRunner.ets`
 
 ## 4. 文档维护约定
 - 涉及 API 变更：先改对应章节，再回写本目录三篇总览文档。
@@ -50,19 +50,19 @@
 
 ```bash
 # 正确示例：先看公共导出面，再追到子模块导出，最后看实现
-rg "export \\{" OCORM/Index.ets
-rg "export \\{ OCORMInit|export \\{ QueryBuilder|export \\{ DatabaseConfig" OCORM/src/main/ets -g "index.ets"
-rg "class DatabaseConfig|function OCORMInit|class QueryExecutor" OCORM/src/main/ets
+rg "export \\{" Index.ets
+rg "export \\{ OCORMInit|export \\{ QueryBuilder|export \\{ DatabaseConfig" src/main/ets -g "index.ets"
+rg "class DatabaseConfig|function OCORMInit|class QueryExecutor" src/main/ets
 ```
 
 ```bash
 # 常见错误示例：只看历史文档，不看当前源码导出
 # (错误不是命令语法错误，而是流程错误)
-rg "OCORMInit" OCORM/docs
+rg "OCORMInit" docs
 ```
 
 预期行为：
-- 正确流程会先锁定 `OCORM/Index.ets` 的真实 export，再定位到 `src/main/ets/*/index.ets` 与实现文件。
+- 正确流程会先锁定 `Index.ets` 的真实 export，再定位到 `src/main/ets/*/index.ets` 与实现文件。
 - 错误流程容易把“文档提到过的能力”当成“当前版本稳定 API”。
 
 ```arkts
@@ -88,5 +88,5 @@ import { OCORMInit } from 'ocorm/src/main/ets/core/OrmInit'
 ```
 
 预期行为：
-- 正确示例与 `OCORM/Index.ets` 对齐，属于稳定公开面。
+- 正确示例与 `Index.ets` 对齐，属于稳定公开面。
 - 错误示例会把内部实现路径暴露给业务层，升级时极易断裂。

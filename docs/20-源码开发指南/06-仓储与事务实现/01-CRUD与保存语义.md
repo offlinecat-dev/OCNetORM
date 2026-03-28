@@ -234,10 +234,10 @@ try {
 - 事务回调里只使用回调提供的 `txRepo` 写入，不要再使用外层仓储实例。
 
 ## 9. 参考源码
-- `OCORM/src/main/ets/repository/Repository.ets`
-- `OCORM/src/main/ets/repository/BatchOperations.ets`
-- `OCORM/src/main/ets/repository/RepositoryTransactionGuardSupport.ets`
-- `OCORM/src/main/ets/errors/TransactionError.ets`
+- `src/main/ets/repository/Repository.ets`
+- `src/main/ets/repository/BatchOperations.ets`
+- `src/main/ets/repository/RepositoryTransactionGuardSupport.ets`
+- `src/main/ets/errors/TransactionError.ets`
 
 ## 10. 变更记录
 - 2026-03-27：补全 CRUD、保存语义、误用边界和失败语义说明

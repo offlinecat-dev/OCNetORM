@@ -26,6 +26,6 @@ repo.createQueryBuilder().whereIn('id', [])
 语义结果：抛 `InvalidConditionError('id', 'IN 条件不能为空')`（由 `QueryBuilder.whereIn` 入参校验触发）。
 
 ## 源码定位
-- `OCORM/src/main/ets/query/QueryBuilder.ets`
-- `OCORM/src/main/ets/query/PredicateBuilder.ets`
-- `OCORM/src/main/ets/types/ConditionOperator.ets`
+- `src/main/ets/query/QueryBuilder.ets`
+- `src/main/ets/query/PredicateBuilder.ets`
+- `src/main/ets/types/ConditionOperator.ets`

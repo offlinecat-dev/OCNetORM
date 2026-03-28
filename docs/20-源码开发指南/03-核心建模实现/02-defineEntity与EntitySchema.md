@@ -160,13 +160,13 @@ defineEntity('User', {
 - 运行中动态频繁增改字段（该模式更适合离线定义 + 迁移）
 
 ## 9. 源码定位
-- `OCORM/src/main/ets/core/EntitySchema.ets:81`
-- `OCORM/src/main/ets/core/EntitySchema.ets:102`
-- `OCORM/src/main/ets/core/EntitySchema.ets:145`
-- `OCORM/src/main/ets/core/EntitySchema.ets:236`
-- `OCORM/src/main/ets/core/EntitySchema.ets:266`
-- `OCORM/src/main/ets/core/EntitySchema.ets:279`
-- `OCORM/src/main/ets/core/EntitySchema.ets:301`
-- `OCORM/src/main/ets/core/EntitySchema.ets:319`
-- `OCORM/src/test/Stage1Core/LocalUnit.test.ets:166`
-- `OCORM/src/test/Stage1Core/LocalUnit.test.ets:196`
+- `src/main/ets/core/EntitySchema.ets:81`
+- `src/main/ets/core/EntitySchema.ets:102`
+- `src/main/ets/core/EntitySchema.ets:145`
+- `src/main/ets/core/EntitySchema.ets:236`
+- `src/main/ets/core/EntitySchema.ets:266`
+- `src/main/ets/core/EntitySchema.ets:279`
+- `src/main/ets/core/EntitySchema.ets:301`
+- `src/main/ets/core/EntitySchema.ets:319`
+- `src/test/Stage1Core/LocalUnit.test.ets:166`
+- `src/test/Stage1Core/LocalUnit.test.ets:196`

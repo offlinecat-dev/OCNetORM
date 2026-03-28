@@ -30,11 +30,11 @@ tools\hvigor-local.cmd assembleHap
 ```
 
 ## 3. release 配置事实（真实文件）
-- `OCORM/build-profile.json5`：`buildOptionSet.release.arkOptions.obfuscation.ruleOptions.enable = true`
+- `build-profile.json5`：`buildOptionSet.release.arkOptions.obfuscation.ruleOptions.enable = true`
 - 根 `build-profile.json5`：只有 `debug` 与 `release` 两个模式
 
 ```json5
-// OCORM/build-profile.json5（release 节选）
+// build-profile.json5（release 节选）
 {
   "buildOptionSet": [
     {
@@ -87,6 +87,6 @@ tools\hvigor-local.cmd assembleHap
 ## 5. 引用的真实文件
 - `tools/hvigor-local.cmd`
 - `build-profile.json5`
-- `OCORM/build-profile.json5`
-- `OCORM/obfuscation-rules.txt`
-- `OCORM/consumer-rules.txt`
+- `build-profile.json5`
+- `obfuscation-rules.txt`
+- `consumer-rules.txt`

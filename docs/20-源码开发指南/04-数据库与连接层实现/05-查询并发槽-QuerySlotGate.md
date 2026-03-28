@@ -73,6 +73,6 @@ async function reproduceSlotTimeout(): Promise<void> {
 - 当 `maxConcurrentQueries` 设置为 `0`，所有等待者会被放行，不再限流。
 
 ## 关键源码路径
-- `OCORM/src/main/ets/database/manager/QuerySlotGate.ets`
-- `OCORM/src/main/ets/database/DatabaseManager.ets`
-- `OCORM/src/main/ets/database/DatabaseConfig.ets`
+- `src/main/ets/database/manager/QuerySlotGate.ets`
+- `src/main/ets/database/DatabaseManager.ets`
+- `src/main/ets/database/DatabaseConfig.ets`

@@ -122,10 +122,10 @@ try {
 - 批量导入优先 `batchInsert`，并根据场景设置 `BatchInsertOptions`。
 
 ## 8. 参考源码
-- `OCORM/src/main/ets/repository/Repository.ets`
-- `OCORM/src/main/ets/repository/RepositoryTransactionGuardSupport.ets`
-- `OCORM/src/main/ets/repository/TransactionManager.ets`
-- `OCORM/src/main/ets/repository/BatchOperations.ets`
-- `OCORM/src/main/ets/repository/BatchInsertOptions.ets`
-- `OCORM/src/main/ets/repository/rawsql/RawSqlGuards.ets`
-- `OCORM/src/main/ets/errors/TransactionError.ets`
+- `src/main/ets/repository/Repository.ets`
+- `src/main/ets/repository/RepositoryTransactionGuardSupport.ets`
+- `src/main/ets/repository/TransactionManager.ets`
+- `src/main/ets/repository/BatchOperations.ets`
+- `src/main/ets/repository/BatchInsertOptions.ets`
+- `src/main/ets/repository/rawsql/RawSqlGuards.ets`
+- `src/main/ets/errors/TransactionError.ets`

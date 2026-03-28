@@ -32,6 +32,6 @@ const rawRows = await new QueryExecutor(
 语义结果：`getRaw()` 不做实体关系装配，`with/withLazy/withCount` 不会写入结果行。
 
 ## 源码定位
-- `OCORM/src/main/ets/query/QueryExecutor.ets`
-- `OCORM/src/main/ets/query/QueryExecutorSqlSupport.ets`
-- `OCORM/src/main/ets/mapping/ResultSetRow.ets`
+- `src/main/ets/query/QueryExecutor.ets`
+- `src/main/ets/query/QueryExecutorSqlSupport.ets`
+- `src/main/ets/mapping/ResultSetRow.ets`

@@ -29,6 +29,6 @@ cache.get('User', 1)
 语义结果：淘汰按最早写入时间，不按最近访问时间。
 
 ## 源码定位
-- `OCORM/src/main/ets/query/QueryCache.ets`
-- `OCORM/src/main/ets/repository/Repository.ets`
-- `OCORM/src/main/ets/query/QueryExecutor.ets`
+- `src/main/ets/query/QueryCache.ets`
+- `src/main/ets/repository/Repository.ets`
+- `src/main/ets/query/QueryExecutor.ets`

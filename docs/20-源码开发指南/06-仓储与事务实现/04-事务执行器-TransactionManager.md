@@ -198,11 +198,11 @@ try {
 - 需要重试时优先重试幂等逻辑，不要把非幂等写入直接塞进 `retries > 0` 的事务。
 
 ## 9. 参考源码
-- `OCORM/src/main/ets/repository/TransactionManager.ets`
-- `OCORM/src/main/ets/repository/TransactionOptions.ets`
-- `OCORM/src/main/ets/repository/TransactionResult.ets`
-- `OCORM/src/main/ets/errors/TransactionError.ets`
-- `OCORM/src/main/ets/repository/Repository.ets`
+- `src/main/ets/repository/TransactionManager.ets`
+- `src/main/ets/repository/TransactionOptions.ets`
+- `src/main/ets/repository/TransactionResult.ets`
+- `src/main/ets/errors/TransactionError.ets`
+- `src/main/ets/repository/Repository.ets`
 
 ## 10. 变更记录
 - 2026-03-27：补全事务执行路径、超时/重试/只读语义与失败边界说明

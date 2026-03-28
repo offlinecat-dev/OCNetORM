@@ -154,18 +154,18 @@ storage.registerManyToMany('User', 'Tag', 'tags', 'user_tags', 'user_id', 'tag_i
 ```
 
 ## 9. 源码定位
-- `OCORM/src/main/ets/core/RelationMetadata.ets:31`
-- `OCORM/src/main/ets/core/RelationMetadata.ets:61`
-- `OCORM/src/main/ets/core/ManyToManyMetadata.ets:13`
-- `OCORM/src/main/ets/core/ManyToManyMetadata.ets:30`
-- `OCORM/src/main/ets/core/MorphToMetadata.ets:9`
-- `OCORM/src/main/ets/core/MorphToMetadata.ets:30`
-- `OCORM/src/main/ets/core/MetadataStorage.ets:151`
-- `OCORM/src/main/ets/core/MetadataStorage.ets:243`
-- `OCORM/src/main/ets/core/MetadataStorage.ets:264`
-- `OCORM/src/main/ets/query/QueryBuilderRelationStrategySupport.ets:28`
-- `OCORM/src/main/ets/query/QueryBuilderRelationStrategySupport.ets:73`
-- `OCORM/src/main/ets/query/QueryBuilderRelationStrategySupport.ets:85`
-- `OCORM/src/main/ets/query/QueryBuilderRelationStrategySupport.ets:89`
-- `OCORM/src/test/Stage5Query/QueryBuilder.test.ets:244`
-- `OCORM/src/test/Stage5Query/QueryBuilder.test.ets:269`
+- `src/main/ets/core/RelationMetadata.ets:31`
+- `src/main/ets/core/RelationMetadata.ets:61`
+- `src/main/ets/core/ManyToManyMetadata.ets:13`
+- `src/main/ets/core/ManyToManyMetadata.ets:30`
+- `src/main/ets/core/MorphToMetadata.ets:9`
+- `src/main/ets/core/MorphToMetadata.ets:30`
+- `src/main/ets/core/MetadataStorage.ets:151`
+- `src/main/ets/core/MetadataStorage.ets:243`
+- `src/main/ets/core/MetadataStorage.ets:264`
+- `src/main/ets/query/QueryBuilderRelationStrategySupport.ets:28`
+- `src/main/ets/query/QueryBuilderRelationStrategySupport.ets:73`
+- `src/main/ets/query/QueryBuilderRelationStrategySupport.ets:85`
+- `src/main/ets/query/QueryBuilderRelationStrategySupport.ets:89`
+- `src/test/Stage5Query/QueryBuilder.test.ets:244`
+- `src/test/Stage5Query/QueryBuilder.test.ets:269`
