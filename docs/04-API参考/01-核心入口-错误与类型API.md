@@ -117,19 +117,19 @@ import {
 
 @Table('users')
 export class User {
-  @PrimaryKey('id')
+  @PrimaryKey({ name: 'id', autoIncrement: true })
   id: number = 0
 
   @Column({ name: 'user_name', type: ColumnType.TEXT, unique: true })
   userName: string = ''
 
-  @CreatedAt('created_at')
+  @CreatedAt({ name: 'created_at' })
   createdAt: number = 0
 
-  @UpdatedAt('updated_at')
+  @UpdatedAt({ name: 'updated_at' })
   updatedAt: number = 0
 
-  @SoftDelete('deleted_at')
+  @SoftDelete({ name: 'deleted_at' })
   deletedAt: number | null = null
 }
 ```

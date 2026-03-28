@@ -18,7 +18,7 @@ import {
   Table
 } from 'ocorm'
 
-@Table({ name: 'users' })
+@Table('users')
 class User {
   @PrimaryKey({ autoIncrement: true })
   id: number = 0
